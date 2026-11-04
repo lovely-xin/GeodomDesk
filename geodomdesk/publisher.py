@@ -5,6 +5,7 @@ import base64
 import contextlib
 import concurrent.futures
 import datetime
+import errno
 import fcntl
 import hashlib
 import html
@@ -330,6 +331,22 @@ def public_complete(directory, manifest):
     return True
 
 
+def publish_directory(stage, destination, manifest):
+    try:
+        os.replace(stage, destination)
+    except OSError as error:
+        if error.errno != errno.EXDEV:
+            raise
+        # systemd can bind-mount two paths separately even on the same device.
+        # Only verified public files remain in stage; private installer inputs are gone.
+        with tempfile.TemporaryDirectory(prefix=".publish-", dir=destination.parent) as temporary:
+            copied = Path(temporary) / "release"
+            shutil.copytree(stage, copied)
+            if not public_complete(copied, manifest):
+                raise ValueError("Copied publication verification failed")
+            os.replace(copied, destination)
+
+
 def publish_pointer(public, manifest):
     version = manifest["version"]
     release_id = manifest.get("release_id", version)
@@ -432,11 +449,7 @@ def run(config):
             if shutil.disk_usage(state).free < 1024 * 1024 * 1024:
                 raise ValueError("At least 1 GiB free disk is required")
             destination.parent.mkdir(parents=True, exist_ok=True)
-            # Stage on the public filesystem so the complete directory rename is atomic.
-            if state.stat().st_dev != destination.parent.stat().st_dev:
-                raise ValueError(
-                    "Build state and publication must be on the same filesystem for atomic releases"
-                )
+            # Build privately, then publish atomically on the destination mount.
             with tempfile.TemporaryDirectory(prefix="build-", dir=state) as temporary:
                 stage = Path(temporary) / "release"
                 stage.mkdir()
@@ -504,7 +517,7 @@ def run(config):
                 (stage / "publication.json").write_bytes(channel.stable_json(manifest))
                 if not public_complete(stage, manifest):
                     raise ValueError("Final publication verification failed")
-                os.replace(stage, destination)
+                publish_directory(stage, destination, manifest)
         (public / "geodomdesk.png").write_bytes((ROOT / "assets/geodomdesk.png").read_bytes())
         publish_pointer(public, manifest)
         if config.get("activate_portal"):

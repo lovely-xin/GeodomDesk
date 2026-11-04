@@ -1,6 +1,7 @@
 import base64
 import contextlib
 import copy
+import errno
 import hashlib
 import io
 import json
@@ -456,6 +457,37 @@ class PublisherTests(unittest.TestCase):
                 self.p.run(self.config)
         self.assertEqual(before, (self.public / "latest.json").read_bytes())
         self.assertFalse((self.public / "releases/1.5.3").exists())
+        self.assertEqual([], list(self.state.glob("build-*")))
+
+    def test_cross_mount_publication_and_failed_copy_preserve_atomicity(self):
+        real_replace = self.p.os.replace
+
+        def across_mounts(source, destination):
+            source = Path(source)
+            if source.name == "release" and source.parent.parent == self.state:
+                raise OSError(errno.EXDEV, "Separate systemd bind mounts")
+            return real_replace(source, destination)
+
+        release, _, local = self.build_fixture()
+        with self.mocks(release, local), mock.patch.object(
+            self.p.os, "replace", side_effect=across_mounts
+        ):
+            self.p.run(self.config)
+        before = (self.public / "latest.json").read_bytes()
+        target = self.public / "releases/1.5.2"
+        manifest = json.loads((target / "publication.json").read_text())
+        self.assertTrue(self.p.public_complete(target, manifest))
+        self.assertEqual([], list(target.parent.glob(".publish-*")))
+
+        release, _, local = self.build_fixture("1.5.3")
+        with self.mocks(release, local), mock.patch.object(
+            self.p.os, "replace", side_effect=across_mounts
+        ), mock.patch.object(self.p.shutil, "copytree", side_effect=OSError(errno.ENOSPC, "Full")):
+            with self.assertRaises(OSError):
+                self.p.run(self.config)
+        self.assertEqual(before, (self.public / "latest.json").read_bytes())
+        self.assertFalse((self.public / "releases/1.5.3").exists())
+        self.assertEqual([], list(target.parent.glob(".publish-*")))
         self.assertEqual([], list(self.state.glob("build-*")))
 
     def test_same_official_version_rebuild_and_revision_rollback(self):
