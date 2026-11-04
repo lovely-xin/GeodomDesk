@@ -16,7 +16,8 @@ try {
   }
   if(-not (Test-Path -LiteralPath $installed) -or -not $service -or $service.Status -ne 'Running'){throw 'Native installation did not create the GeodomDesk application and running service'}
   $info=[Diagnostics.FileVersionInfo]::GetVersionInfo($installed)
-  if($info.ProductName -cne 'GeodomDesk' -or $info.ProductVersion -notmatch ('^'+[regex]::Escape($config.version)+'(?:\.|$)')){throw 'Installed application identity or version mismatch'}
+  Write-Output ('Installed native client: {0} {1}' -f $info.ProductName,$info.ProductVersion)
+  if($info.ProductName -cne 'GeodomDesk' -or $info.ProductVersion -notmatch ('^'+[regex]::Escape($config.version)+'(?:[.+]|$)')){throw 'Installed application identity or version mismatch'}
   function Invoke-Client([string[]]$ClientArgs) {
     $start=[Diagnostics.ProcessStartInfo]::new()
     $start.FileName=$installed

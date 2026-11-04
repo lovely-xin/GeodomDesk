@@ -249,13 +249,13 @@ jobs:
           New-Item -ItemType Directory -Force ../windows-artifact | Out-Null
           Copy-Item ./target/release/rustdesk-portable-packer.exe ../windows-artifact/GeodomDesk.exe
           Copy-Item ./geodomdesk-build-config.json ../windows-artifact/
-      - name: Verify native Windows installation and fixed connection settings
-        run: ../geodomdesk/test-windows-native.ps1 -Package ../windows-artifact/GeodomDesk.exe -BuildConfig geodomdesk-build-config.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: geodomdesk-windows
           if-no-files-found: error
           path: windows-artifact/*
+      - name: Verify native Windows installation and fixed connection settings
+        run: ../geodomdesk/test-windows-native.ps1 -Package ../windows-artifact/GeodomDesk.exe -BuildConfig geodomdesk-build-config.json
 
   ubuntu:
     needs: [plan, bridge]
