@@ -1,0 +1,46 @@
+  Widget importOfficialUserData() {
+    return _Card(title: 'Data migration', children: [
+      Text(translate('Import RustDesk device records only; existing records and settings are preserved.'))
+          .marginOnly(left: _kContentHMargin),
+      _Button('Import RustDesk device records', _importOfficialUserData,
+          enabled: !_importingUserData),
+      if (_importUserDataStatus.isNotEmpty)
+        Text(_importUserDataStatus).marginOnly(left: _kContentHMargin),
+    ]);
+  }
+
+  Future<void> _importOfficialUserData() async {
+    final confirmed = await gFFI.dialogManager.show<bool>((setState, close, context) {
+      return CustomAlertDialog(
+        title: translate('Import RustDesk device records'),
+        content: Text(translate('Only recent devices, favorites and aliases will be imported. Server settings, passwords, login tokens and display preferences will not be imported.')),
+        actions: [
+          dialogButton('Cancel', onPressed: () => close(false), isOutline: true),
+          dialogButton('Import', onPressed: () => close(true)),
+        ],
+        onCancel: () => close(false),
+      );
+    });
+    if (confirmed != true || !mounted) return;
+    setState(() { _importingUserData = true; _importUserDataStatus = ''; });
+    try {
+      final result = jsonDecode(await bind.mainImportOfficialUserData());
+      await bind.mainLoadRecentPeers();
+      await bind.mainLoadFavPeers();
+      if (!mounted) return;
+      setState(() {
+        _importUserDataStatus = '${translate('Import complete')}: '
+            '${translate('Added')} ${result['added']}, '
+            '${translate('Existing')} ${result['existing']}, '
+            '${translate('Skipped')} ${result['skipped']}, '
+            '${translate('Favorites')} +${result['favorites_added']}';
+      });
+    } catch (_) {
+      if (mounted) setState(() {
+        _importUserDataStatus = translate('Unable to import RustDesk device records. Check that RustDesk user data exists for this user.');
+      });
+    } finally {
+      if (mounted) setState(() => _importingUserData = false);
+    }
+  }
+

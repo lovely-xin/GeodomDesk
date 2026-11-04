@@ -10,6 +10,7 @@ GeodomDesk 基于官方 RustDesk 稳定版，支持 Windows x64、Ubuntu amd64�
 | `customizations/identity.py` | 应用、服务、配置、IPC、进程与本机监听隔离 |
 | `customizations/account_login.py` | 账号登录错误处理及重试控制 |
 | `customizations/update_channel.py` | 更新检查、公钥及更新界面适配 |
+| `customizations/user_data.py` | 设置页的可选设备记录导入入口 |
 | `customizations/branding.py` | 图标与 Logo 资源 |
 | `customizations/upstream.py` | 基线校验与三方合并 |
 | `customizations/build.py` | 组合定制、版本记录和统一写入 |
@@ -30,6 +31,12 @@ GeodomDesk 基于官方 RustDesk 稳定版，支持 Windows x64、Ubuntu amd64�
 客户端本机直接 IP 监听使用 TCP **21128**，局域网发现使用 UDP **21129**，服务端端口不变。手动直接 IP 连接时需要指定被控端的监听端口；通过设备 ID 建立的点对点连接沿用官方流程。局域网自动发现与官方客户端隔离。
 
 服务端要求账号登录时取消重连计时器，并去重打开原有登录窗口。登录成功后只重连一次，取消后不继续重试。被控端访问密码和临时网络错误沿用官方流程。此界面修复只在 GeodomDesk 生效。
+
+## 可选数据导入
+
+入口位于「设置 → 通用 → 数据迁移」。操作前确认范围，完成后显示新增、已存在、跳过和收藏数量。默认不导入，现有记录不覆盖，重复操作不重复添加。
+
+只读取当前用户的官方客户端资料，导入最近连接、收藏、设备名称与备注；不复制配置文件，不导入服务器设置、本机身份、密码、登录令牌、信任凭据或画质设置，也不更改官方客户端。
 
 ## 上游同步与版本
 

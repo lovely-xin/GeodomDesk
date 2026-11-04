@@ -117,6 +117,9 @@ class PackagingTests(unittest.TestCase):
         for name in ["geodomdesk_update.rs", "geodomdesk_auth.rs"]:
             (source / "src").mkdir(exist_ok=True)
             (source / "src" / name).write_text("// untracked generated module\n")
+        (source / "src/geodomdesk_import").mkdir()
+        (source / "src/geodomdesk_import.rs").write_text("mod data;\n")
+        (source / "src/geodomdesk_import/data.rs").write_text("// import parser\n")
         custom = self.root / "custom"
         (custom / "reference").mkdir(parents=True)
         (custom / "reference/Cargo.toml").write_text("reviewed baseline")
@@ -128,6 +131,8 @@ class PackagingTests(unittest.TestCase):
             "src/geodomdesk_update.rs",
             "src/geodomdesk_auth.rs",
             "geodomdesk/reference/Cargo.toml",
+            "src/geodomdesk_import.rs",
+            "src/geodomdesk_import/data.rs",
         ]:
             self.assertIn("geodomdesk-client/" + name, names)
 

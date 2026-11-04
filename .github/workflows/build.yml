@@ -61,6 +61,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
         with:
           toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
           workspaces: client
@@ -77,7 +78,7 @@ jobs:
       - name: Prepare and validate source
         run: |
           python3 ../geodomdesk/prepare_client.py --source . --version "$VERSION" --build-number "$BUILD_NUMBER"
-          python3 ../geodomdesk/verify_rust.py --source .
+          CARGO_TARGET_DIR="$PWD/target/geodomdesk-verification" python3 ../geodomdesk/verify_rust.py --source .
       - name: Generate Flutter bridge
         run: |
           cargo install cargo-expand --version 1.0.95 --locked
@@ -119,6 +120,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
         with:
           toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt
           targets: x86_64-pc-windows-msvc
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
@@ -220,6 +222,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
         with:
           toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
           workspaces: client

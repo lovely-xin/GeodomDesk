@@ -19,7 +19,7 @@ import prepare_client
 ROOT = Path(__file__).resolve().parent
 
 
-def verify(source=None):
+def verify(source=None, update_lock=False):
     with tempfile.TemporaryDirectory(prefix="geodomdesk-rust-check-") as tmp:
         work = Path(tmp)
         if source is None:
@@ -41,6 +41,9 @@ def verify(source=None):
             "src/geodomdesk_auth.rs",
         ]:
             (crate / name).write_bytes((source / name).read_bytes())
+        (crate / "src/geodomdesk_import_data.rs").write_bytes(
+            (source / "src/geodomdesk_import/data.rs").read_bytes()
+        )
         # artifact policy is unchanged by preparation; use the full source if present.
         policy = source / "src/update_metadata/artifact.rs"
         if not policy.exists():
@@ -69,6 +72,7 @@ serde_derive = "1"
 serde_json = "1"
 sodiumoxide = "0.2"
 url = "=2.5.4"
+toml = "0.5"
 """
         )
         (crate / "src/lib.rs").write_text(
@@ -78,6 +82,7 @@ pub use anyhow;
 pub use anyhow::bail;
 pub use base64;
 pub use sodiumoxide;
+pub use toml;
 pub type ResultType<T> = anyhow::Result<T>;
 fn get_version_number(s: &str) -> i64 {
     s.split('.').filter_map(|n| n.parse::<i64>().ok()).fold(0, |v, n| v * 100000 + n)
@@ -90,6 +95,7 @@ mod common {
 }
 mod geodomdesk_update;
 mod geodomdesk_auth;
+mod geodomdesk_import_data;
 mod update_metadata;
 fn use_ws() -> bool { true }
 """
@@ -192,7 +198,7 @@ mod geodomdesk_contract_tests {
         env = {**os.environ, "CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS": "fallback"}
         subprocess.run(
             [cargo, "test", "--manifest-path", str(crate / "Cargo.toml")]
-            + (["--locked"] if lock_path.exists() else []),
+            + (["--locked"] if lock_path.exists() and not update_lock else []),
             cwd=crate,
             check=True,
             env=env,
@@ -204,5 +210,6 @@ mod geodomdesk_contract_tests {
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path)
+    parser.add_argument("--update-lock", action="store_true")
     args = parser.parse_args()
-    verify(args.source.resolve() if args.source else None)
+    verify(args.source.resolve() if args.source else None, args.update_lock)

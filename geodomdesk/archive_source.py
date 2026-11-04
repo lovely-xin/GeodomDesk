@@ -21,6 +21,8 @@ def archive(source, customization, output):
             "flutter/lib/generated_bridge.freezed.dart",
             "src/geodomdesk_update.rs",
             "src/geodomdesk_auth.rs",
+            "src/geodomdesk_import.rs",
+            "src/geodomdesk_import/data.rs",
             "geodomdesk-build-config.json",
         ]
     )
