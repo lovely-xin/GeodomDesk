@@ -2,6 +2,11 @@ name: Build GeodomDesk
 
 on:
   workflow_dispatch:
+    inputs:
+      reuse_desktop_run:
+        description: 'Optional failed run with successful, unpublished desktop builds; exact source/recipe checks required'
+        type: string
+        default: ''
   push:
     branches: [main]
     paths: ['geodomdesk/**', '.github/workflows/build.yml', '!geodomdesk/**/*.md', '!geodomdesk/assets/DESIGN.txt']
@@ -30,12 +35,34 @@ jobs:
       upstream_commit: ${{ steps.plan.outputs.upstream_commit }}
       build_number: ${{ steps.plan.outputs.build_number }}
       build: ${{ steps.plan.outputs.build }}
+      reuse_run: ${{ steps.plan.outputs.reuse_run }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        if: inputs.reuse_desktop_run != ''
+        with:
+          name: geodomdesk-windows
+          path: reused-windows
+          run-id: ${{ inputs.reuse_desktop_run }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        if: inputs.reuse_desktop_run != ''
+        with:
+          name: geodomdesk-ubuntu
+          path: reused-ubuntu
+          run-id: ${{ inputs.reuse_desktop_run }}
+          github-token: ${{ github.token }}
+      - name: Check reusable desktop configuration
+        if: inputs.reuse_desktop_run != ''
+        run: |
+          python3 -c 'import json,pathlib; assert json.loads(pathlib.Path("reused-windows/geodomdesk-build-config.json").read_text()) == json.loads(pathlib.Path("reused-ubuntu/geodomdesk-build-config.json").read_text())'
+          python3 -m pip install -r geodomdesk/requirements.txt
       - name: Follow the latest official stable source
         id: plan
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          GEODOMDESK_REUSE_DESKTOP_RUN: ${{ inputs.reuse_desktop_run }}
+          GEODOMDESK_REUSE_CONFIG: reused-windows/geodomdesk-build-config.json
         run: python3 geodomdesk/plan_upstream.py
 
   bridge:
@@ -116,6 +143,7 @@ jobs:
 
   windows:
     needs: [plan, bridge]
+    if: needs.plan.outputs.reuse_run == ''
     runs-on: windows-2022
     timeout-minutes: 180
     defaults:
@@ -229,6 +257,7 @@ jobs:
 
   ubuntu:
     needs: [plan, bridge]
+    if: needs.plan.outputs.reuse_run == ''
     runs-on: ubuntu-22.04
     timeout-minutes: 180
     defaults:
@@ -403,6 +432,13 @@ jobs:
           cp target/aarch64-linux-android/release/liblibrustdesk.so flutter/android/app/src/main/jniLibs/arm64-v8a/librustdesk.so
           cp "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so" flutter/android/app/src/main/jniLibs/arm64-v8a/
           python3 -c 'import build; build.ffi_bindgen_function_refactor()'
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: geodomdesk-android-native
+          if-no-files-found: error
+          path: |
+            client/flutter/android/app/src/main/jniLibs/arm64-v8a/
+            client/geodomdesk-build-config.json
       - name: Configure permanent Android signing identity
         env:
           GEODOMDESK_ANDROID_KEYSTORE: ${{ secrets.GEODOMDESK_ANDROID_KEYSTORE }}
@@ -424,6 +460,8 @@ jobs:
         if: always()
         run: |
           python3 -c 'import os,pathlib; pathlib.Path(os.environ["RUNNER_TEMP"], "geodomdesk-signing.p12").unlink(missing_ok=True); pathlib.Path("flutter/android/key.properties").unlink(missing_ok=True)'
+      - name: Archive corresponding source with generated Android resources
+        run: python3 ../geodomdesk/archive_source.py --source . --customization ../geodomdesk --output ../android-artifact/geodomdesk-source.tar.gz
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: geodomdesk-android
@@ -432,6 +470,7 @@ jobs:
 
   release:
     needs: [plan, windows, ubuntu, android]
+    if: always() && needs.plan.result == 'success' && needs.android.result == 'success' && (needs.plan.outputs.reuse_run != '' || (needs.windows.result == 'success' && needs.ubuntu.result == 'success'))
     env:
       VERSION: ${{ needs.plan.outputs.version }}
       UPSTREAM_COMMIT: ${{ needs.plan.outputs.upstream_commit }}
@@ -445,20 +484,23 @@ jobs:
         with:
           name: geodomdesk-windows
           path: windows
+          run-id: ${{ needs.plan.outputs.reuse_run || github.run_id }}
+          github-token: ${{ github.token }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: geodomdesk-ubuntu
           path: ubuntu
+          run-id: ${{ needs.plan.outputs.reuse_run || github.run_id }}
+          github-token: ${{ github.token }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: geodomdesk-android
           path: android
       - name: Validate all builds and write release descriptor
         run: |
-          cmp windows/geodomdesk-build-config.json ubuntu/geodomdesk-build-config.json
-          cmp windows/geodomdesk-build-config.json android/geodomdesk-build-config.json
+          python3 -c 'import json,pathlib; configs=[json.loads(pathlib.Path(p,"geodomdesk-build-config.json").read_text()) for p in ["windows","ubuntu","android"]]; assert configs[0] == configs[1] == configs[2]'
           python3 -m pip install -r geodomdesk/requirements.txt
-          python3 geodomdesk/release_bundle.py --version "$VERSION" --repository "$GITHUB_REPOSITORY" --windows windows/GeodomDesk.exe --ubuntu ubuntu/geodomdesk.deb --android android/geodomdesk.apk --source-archive ubuntu/geodomdesk-source.tar.gz --build-config windows/geodomdesk-build-config.json --output release
+          python3 geodomdesk/release_bundle.py --version "$VERSION" --repository "$GITHUB_REPOSITORY" --windows windows/GeodomDesk.exe --ubuntu ubuntu/geodomdesk.deb --android android/geodomdesk.apk --source-archive android/geodomdesk-source.tar.gz --build-config windows/geodomdesk-build-config.json --output release
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: geodomdesk-release

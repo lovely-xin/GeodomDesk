@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 import plan_upstream
+from reuse_desktop import source_hash, desktop_recipe
 
 
 class PlanTests(unittest.TestCase):
@@ -87,6 +88,32 @@ class PlanTests(unittest.TestCase):
             self.assertEqual(before, plan_upstream.customization_hash(root))
             (root / "client/module.rs").write_text("// changed implementation\n")
             self.assertNotEqual(before, plan_upstream.customization_hash(root))
+
+    def test_desktop_reuse_ignores_only_android_sources_and_checks_build_recipe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "src").mkdir()
+            (root / "src/main.rs").write_text("fn main() {}")
+            (root / "flutter/android").mkdir(parents=True)
+            resource = root / "flutter/android/colors.xml"
+            resource.write_text("<resources/>")
+            before = source_hash(root)
+            resource.write_text("<resources><!-- icon fix --></resources>")
+            self.assertEqual(source_hash(root), before)
+            (root / "src/main.rs").write_text("fn main() { panic!() }")
+            self.assertNotEqual(source_hash(root), before)
+        workflow = "  RUST_VERSION: '1.85.1'\n  FLUTTER_VERSION: '3.24.5'\n  VCPKG_COMMIT: abc\n  windows:\n    run: cargo build\n  ubuntu:\n    run: flutter build\n  android:\n    run: build apk\n"
+        skipped = workflow.replace(
+            "  windows:\n", "  windows:\n    if: needs.plan.outputs.reuse_run == ''\n"
+        )
+        self.assertEqual(desktop_recipe(workflow), desktop_recipe(skipped))
+        self.assertNotEqual(
+            desktop_recipe(workflow),
+            desktop_recipe(workflow.replace("cargo build", "cargo build --features changed")),
+        )
+        self.assertNotEqual(
+            desktop_recipe(workflow), desktop_recipe(workflow.replace("'1.85.1'", "'1.86.0'"))
+        )
 
 
 if __name__ == "__main__":

@@ -31,6 +31,12 @@ def apply(changes, config):
         changes[prefix + name] = changes[prefix + name].replace("rustdesk-", "geodomdesk-")
     name = "flutter/android/app/src/main/res/values/strings.xml"
     changes[name] = changes[name].replace("RustDesk", "GeodomDesk")
+    # flutter_launcher_icons writes this color into colors.xml.
+    change(
+        "flutter/android/app/src/main/res/values/ic_launcher_background.xml",
+        '    <color name="ic_launcher_background">#ffffff</color>\n',
+        "",
+    )
     defaults = {
         "custom-rendezvous-server": config["server"]["host"],
         "key": config["server"]["key"],

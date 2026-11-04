@@ -95,12 +95,20 @@ def plan():
     build_number = int(os.environ["GITHUB_RUN_NUMBER"]) * 100 + int(
         os.environ.get("GITHUB_RUN_ATTEMPT", "1")
     )
+    reuse_run = os.environ.get("GEODOMDESK_REUSE_DESKTOP_RUN", "")
+    if reuse_run:
+        from reuse_desktop import validate
+
+        build_number = validate(
+            reuse_run, os.environ["GEODOMDESK_REUSE_CONFIG"], version, upstream, get
+        )
     result = {
         "version": version,
         "official_tag": tag,
         "upstream_commit": upstream,
         "build_number": str(build_number),
         "build": "true" if required else "false",
+        "reuse_run": reuse_run,
     }
     with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
         for key, value in result.items():

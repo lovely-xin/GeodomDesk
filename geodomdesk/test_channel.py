@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import unittest
 import zipfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest import mock
 
@@ -203,6 +204,10 @@ class ChannelTests(unittest.TestCase):
             self.assertIn('android:scheme="geodomdesk"', manifest)
             self.assertNotIn('android:label="RustDesk', manifest)
             self.assertIn("cn.geodom.geodomdesk.DEBUG_BOOT_COMPLETED", manifest)
+            background = ET.parse(
+                source / "flutter/android/app/src/main/res/values/ic_launcher_background.xml"
+            )
+            self.assertEqual(background.findall("color[@name='ic_launcher_background']"), [])
             self.assertIn(
                 "dir.join(APP_PREFIX)", (source / "libs/portable/src/main.rs").read_text()
             )
