@@ -62,10 +62,12 @@ pub(crate) fn release_id(raw: &str) -> ResultType<String> {
 pub(crate) fn artifact_file(raw: &str) -> Option<&str> {
     let tail = raw.strip_prefix(BASE_URL)?.strip_prefix("/releases/")?;
     let (id, name) = tail.split_once('/')?;
-    release_id(&format!("{BASE_URL}/releases/{id}" )).ok()?;
+    release_id(&format!("{BASE_URL}/releases/{id}")).ok()?;
     let expected_prefix = format!("geodomdesk-{id}-");
     if !name.starts_with(&expected_prefix)
-        || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
     {
         return None;
     }
@@ -78,8 +80,13 @@ mod tests {
 
     #[test]
     fn accepts_only_the_dedicated_channel() {
-        assert_eq!(release_id(&format!("{BASE_URL}/releases/1.5.2/")).unwrap(), "1.5.2");
-        for tail in ["../1.5.2", "v1.5.2", "1.5.2?x", "1.5.2/#x", "%31.5.2", "1.5.2//"] {
+        assert_eq!(
+            release_id(&format!("{BASE_URL}/releases/1.5.2/")).unwrap(),
+            "1.5.2"
+        );
+        for tail in [
+            "../1.5.2", "v1.5.2", "1.5.2?x", "1.5.2/#x", "%31.5.2", "1.5.2//",
+        ] {
             assert!(release_id(&format!("{BASE_URL}/releases/{tail}")).is_err());
         }
         assert!(release_id("https://github.com/rustdesk/rustdesk/releases/tag/1.5.2").is_err());
@@ -87,8 +94,16 @@ mod tests {
 
     #[test]
     fn rejects_paths_and_foreign_payloads() {
-        assert!(artifact_file(&format!("{BASE_URL}/releases/1.5.2/geodomdesk-1.5.2-windows-x64.exe")).is_some());
-        for name in ["rustdesk.exe", "geodomdesk-1.5.2-../file.exe", "geodomdesk-1.5.2-x.exe?q", "geodomdesk-1.5.2-x%2eexe"] {
+        assert!(artifact_file(&format!(
+            "{BASE_URL}/releases/1.5.2/geodomdesk-1.5.2-windows-x64.exe"
+        ))
+        .is_some());
+        for name in [
+            "rustdesk.exe",
+            "geodomdesk-1.5.2-../file.exe",
+            "geodomdesk-1.5.2-x.exe?q",
+            "geodomdesk-1.5.2-x%2eexe",
+        ] {
             assert!(artifact_file(&format!("{BASE_URL}/releases/1.5.2/{name}")).is_none());
         }
     }

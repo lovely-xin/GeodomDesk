@@ -1,4 +1,5 @@
 """GeodomDesk's public update contract, compatible with the RustDesk updater."""
+
 import base64
 import hashlib
 import json
@@ -23,25 +24,27 @@ def version_tuple(version):
 
 
 def release_parts(release_id):
-    match = re.fullmatch(r'([0-9]+\.[0-9]+\.[0-9]+)(?:-r([1-9][0-9]*))?', release_id or '')
+    match = re.fullmatch(r"([0-9]+\.[0-9]+\.[0-9]+)(?:-r([1-9][0-9]*))?", release_id or "")
     if not match:
-        raise ValueError('Invalid GeodomDesk release id')
+        raise ValueError("Invalid GeodomDesk release id")
     version_tuple(match[1])
     revision = int(match[2] or 0)
     if revision >= 2**64:
-        raise ValueError('Build number exceeds the client range')
+        raise ValueError("Build number exceeds the client range")
     return match[1], revision
 
 
 def make_release_id(version, build_number):
     version_tuple(version)
     if type(build_number) is not int or not 0 < build_number < 2**64:
-        raise ValueError('Invalid GeodomDesk build number')
-    return f'{version}-r{build_number}'
+        raise ValueError("Invalid GeodomDesk build number")
+    return f"{version}-r{build_number}"
 
 
 def stable_json(value):
-    return (json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    return (
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode()
 
 
 def sha256(path):
@@ -59,15 +62,19 @@ def release_url(version):
 
 def file_name(version, platform, fmt):
     release_parts(version)
-    return f"geodomdesk-{version}-{'windows-x64' if platform == 'windows' else 'ubuntu-amd64'}.{fmt}"
+    return (
+        f"geodomdesk-{version}-{'windows-x64' if platform == 'windows' else 'ubuntu-amd64'}.{fmt}"
+    )
 
 
 def public_key(seed):
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-    return Ed25519PrivateKey.from_private_bytes(seed).public_key().public_bytes(
-        serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    return (
+        Ed25519PrivateKey.from_private_bytes(seed)
+        .public_key()
+        .public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
     )
 
 
@@ -80,18 +87,34 @@ def signed_metadata(version, published_at, artifacts, seed):
         raise ValueError("Both native Windows EXE and Ubuntu DEB updates are required")
     for item in artifacts:
         name = file_name(version, item["platform"], item["format"])
-        if (item["file_name"] != name or item["url"] != release_url(version) + name
-                or not re.fullmatch(r"[0-9a-f]{64}", item["sha256"])
-                or not 0 < item["size"] <= 512 * 1024 * 1024):
+        if (
+            item["file_name"] != name
+            or item["url"] != release_url(version) + name
+            or not re.fullmatch(r"[0-9a-f]{64}", item["sha256"])
+            or not 0 < item["size"] <= 512 * 1024 * 1024
+        ):
             raise ValueError("Invalid update artifact")
-    metadata = stable_json({
-        "schema_version": 1, "app": APP, "package_id": APP,
-        "version": official_version, "release_id": version, "published_at": published_at,
-        "signature_key_id": KEY_ID, "artifacts": artifacts,
-    })
+    metadata = stable_json(
+        {
+            "schema_version": 1,
+            "app": APP,
+            "package_id": APP,
+            "version": official_version,
+            "release_id": version,
+            "published_at": published_at,
+            "signature_key_id": KEY_ID,
+            "artifacts": artifacts,
+        }
+    )
     signature = Ed25519PrivateKey.from_private_bytes(seed).sign(SIGNATURE_CONTEXT + metadata)
-    sidecar = stable_json({"schema_version": 1, "algorithm": "ed25519", "key_id": KEY_ID,
-                           "signature": base64.b64encode(signature).decode()})
+    sidecar = stable_json(
+        {
+            "schema_version": 1,
+            "algorithm": "ed25519",
+            "key_id": KEY_ID,
+            "signature": base64.b64encode(signature).decode(),
+        }
+    )
     return metadata, sidecar
 
 
@@ -99,6 +122,12 @@ def artifact(path, version, platform, arch, fmt):
     path = Path(path)
     if path.name != file_name(version, platform, fmt):
         raise ValueError("Unexpected artifact name")
-    return {"platform": platform, "arch": arch, "format": fmt, "file_name": path.name,
-            "size": path.stat().st_size, "sha256": sha256(path),
-            "url": release_url(version) + path.name}
+    return {
+        "platform": platform,
+        "arch": arch,
+        "format": fmt,
+        "file_name": path.name,
+        "size": path.stat().st_size,
+        "sha256": sha256(path),
+        "url": release_url(version) + path.name,
+    }

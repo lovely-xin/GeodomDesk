@@ -41,7 +41,7 @@ if [ -n "${SUDO_USER:-}" ]; then
   user_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
   if [ -n "$user_home" ] && [ -f "$user_home/.config/geodomdesk/GeodomDesk.toml" ]; then PRESERVE_PASSWORD=1; fi
 fi
-printf 'GeodomDesk is distributed under AGPL-3.0. Source: https://www.qcjcpt.com/downloads/geodomdesk/releases/%s/\n' "$VERSION"
+printf 'GeodomDesk is distributed under AGPL-3.0. Source: https://www.qcjcpt.com/downloads/geodomdesk/\n'
 if [ "$KIND" = deb ]; then
   command -v apt-get >/dev/null || { echo 'This installer requires Ubuntu/Debian. Choose the RPM installer for Fedora/RHEL.' >&2; exit 1; }
   [ "$(dpkg --print-architecture)" = "$ARCH" ] || { echo 'Wrong CPU architecture.' >&2; exit 1; }

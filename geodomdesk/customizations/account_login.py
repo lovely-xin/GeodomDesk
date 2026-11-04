@@ -1,22 +1,41 @@
 """Account-login errors stop connection retries and open the existing login dialog."""
 
+
 def apply(changes):
     change = changes.replace
-    change('src/lib.rs', 'mod updater;', 'mod updater;\nmod geodomdesk_auth;')
-    change('src/client.rs', '''    fn on_establish_connection_error(&self, err: String) {
-        let title''', '''    fn on_establish_connection_error(&self, err: String) {
+    change("src/lib.rs", "mod updater;", "mod updater;\nmod geodomdesk_auth;")
+    change(
+        "src/client.rs",
+        """    fn on_establish_connection_error(&self, err: String) {
+        let title""",
+        """    fn on_establish_connection_error(&self, err: String) {
         if crate::geodomdesk_auth::requires_login(&err) {
             self.msgbox("account-login-required", "Connection Error", &err, "");
             return;
         }
-        let title''')
-    change('src/client.rs', '''pub fn check_if_retry(msgtype: &str, title: &str, text: &str, retry_for_relay: bool) -> bool {
-    msgtype''', '''pub fn check_if_retry(msgtype: &str, title: &str, text: &str, retry_for_relay: bool) -> bool {
-    !crate::geodomdesk_auth::requires_login(text) && msgtype''')
-    change('flutter/lib/models/model.dart', "import '../common/widgets/dialog.dart';",
-           "import '../common/widgets/dialog.dart';\nimport '../common/widgets/login.dart';")
-    change('flutter/lib/models/model.dart', '  var _reconnects = 1;', '  var _reconnects = 1;\n  bool _accountLoginPending = false;')
-    change('flutter/lib/models/model.dart', '''    if (type == 're-input-password') {''', '''    if (type == 'account-login-required' ||
+        let title""",
+    )
+    change(
+        "src/client.rs",
+        """pub fn check_if_retry(msgtype: &str, title: &str, text: &str, retry_for_relay: bool) -> bool {
+    msgtype""",
+        """pub fn check_if_retry(msgtype: &str, title: &str, text: &str, retry_for_relay: bool) -> bool {
+    !crate::geodomdesk_auth::requires_login(text) && msgtype""",
+    )
+    change(
+        "flutter/lib/models/model.dart",
+        "import '../common/widgets/dialog.dart';",
+        "import '../common/widgets/dialog.dart';\nimport '../common/widgets/login.dart';",
+    )
+    change(
+        "flutter/lib/models/model.dart",
+        "  var _reconnects = 1;",
+        "  var _reconnects = 1;\n  bool _accountLoginPending = false;",
+    )
+    change(
+        "flutter/lib/models/model.dart",
+        """    if (type == 're-input-password') {""",
+        """    if (type == 'account-login-required' ||
         (title == 'Connection Error' &&
             (text == 'Please log in before starting a remote connection' ||
              text == 'Invalid account or password'))) {
@@ -24,8 +43,12 @@ def apply(changes):
       return;
     }
 
-    if (type == 're-input-password') {''')
-    change('flutter/lib/models/model.dart', '  void resetRestartReconnectState() {', '''  Future<void> _requestAccountLogin(
+    if (type == 're-input-password') {""",
+    )
+    change(
+        "flutter/lib/models/model.dart",
+        "  void resetRestartReconnectState() {",
+        """  Future<void> _requestAccountLogin(
       SessionID sessionId, OverlayDialogManager dialogManager) async {
     _timer?.cancel();
     _timer = null;
@@ -52,4 +75,5 @@ def apply(changes):
     }
   }
 
-  void resetRestartReconnectState() {''')
+  void resetRestartReconnectState() {""",
+    )

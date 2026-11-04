@@ -1,4 +1,5 @@
 """Merge reviewed customizations into official source before writing any changes."""
+
 import hashlib
 import json
 import subprocess
@@ -8,41 +9,53 @@ from pathlib import Path
 
 def load_baseline(root):
     baseline = {}
-    for name, digest in json.loads((root/'source-lock.json').read_text(encoding='utf-8')).items():
-        data = (root/'reference'/name).read_bytes()
+    for name, digest in json.loads((root / "source-lock.json").read_text(encoding="utf-8")).items():
+        data = (root / "reference" / name).read_bytes()
         if hashlib.sha256(data).hexdigest() != digest:
-            raise ValueError('Customization baseline is damaged: '+name)
+            raise ValueError("Customization baseline is damaged: " + name)
         baseline[name] = data
     return baseline
 
 
 def merge(source, baseline, changes):
     merged = {}
-    with tempfile.TemporaryDirectory(prefix='geodomdesk-merge-') as temporary:
+    with tempfile.TemporaryDirectory(prefix="geodomdesk-merge-") as temporary:
         temporary = Path(temporary)
         for name, original in baseline.items():
-            path = source/name
+            path = source / name
             if not path.is_file():
-                raise ValueError('Upstream removed a customized source file: '+name)
+                raise ValueError("Upstream removed a customized source file: " + name)
             current, changed = path.read_bytes(), changes[name]
             if changed == original:
                 merged[name] = current
             elif current == original:
                 merged[name] = changed
             else:
-                (temporary/'base').write_bytes(original)
-                (temporary/'custom').write_bytes(changed)
-                result = subprocess.run(['git', 'merge-file', '-p', str(path),
-                    str(temporary/'base'), str(temporary/'custom')], capture_output=True)
+                (temporary / "base").write_bytes(original)
+                (temporary / "custom").write_bytes(changed)
+                result = subprocess.run(
+                    [
+                        "git",
+                        "merge-file",
+                        "-p",
+                        str(path),
+                        str(temporary / "base"),
+                        str(temporary / "custom"),
+                    ],
+                    capture_output=True,
+                )
                 if result.returncode:
-                    raise ValueError('Upstream/customization conflict: '+name+
-                                     '; existing releases remain unchanged')
+                    raise ValueError(
+                        "Upstream/customization conflict: "
+                        + name
+                        + "; existing releases remain unchanged"
+                    )
                 merged[name] = result.stdout
     for name, data in changes.items():
         if name in baseline:
             continue
-        path = source/name
-        if name.startswith('src/') and path.exists() and path.read_bytes() != data:
-            raise ValueError('Upstream added a conflicting custom source file: '+name)
+        path = source / name
+        if name.startswith("src/") and path.exists() and path.read_bytes() != data:
+            raise ValueError("Upstream added a conflicting custom source file: " + name)
         merged[name] = data
     return merged

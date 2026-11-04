@@ -1,5 +1,6 @@
 """Exact edits against the reviewed upstream baseline."""
 
+
 def replace_once(text, before, after):
     if text.count(before) != 1:
         raise ValueError(f"Upstream changed; review required: {before[:85]!r}")

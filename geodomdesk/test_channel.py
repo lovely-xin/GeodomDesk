@@ -23,244 +23,389 @@ ROOT = Path(__file__).resolve().parent
 
 class ChannelTests(unittest.TestCase):
     def test_version_contract(self):
-        self.assertLess(channel.version_tuple('1.5.2'), channel.version_tuple('1.5.10'))
-        self.assertEqual(channel.release_parts(channel.make_release_id('1.5.1', 102)), ('1.5.1', 102))
-        for value in ['v1.5.2', '1.5.2-beta', '1.5.2/..', '1.05.2', '1.5', '1.5.65536', None]:
+        self.assertLess(channel.version_tuple("1.5.2"), channel.version_tuple("1.5.10"))
+        self.assertEqual(
+            channel.release_parts(channel.make_release_id("1.5.1", 102)), ("1.5.1", 102)
+        )
+        for value in ["v1.5.2", "1.5.2-beta", "1.5.2/..", "1.05.2", "1.5", "1.5.65536", None]:
             with self.subTest(value=value), self.assertRaises(ValueError):
                 channel.version_tuple(value)
 
     def metadata(self):
         items = []
         for platform, arch, fmt in channel.TARGETS:
-            name = channel.file_name('1.5.2', platform, fmt)
-            items.append({'platform':platform, 'arch':arch, 'format':fmt, 'file_name':name,
-                          'url':channel.release_url('1.5.2')+name, 'size':1234, 'sha256':'a'*64})
+            name = channel.file_name("1.5.2", platform, fmt)
+            items.append(
+                {
+                    "platform": platform,
+                    "arch": arch,
+                    "format": fmt,
+                    "file_name": name,
+                    "url": channel.release_url("1.5.2") + name,
+                    "size": 1234,
+                    "sha256": "a" * 64,
+                }
+            )
         return items
 
     def test_ed25519_signature_and_tamper(self):
         seed = bytes(range(32))
-        metadata, signature = channel.signed_metadata('1.5.2', '2026-11-04T00:00:00Z', self.metadata(), seed)
-        sig = base64.b64decode(json.loads(signature)['signature'])
+        metadata, signature = channel.signed_metadata(
+            "1.5.2", "2026-11-04T00:00:00Z", self.metadata(), seed
+        )
+        sig = base64.b64decode(json.loads(signature)["signature"])
         key = Ed25519PublicKey.from_public_bytes(channel.public_key(seed))
-        key.verify(sig, channel.SIGNATURE_CONTEXT+metadata)
-        for context, data in [(channel.SIGNATURE_CONTEXT, metadata+b' '), (b'RustDesk update metadata v1\n', metadata)]:
+        key.verify(sig, channel.SIGNATURE_CONTEXT + metadata)
+        for context, data in [
+            (channel.SIGNATURE_CONTEXT, metadata + b" "),
+            (b"RustDesk update metadata v1\n", metadata),
+        ]:
             with self.assertRaises(InvalidSignature):
-                key.verify(sig, context+data)
-        self.assertEqual(json.loads(metadata)['app'], 'geodomdesk')
+                key.verify(sig, context + data)
+        self.assertEqual(json.loads(metadata)["app"], "geodomdesk")
 
     def test_rejects_foreign_or_incomplete_artifacts(self):
         items = self.metadata()
-        for changed in [items[:1], items*2, [{**items[0], 'url':'https://example.com/file'}, items[1]],
-                        [{**items[0], 'sha256':'abc'}, items[1]], [{**items[0], 'size':0}, items[1]],
-                        [{**items[0], 'file_name':'rustdesk.exe'}, items[1]]]:
+        for changed in [
+            items[:1],
+            items * 2,
+            [{**items[0], "url": "https://example.com/file"}, items[1]],
+            [{**items[0], "sha256": "abc"}, items[1]],
+            [{**items[0], "size": 0}, items[1]],
+            [{**items[0], "file_name": "rustdesk.exe"}, items[1]],
+        ]:
             with self.subTest(changed=changed), self.assertRaises(ValueError):
-                channel.signed_metadata('1.5.2', '2026-11-04T00:00:00Z', changed, bytes(32))
+                channel.signed_metadata("1.5.2", "2026-11-04T00:00:00Z", changed, bytes(32))
 
-    @unittest.skipUnless((ROOT/'reference').is_dir(), 'upstream reference is a local review fixture')
+    @unittest.skipUnless(
+        (ROOT / "reference").is_dir(), "upstream reference is a local review fixture"
+    )
     def test_preparation_and_upstream_drift(self):
-        with tempfile.TemporaryDirectory(dir=ROOT, prefix='test-source-') as tmp:
+        with tempfile.TemporaryDirectory(dir=ROOT, prefix="test-source-") as tmp:
             source = Path(tmp)
-            lock = json.loads((ROOT/'source-lock.json').read_text())
+            lock = json.loads((ROOT / "source-lock.json").read_text())
             for name in lock:
-                path = source/name
+                path = source / name
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes((ROOT/'reference'/name).read_bytes())
-            (source/'res').mkdir(exist_ok=True)
-            (source/'flutter/windows/runner/resources').mkdir(parents=True)
-            cargo=source/'Cargo.toml'
-            cargo.write_bytes(cargo.read_bytes().replace(b'version = "1.5.1"',b'version = "1.5.2"',1))
-            cargo_lock=source/'Cargo.lock'
-            cargo_lock.write_bytes(cargo_lock.read_bytes().replace(b'name = "rustdesk"\nversion = "1.5.1"',b'name = "rustdesk"\nversion = "1.5.2"',1))
-            bad = source/'src/common.rs'
+                path.write_bytes((ROOT / "reference" / name).read_bytes())
+            (source / "res").mkdir(exist_ok=True)
+            (source / "flutter/windows/runner/resources").mkdir(parents=True)
+            cargo = source / "Cargo.toml"
+            cargo.write_bytes(
+                cargo.read_bytes().replace(b'version = "1.5.1"', b'version = "1.5.2"', 1)
+            )
+            cargo_lock = source / "Cargo.lock"
+            cargo_lock.write_bytes(
+                cargo_lock.read_bytes().replace(
+                    b'name = "rustdesk"\nversion = "1.5.1"',
+                    b'name = "rustdesk"\nversion = "1.5.2"',
+                    1,
+                )
+            )
+            bad = source / "src/common.rs"
             original = bad.read_bytes()
-            bad.write_bytes(original.replace(b'if is_custom_client() {',b'if upstream_changed_condition() {',1))
+            bad.write_bytes(
+                original.replace(
+                    b"if is_custom_client() {", b"if upstream_changed_condition() {", 1
+                )
+            )
             with self.assertRaises(ValueError):
-                prepare_client.prepare(source,'1.5.2')
-            self.assertIn(b'version = "1.5.2"',cargo.read_bytes())
-            self.assertNotIn(b'GeodomDesk', (source/'libs/hbb_common/src/config.rs').read_bytes())
-            bad.write_bytes(original+b'// upstream change outside the customization\n')
+                prepare_client.prepare(source, "1.5.2")
+            self.assertIn(b'version = "1.5.2"', cargo.read_bytes())
+            self.assertNotIn(b"GeodomDesk", (source / "libs/hbb_common/src/config.rs").read_bytes())
+            bad.write_bytes(original + b"// upstream change outside the customization\n")
             with contextlib.redirect_stdout(io.StringIO()):
-                prepare_client.prepare(source,'1.5.2')
-            self.assertTrue(bad.read_bytes().endswith(b'// upstream change outside the customization\n'))
-            self.assertIn(b'version = "1.5.2"',cargo.read_bytes())
-            self.assertIn('RwLock::new("GeodomDesk".to_owned())', (source/'libs/hbb_common/src/config.rs').read_text())
-            self.assertIn('dir.join(APP_PREFIX)', (source/'libs/portable/src/main.rs').read_text())
-            self.assertNotIn('RuntimeBroker_rustdesk.exe', (source/'src/privacy_mode/win_topmost_window.rs').read_text())
-            self.assertIn('client.get(crate::geodomdesk_update::LATEST_URL)', bad.read_text(encoding='utf-8'))
-            self.assertNotIn('client.post(&url).json(&request)', bad.read_text(encoding='utf-8'))
-            self.assertIn('GeodomDesk update metadata v1', (source/'src/update_metadata.rs').read_text())
-            windows = (source/'src/platform/windows.rs').read_text(encoding='utf-8')
+                prepare_client.prepare(source, "1.5.2")
+            self.assertTrue(
+                bad.read_bytes().endswith(b"// upstream change outside the customization\n")
+            )
+            self.assertIn(b'version = "1.5.2"', cargo.read_bytes())
+            self.assertIn(
+                'RwLock::new("GeodomDesk".to_owned())',
+                (source / "libs/hbb_common/src/config.rs").read_text(),
+            )
+            self.assertIn(
+                "dir.join(APP_PREFIX)", (source / "libs/portable/src/main.rs").read_text()
+            )
+            self.assertNotIn(
+                "RuntimeBroker_rustdesk.exe",
+                (source / "src/privacy_mode/win_topmost_window.rs").read_text(),
+            )
+            self.assertIn(
+                "client.get(crate::geodomdesk_update::LATEST_URL)", bad.read_text(encoding="utf-8")
+            )
+            self.assertNotIn("client.post(&url).json(&request)", bad.read_text(encoding="utf-8"))
+            self.assertIn(
+                "GeodomDesk update metadata v1", (source / "src/update_metadata.rs").read_text()
+            )
+            windows = (source / "src/platform/windows.rs").read_text(encoding="utf-8")
             self.assertNotIn('file_name.starts_with("rustdesk-")', windows)
             self.assertIn('file_name.starts_with("geodomdesk-")', windows)
-            self.assertIn('geodomdesk-verified-', (source/'src/platform/windows/verified_update.rs').read_text())
-            self.assertNotIn('pipe\\rustdesk_term_', (source/'src/server/terminal_service.rs').read_text(encoding='utf-8'))
-            self.assertIn('port = 21128;', (source/'src/rendezvous_mediator.rs').read_text(encoding='utf-8'))
-            self.assertIn('21129', (source/'src/lan.rs').read_text())
-            self.assertIn('GEODOMDESK_RUNNER_WIN32_WINDOW', (source/'flutter/windows/runner/win32_window.cpp').read_text())
-            self.assertNotIn('if (!bind.isCustomClient()) {', (source/'flutter/lib/common.dart').read_text(encoding='utf-8'))
-            ui=(source/'flutter/lib/models/model.dart').read_text(encoding='utf-8')
-            self.assertIn('await loginDialog()',ui)
-            self.assertIn('_accountLoginPending',ui)
-            self.assertIn("'account-login-required'",ui)
+            self.assertIn(
+                "geodomdesk-verified-",
+                (source / "src/platform/windows/verified_update.rs").read_text(),
+            )
+            self.assertNotIn(
+                "pipe\\rustdesk_term_",
+                (source / "src/server/terminal_service.rs").read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "port = 21128;", (source / "src/rendezvous_mediator.rs").read_text(encoding="utf-8")
+            )
+            self.assertIn("21129", (source / "src/lan.rs").read_text())
+            self.assertIn(
+                "GEODOMDESK_RUNNER_WIN32_WINDOW",
+                (source / "flutter/windows/runner/win32_window.cpp").read_text(),
+            )
+            self.assertNotIn(
+                "if (!bind.isCustomClient()) {",
+                (source / "flutter/lib/common.dart").read_text(encoding="utf-8"),
+            )
+            ui = (source / "flutter/lib/models/model.dart").read_text(encoding="utf-8")
+            self.assertIn("await loginDialog()", ui)
+            self.assertIn("_accountLoginPending", ui)
+            self.assertIn("'account-login-required'", ui)
 
     def test_customizations_do_not_change_wire_protocol(self):
         from customizations import upstream, identity, update_channel, account_login
         from customizations.edits import SourceEdits
+
         baseline = upstream.load_baseline(ROOT)
-        changes = SourceEdits({name: data.decode('utf-8') for name, data in baseline.items()})
-        cfg = json.loads((ROOT/'client-channel.json').read_text(encoding='utf-8'))
+        changes = SourceEdits({name: data.decode("utf-8") for name, data in baseline.items()})
+        cfg = json.loads((ROOT / "client-channel.json").read_text(encoding="utf-8"))
         identity.apply(changes)
         account_login.apply(changes)
         update_channel.apply(changes, cfg)
-        self.assertFalse(any(name.endswith('.proto') for name in changes))
+        self.assertFalse(any(name.endswith(".proto") for name in changes))
         # These two local listener changes must not rewrite shared server port constants.
-        for name, old, new in [('src/lan.rs', '(RENDEZVOUS_PORT + 3) as _', '21129'),
-                              ('src/rendezvous_mediator.rs', 'port = RENDEZVOUS_PORT + 2;', 'port = 21128;')]:
-            self.assertEqual(changes[name], baseline[name].decode('utf-8').replace(old, new, 1))
+        for name, old, new in [
+            ("src/lan.rs", "(RENDEZVOUS_PORT + 3) as _", "21129"),
+            ("src/rendezvous_mediator.rs", "port = RENDEZVOUS_PORT + 2;", "port = 21128;"),
+        ]:
+            self.assertEqual(changes[name], baseline[name].decode("utf-8").replace(old, new, 1))
 
     def test_no_stock_installation_targets(self):
-        for name in ['install-windows.ps1.in', 'linux-installer.sh.in']:
-            text = (ROOT/name).read_text()
-            self.assertNotIn('RustDesk\\RustDesk.exe', text)
-            self.assertNotIn('/usr/bin/rustdesk', text)
+        for name in ["install-windows.ps1.in", "linux-installer.sh.in"]:
+            text = (ROOT / name).read_text()
+            self.assertNotIn("RustDesk\\RustDesk.exe", text)
+            self.assertNotIn("/usr/bin/rustdesk", text)
             self.assertNotIn("-Name 'RustDesk'", text)
-            self.assertIn('Preserve' if name.endswith('ps1.in') else 'PRESERVE_PASSWORD', text)
+            self.assertIn("Preserve" if name.endswith("ps1.in") else "PRESERVE_PASSWORD", text)
 
 
-@unittest.skipUnless(os.name == 'posix', 'Linux publisher and packaging tests')
+@unittest.skipUnless(os.name == "posix", "Linux publisher and packaging tests")
 class PublisherTests(unittest.TestCase):
     def setUp(self):
         import publisher
+
         self.p = publisher
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
-        self.state = self.root/'state'
+        self.state = self.root / "state"
         self.state.mkdir()
-        self.portal = self.root/'ROOT/index.html'
+        self.portal = self.root / "ROOT/index.html"
         self.portal.parent.mkdir()
-        self.portal.write_text(publisher.START+'old client'+publisher.END)
-        self.public = self.portal.parent/'downloads/geodomdesk'
-        self.seed = self.root/'seed'
+        self.portal.write_text(publisher.START + "old client" + publisher.END)
+        self.public = self.portal.parent / "downloads/geodomdesk"
+        self.seed = self.root / "seed"
         self.seed.write_bytes(bytes(range(32)))
-        self.config = {'state_dir':str(self.state), 'public_dir':str(self.public),
-            'portal_file':str(self.portal), 'repository':'owner/GeodomDesk', 'enabled':True,
-            'public_key':base64.b64encode(channel.public_key(self.seed.read_bytes())).decode(),
-            'signing_key':str(self.seed), 'host':'www.qcjcpt.com', 'relay':'', 'api':'',
-            'key':'AKJROlsG4WAI103ADqoVrBs4Nb7+6dpbHYVO+MVd81Y=', 'websocket_port':21114}
+        self.config = {
+            "state_dir": str(self.state),
+            "public_dir": str(self.public),
+            "portal_file": str(self.portal),
+            "repository": "owner/GeodomDesk",
+            "enabled": True,
+            "public_key": base64.b64encode(channel.public_key(self.seed.read_bytes())).decode(),
+            "signing_key": str(self.seed),
+            "host": "www.qcjcpt.com",
+            "relay": "",
+            "api": "",
+            "key": "AKJROlsG4WAI103ADqoVrBs4Nb7+6dpbHYVO+MVd81Y=",
+            "websocket_port": 21114,
+        }
 
     def tearDown(self):
         self.temp.cleanup()
 
-    def build_fixture(self, version='1.5.2', build_number=0):
+    def build_fixture(self, version="1.5.2", build_number=0):
         release_id = channel.make_release_id(version, build_number) if build_number else version
-        release = {'tag_name':version, 'published_at':'2026-11-04T00:00:00Z', 'assets':[]}
-        build = {'schema_version':1, 'app':'GeodomDesk', 'package_id':'geodomdesk',
-                 'repository':self.config['repository'], 'version':version, 'base_url':channel.BASE_URL,
-                 'key_id':channel.KEY_ID, 'public_key':self.config['public_key'], 'upstream_commit':'a'*40,
-                 'artifacts':[]}
+        release = {"tag_name": version, "published_at": "2026-11-04T00:00:00Z", "assets": []}
+        build = {
+            "schema_version": 1,
+            "app": "GeodomDesk",
+            "package_id": "geodomdesk",
+            "repository": self.config["repository"],
+            "version": version,
+            "base_url": channel.BASE_URL,
+            "key_id": channel.KEY_ID,
+            "public_key": self.config["public_key"],
+            "upstream_commit": "a" * 40,
+            "artifacts": [],
+        }
         build.update(release_id=release_id, build_number=build_number)
         local = {}
         for platform, arch, fmt in channel.TARGETS:
-            name = channel.file_name(release_id,platform,fmt)
-            path = self.root/name
-            path.write_bytes((b'MZ' if fmt=='exe' else b'deb')*1024)
-            build['artifacts'].append({'platform':platform, 'arch':arch, 'format':fmt,
-                'file_name':name, 'size':path.stat().st_size, 'sha256':channel.sha256(path)})
+            name = channel.file_name(release_id, platform, fmt)
+            path = self.root / name
+            path.write_bytes((b"MZ" if fmt == "exe" else b"deb") * 1024)
+            build["artifacts"].append(
+                {
+                    "platform": platform,
+                    "arch": arch,
+                    "format": fmt,
+                    "file_name": name,
+                    "size": path.stat().st_size,
+                    "sha256": channel.sha256(path),
+                }
+            )
             local[name] = path
-        source = self.root/f'geodomdesk-{release_id}-source.tar.gz'
-        source.write_bytes(b'source fixture')
-        build['source']={'file_name':source.name, 'size':source.stat().st_size, 'sha256':channel.sha256(source)}
-        descriptor = self.root/'geodomdesk-build.json'
+        source = self.root / f"geodomdesk-{release_id}-source.tar.gz"
+        source.write_bytes(b"source fixture")
+        build["source"] = {
+            "file_name": source.name,
+            "size": source.stat().st_size,
+            "sha256": channel.sha256(source),
+        }
+        descriptor = self.root / "geodomdesk-build.json"
         descriptor.write_bytes(channel.stable_json(build))
-        local.update({source.name:source, descriptor.name:descriptor})
-        for n,path in local.items():
-            release['assets'].append({'name':n, 'size':path.stat().st_size, 'digest':'sha256:'+channel.sha256(path),
-                'url':f'https://api.github.com/repos/owner/GeodomDesk/releases/assets/{len(release["assets"])+1}',
-                'browser_download_url':f'https://github.com/owner/GeodomDesk/releases/download/{version}/{n}'})
-        return release,build,local
+        local.update({source.name: source, descriptor.name: descriptor})
+        for n, path in local.items():
+            release["assets"].append(
+                {
+                    "name": n,
+                    "size": path.stat().st_size,
+                    "digest": "sha256:" + channel.sha256(path),
+                    "url": f'https://api.github.com/repos/owner/GeodomDesk/releases/assets/{len(release["assets"])+1}',
+                    "browser_download_url": f"https://github.com/owner/GeodomDesk/releases/download/{version}/{n}",
+                }
+            )
+        return release, build, local
 
     def mocks(self, release, local):
         stack = contextlib.ExitStack()
-        stack.enter_context(mock.patch.object(self.p,'release_info',return_value=(release,'https://api.github.com/repos/owner/GeodomDesk',{})))
-        stack.enter_context(mock.patch.object(self.p,'download',side_effect=lambda asset,*args:local[asset['name']]))
-        stack.enter_context(mock.patch.object(self.p,'check_deb'))
-        def pack(payload,asset,config,version,stage,license,destination):
-            destination.write_bytes(b'installer fixture windows')
-        stack.enter_context(mock.patch.object(self.p.installer,'make_windows',side_effect=pack))
-        stack.enter_context(mock.patch.object(self.p.installer,'make_linux',side_effect=lambda *a:a[-1].write_bytes(b'installer fixture linux')))
+        stack.enter_context(
+            mock.patch.object(
+                self.p,
+                "release_info",
+                return_value=(release, "https://api.github.com/repos/owner/GeodomDesk", {}),
+            )
+        )
+        stack.enter_context(
+            mock.patch.object(
+                self.p, "download", side_effect=lambda asset, *args: local[asset["name"]]
+            )
+        )
+        stack.enter_context(mock.patch.object(self.p, "check_deb"))
+
+        def pack(payload, asset, config, version, stage, license, destination):
+            destination.write_bytes(b"installer fixture windows")
+
+        stack.enter_context(mock.patch.object(self.p.installer, "make_windows", side_effect=pack))
+        stack.enter_context(
+            mock.patch.object(
+                self.p.installer,
+                "make_linux",
+                side_effect=lambda *a: a[-1].write_bytes(b"installer fixture linux"),
+            )
+        )
         return stack
 
     def test_disabled_leaves_existing_downloads_and_portal(self):
-        self.config['enabled']=False
+        self.config["enabled"] = False
         self.p.run(self.config)
         self.assertFalse(self.public.exists())
-        self.assertIn('old client',self.portal.read_text())
+        self.assertIn("old client", self.portal.read_text())
 
     def test_publish_signed_metadata_then_pointer(self):
-        release,_,local=self.build_fixture()
-        with self.mocks(release,local):
+        release, _, local = self.build_fixture()
+        with self.mocks(release, local):
             self.p.run(self.config)
             self.p.run(self.config)
-        latest=json.loads((self.public/'latest.json').read_text())
-        self.assertEqual(latest['url'],channel.release_url('1.5.2'))
-        target=self.public/'releases/1.5.2'
-        metadata=(target/channel.METADATA_NAME).read_bytes()
-        signature=json.loads((target/(channel.METADATA_NAME+'.sig')).read_bytes())
+        latest = json.loads((self.public / "latest.json").read_text())
+        self.assertEqual(latest["url"], channel.release_url("1.5.2"))
+        target = self.public / "releases/1.5.2"
+        metadata = (target / channel.METADATA_NAME).read_bytes()
+        signature = json.loads((target / (channel.METADATA_NAME + ".sig")).read_bytes())
         Ed25519PublicKey.from_public_bytes(channel.public_key(self.seed.read_bytes())).verify(
-            base64.b64decode(signature['signature']),channel.SIGNATURE_CONTEXT+metadata)
-        self.assertFalse((target/'install-windows.ps1').exists())
-        self.assertIn('old client',self.portal.read_text())
+            base64.b64decode(signature["signature"]), channel.SIGNATURE_CONTEXT + metadata
+        )
+        self.assertFalse((target / "install-windows.ps1").exists())
+        self.assertIn("old client", self.portal.read_text())
 
     def test_failed_build_does_not_switch_current(self):
-        release,_,local=self.build_fixture()
-        with self.mocks(release,local):self.p.run(self.config)
-        before=(self.public/'latest.json').read_bytes()
-        release,_,local=self.build_fixture('1.5.3')
-        with self.mocks(release,local),mock.patch.object(self.p.installer,'make_windows',side_effect=RuntimeError('packing failed')):
-            with self.assertRaises(RuntimeError):self.p.run(self.config)
-        self.assertEqual(before,(self.public/'latest.json').read_bytes())
-        self.assertFalse((self.public/'releases/1.5.3').exists())
-        self.assertEqual([],list(self.state.glob('build-*')))
+        release, _, local = self.build_fixture()
+        with self.mocks(release, local):
+            self.p.run(self.config)
+        before = (self.public / "latest.json").read_bytes()
+        release, _, local = self.build_fixture("1.5.3")
+        with self.mocks(release, local), mock.patch.object(
+            self.p.installer, "make_windows", side_effect=RuntimeError("packing failed")
+        ):
+            with self.assertRaises(RuntimeError):
+                self.p.run(self.config)
+        self.assertEqual(before, (self.public / "latest.json").read_bytes())
+        self.assertFalse((self.public / "releases/1.5.3").exists())
+        self.assertEqual([], list(self.state.glob("build-*")))
 
     def test_same_official_version_rebuild_and_revision_rollback(self):
         for revision in [101, 102]:
-            release, _, local = self.build_fixture('1.5.1', revision)
+            release, _, local = self.build_fixture("1.5.1", revision)
             with self.mocks(release, local):
                 self.p.run(self.config)
-            latest = json.loads((self.public/'latest.json').read_text())
-            self.assertEqual(latest['version'], '1.5.1')
-            self.assertEqual(latest['build_number'], revision)
-            self.assertEqual(latest['url'], channel.release_url(f'1.5.1-r{revision}'))
-            metadata = json.loads((self.public/f'releases/1.5.1-r{revision}'/channel.METADATA_NAME).read_text())
-            self.assertEqual(metadata['version'], '1.5.1')
-            self.assertEqual(metadata['release_id'], f'1.5.1-r{revision}')
-        before = (self.public/'latest.json').read_bytes()
-        release, _, local = self.build_fixture('1.5.1', 101)
+            latest = json.loads((self.public / "latest.json").read_text())
+            self.assertEqual(latest["version"], "1.5.1")
+            self.assertEqual(latest["build_number"], revision)
+            self.assertEqual(latest["url"], channel.release_url(f"1.5.1-r{revision}"))
+            metadata = json.loads(
+                (self.public / f"releases/1.5.1-r{revision}" / channel.METADATA_NAME).read_text()
+            )
+            self.assertEqual(metadata["version"], "1.5.1")
+            self.assertEqual(metadata["release_id"], f"1.5.1-r{revision}")
+        before = (self.public / "latest.json").read_bytes()
+        release, _, local = self.build_fixture("1.5.1", 101)
         with self.mocks(release, local), self.assertRaises(ValueError):
             self.p.run(self.config)
-        self.assertEqual(before, (self.public/'latest.json').read_bytes())
+        self.assertEqual(before, (self.public / "latest.json").read_bytes())
 
     def test_rejects_stock_build_wrong_key_and_downgrade(self):
-        release,build,local=self.build_fixture()
-        for field,value in [('app','RustDesk'),('public_key','wrong'),('version','1.5.3'),('repository','rustdesk/rustdesk')]:
-            changed={**build,field:value}
-            with self.subTest(field=field),self.assertRaises(ValueError):
-                self.p.validate_build(changed,release,self.config)
+        release, build, local = self.build_fixture()
+        for field, value in [
+            ("app", "RustDesk"),
+            ("public_key", "wrong"),
+            ("version", "1.5.3"),
+            ("repository", "rustdesk/rustdesk"),
+        ]:
+            changed = {**build, field: value}
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                self.p.validate_build(changed, release, self.config)
         self.public.mkdir(parents=True)
-        (self.public/'latest.json').write_text('{"version":"1.5.3"}')
-        with self.mocks(release,local),self.assertRaises(ValueError):self.p.run(self.config)
+        (self.public / "latest.json").write_text('{"version":"1.5.3"}')
+        with self.mocks(release, local), self.assertRaises(ValueError):
+            self.p.run(self.config)
 
     def test_asset_origin_digest_and_duplicate_validation(self):
-        release,_,_=self.build_fixture()
-        original=copy.deepcopy(release)
-        asset=release['assets'][0]
-        for field,value in [('digest',''),('url','https://example.com/asset'),('browser_download_url','http://github.com/asset'),('size',True)]:
-            release=copy.deepcopy(original);release['assets'][0][field]=value
-            with self.subTest(field=field),self.assertRaises(ValueError):
-                self.p.select_asset(release,asset['name'],'https://api.github.com/repos/owner/GeodomDesk')
-        release=copy.deepcopy(original);release['assets'].append(release['assets'][0])
-        with self.assertRaises(ValueError):self.p.select_asset(release,asset['name'],'https://api.github.com/repos/owner/GeodomDesk')
+        release, _, _ = self.build_fixture()
+        original = copy.deepcopy(release)
+        asset = release["assets"][0]
+        for field, value in [
+            ("digest", ""),
+            ("url", "https://example.com/asset"),
+            ("browser_download_url", "http://github.com/asset"),
+            ("size", True),
+        ]:
+            release = copy.deepcopy(original)
+            release["assets"][0][field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                self.p.select_asset(
+                    release, asset["name"], "https://api.github.com/repos/owner/GeodomDesk"
+                )
+        release = copy.deepcopy(original)
+        release["assets"].append(release["assets"][0])
+        with self.assertRaises(ValueError):
+            self.p.select_asset(
+                release, asset["name"], "https://api.github.com/repos/owner/GeodomDesk"
+            )
 
 
-if __name__=='__main__':
+if __name__ == "__main__":
     unittest.main()
