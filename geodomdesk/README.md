@@ -13,6 +13,7 @@ GeodomDesk 基于官方 RustDesk 稳定版，支持 Windows x64、Ubuntu amd64�
 | `customizations/android.py` | Android 应用标识及移动更新入口 |
 | `customizations/server_config.py` | 三平台固定连接参数，忽略外部注入并隐藏修改入口 |
 | `customizations/about.py` | 关于页面的公司官网、开源来源说明与对应源码入口 |
+| `customizations/printer.py` | 原生打印界面文案、对齐和安装回调生命周期 |
 | `customizations/clone_guard.py` | Ubuntu 克隆配置的硬件绑定与 ID 恢复 |
 | `customizations/user_data.py` | 设置页的可选设备记录导入入口 |
 | `customizations/branding.py` | 独立应用图标，公司标识仅出现在关于页面 |

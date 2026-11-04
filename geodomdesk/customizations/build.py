@@ -13,6 +13,7 @@ from . import (
     branding,
     clone_guard,
     identity,
+    printer,
     server_config,
     update_channel,
     upstream,
@@ -34,6 +35,7 @@ def prepare(source, version, build_number=1):
     android.apply(changes, cfg)
     server_config.apply(changes, cfg)
     about.apply(changes)
+    printer.apply(changes)
     clone_guard.apply(changes)
     account_login.apply(changes)
     update_channel.apply(changes, cfg)

@@ -34,27 +34,11 @@ pub fn main_get_fav() -> Vec<String> {""",
         (root / "client/import_user_data.dart.in").read_text(encoding="utf-8")
         + "  Widget keyboardShortcuts() {",
     )
-    change(
-        name,
-        "{bool enabled = true, String? tip, ButtonStyle? style}) {",
-        "{bool enabled = true, String? tip, ButtonStyle? style,\n"
-        "    String Function(String)? translator}) {",
-    )
-    start = changes[name].index("Widget _Button(String label")
-    end = changes[name].index("Widget _SubButton(", start)
-    button = changes[name][start:end]
-    change(
-        name,
-        button,
-        button.replace("translate(label)", "(translator ?? translate)(label)").replace(
-            "translate(tip)", "(translator ?? translate)(tip)"
-        ),
-    )
     translations = {
         "Import": "导入",
         "Data migration": "数据迁移",
         "Import %upstream%": "导入 %upstream%",
-        "Import %upstream% device records only; existing records and settings are preserved.": "导入 %upstream% 的设备记录，保留现有记录与设置。",
+        "Import recent connections, favorites and device aliases from %upstream%.": "从 %upstream% 导入最近连接、收藏和设备备注。",
         "Only recent devices, favorites and aliases will be imported. Server settings, passwords, login tokens and display preferences will not be imported.": "只导入最近连接、收藏与设备备注。不导入服务器设置、密码、登录令牌及显示偏好。",
         "Import complete": "导入完成",
         "Added": "新增",

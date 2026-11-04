@@ -1,9 +1,13 @@
   Widget importOfficialUserData() {
     return _Card(title: 'Data migration', children: [
-      _Button('Import %upstream%', _importOfficialUserData,
-          enabled: !_importingUserData,
-          tip: 'Import %upstream% device records only; existing records and settings are preserved.',
-          translator: _translateImportText),
+      Align(
+        alignment: Alignment.centerLeft,
+        child: Text(
+          _translateImportText('Import recent connections, favorites and device aliases from %upstream%.'),
+          style: Theme.of(context).textTheme.bodySmall,
+        ),
+      ).marginOnly(left: _kContentHMargin, right: _kContentHMargin, bottom: 10),
+      _Button('Import', _importOfficialUserData, enabled: !_importingUserData),
       if (_importUserDataStatus.isNotEmpty)
         Align(
           alignment: Alignment.centerLeft,
