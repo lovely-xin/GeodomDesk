@@ -41,6 +41,11 @@ def apply(changes, config):
     )
     changes.replace(
         "flutter/lib/mobile/widgets/dialog.dart",
+        "import '../../common.dart';",
+        "import '../../common.dart';\nimport '../../consts.dart';",
+    )
+    changes.replace(
+        "flutter/lib/mobile/widgets/dialog.dart",
         """    void Function(VoidCallback)? upSetState) async {
   const labelWidth = 120.0;""",
         """    void Function(VoidCallback)? upSetState) async {
