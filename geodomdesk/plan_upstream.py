@@ -30,6 +30,7 @@ def customization_hash(root=None):
         root / name
         for name in [
             "client-channel.json",
+            "android-icons.yaml",
             "source-lock.json",
             "requirements.txt",
             "client-tests/Cargo.lock",

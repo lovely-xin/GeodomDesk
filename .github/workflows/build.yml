@@ -13,7 +13,7 @@ permissions:
 
 concurrency:
   group: geodomdesk-native-build
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   RUST_VERSION: '1.85.1'
@@ -98,8 +98,8 @@ jobs:
           sed -i 's/extended_text: 13.0.0/extended_text: 14.0.0/g' flutter/pubspec.yaml
           cd flutter
           flutter pub get
-          dart format lib/models/model.dart lib/common/widgets/login.dart lib/desktop/pages/desktop_setting_page.dart
-          flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings lib/models/model.dart lib/common/widgets/login.dart lib/desktop/pages/desktop_setting_page.dart
+          dart format lib/models/model.dart lib/common/widgets/login.dart lib/desktop/pages/desktop_setting_page.dart lib/mobile/pages/connection_page.dart
+          flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings lib/models/model.dart lib/common/widgets/login.dart lib/desktop/pages/desktop_setting_page.dart lib/mobile/pages/connection_page.dart
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: geodomdesk-bridge
@@ -112,6 +112,7 @@ jobs:
             client/flutter/lib/models/model.dart
             client/flutter/lib/common/widgets/login.dart
             client/flutter/lib/desktop/pages/desktop_setting_page.dart
+            client/flutter/lib/mobile/pages/connection_page.dart
 
   windows:
     needs: [plan, bridge]
@@ -166,6 +167,11 @@ jobs:
           path: client
       - name: Patch the pinned Flutter SDK
         run: python ../geodomdesk/patch_flutter_sdk.py
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        id: native-cache
+        with:
+          path: ${{ runner.temp }}/vcpkg-binary-cache
+          key: geodomdesk-vcpkg-windows-x64-${{ env.VCPKG_COMMIT }}-${{ hashFiles('client/vcpkg.json', 'client/res/vcpkg/**') }}
       - uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2
         with:
           vcpkgDirectory: C:\vcpkg
@@ -173,9 +179,17 @@ jobs:
           doNotCache: false
       - name: Build native dependencies
         shell: bash
+        env:
+          VCPKG_BINARY_SOURCES: clear;files,${{ runner.temp }}/vcpkg-binary-cache,readwrite
         run: |
+          mkdir -p "$RUNNER_TEMP/vcpkg-binary-cache"
           cd "$GITHUB_WORKSPACE/client"
           "$VCPKG_ROOT/vcpkg" install --triplet x64-windows-static --x-install-root="$VCPKG_ROOT/installed"
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        if: always() && steps.native-cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ runner.temp }}/vcpkg-binary-cache
+          key: ${{ steps.native-cache.outputs.cache-primary-key }}
       - name: Build Windows Flutter bundle
         run: |
           python ./build.py --portable --flutter --skip-portable-pack --hwcodec --vram
@@ -261,19 +275,32 @@ jobs:
           path: client
       - name: Patch the pinned Flutter SDK
         run: python3 ../geodomdesk/patch_flutter_sdk.py
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        id: native-cache
+        with:
+          path: ${{ runner.temp }}/vcpkg-binary-cache
+          key: geodomdesk-vcpkg-ubuntu-x64-${{ env.VCPKG_COMMIT }}-${{ hashFiles('client/vcpkg.json', 'client/res/vcpkg/**') }}
       - uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2
         with:
           vcpkgDirectory: /opt/artifacts/vcpkg
           vcpkgGitCommitId: ${{ env.VCPKG_COMMIT }}
           doNotCache: false
       - name: Build native dependencies and Ubuntu package
+        env:
+          VCPKG_BINARY_SOURCES: clear;files,${{ runner.temp }}/vcpkg-binary-cache,readwrite
         run: |
+          mkdir -p "$RUNNER_TEMP/vcpkg-binary-cache"
           "$VCPKG_ROOT/vcpkg" install --triplet x64-linux --x-install-root="$VCPKG_ROOT/installed"
           export DEB_ARCH=amd64
           python3 ./build.py --flutter --hwcodec --unix-file-copy-paste
           mkdir -p ../ubuntu-artifact
           python3 ../geodomdesk/repack_deb.py --input "rustdesk-$VERSION.deb" --output ../ubuntu-artifact/geodomdesk.deb --version "$VERSION" --build-number "$BUILD_NUMBER"
           cp geodomdesk-build-config.json ../ubuntu-artifact/
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        if: always() && steps.native-cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ runner.temp }}/vcpkg-binary-cache
+          key: ${{ steps.native-cache.outputs.cache-primary-key }}
       - name: Archive corresponding source including modified submodules
         run: |
           python3 ../geodomdesk/archive_source.py --source . --customization ../geodomdesk --output ../ubuntu-artifact/geodomdesk-source.tar.gz
@@ -283,8 +310,128 @@ jobs:
           if-no-files-found: error
           path: ubuntu-artifact/*
 
+  android:
+    needs: [plan, bridge]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    defaults:
+      run:
+        working-directory: client
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+      UPSTREAM_COMMIT: ${{ needs.plan.outputs.upstream_commit }}
+      BUILD_NUMBER: ${{ needs.plan.outputs.build_number }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          repository: rustdesk/rustdesk
+          ref: ${{ env.UPSTREAM_COMMIT }}
+          submodules: recursive
+          path: client
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          workspaces: client
+          prefix-key: geodomdesk-android-arm64
+          cache-on-failure: true
+      - uses: subosito/flutter-action@2783a3f08e1baf891508463f8c6653c258246225
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+          cache-dependency-path: |
+            client/flutter/android/**/*.gradle
+            client/flutter/android/gradle/wrapper/gradle-wrapper.properties
+      - uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779
+        id: ndk
+        with:
+          ndk-version: r28c
+          add-to-path: true
+      - name: Install Android build dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y build-essential clang cmake curl gcc-multilib g++-multilib libclang-dev nasm ninja-build pkg-config autoconf automake libtool
+          python3 -m pip install cmake==4.3.0 -r ../geodomdesk/requirements.txt
+          python3 -c "import sysconfig; print(sysconfig.get_path('scripts'))" >> "$GITHUB_PATH"
+          echo "ANDROID_NDK_HOME=${{ steps.ndk.outputs.ndk-path }}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=${{ steps.ndk.outputs.ndk-path }}" >> "$GITHUB_ENV"
+          set +o pipefail
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platforms;android-36' 'build-tools;36.0.0'
+      - name: Prepare independent Android client
+        run: |
+          python3 ../geodomdesk/prepare_client.py --source . --version "$VERSION" --build-number "$BUILD_NUMBER"
+          python3 ../geodomdesk/patch_flutter_sdk.py
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: geodomdesk-bridge
+          path: client
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        id: native-cache
+        with:
+          path: ${{ runner.temp }}/vcpkg-binary-cache
+          key: geodomdesk-vcpkg-android-arm64-${{ env.VCPKG_COMMIT }}-${{ hashFiles('client/vcpkg.json', 'client/res/vcpkg/**') }}
+      - uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2
+        with:
+          vcpkgDirectory: /opt/artifacts/vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT }}
+          doNotCache: false
+      - name: Build Android native dependencies
+        env:
+          VCPKG_BINARY_SOURCES: clear;files,${{ runner.temp }}/vcpkg-binary-cache,readwrite
+        run: |
+          mkdir -p "$RUNNER_TEMP/vcpkg-binary-cache"
+          ./flutter/build_android_deps.sh arm64-v8a
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        if: always() && steps.native-cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ runner.temp }}/vcpkg-binary-cache
+          key: ${{ steps.native-cache.outputs.cache-primary-key }}
+      - name: Build Android Rust library
+        run: |
+          cargo install cargo-ndk --version 3.1.2 --locked
+          ./flutter/ndk_arm64.sh
+          mkdir -p flutter/android/app/src/main/jniLibs/arm64-v8a
+          cp target/aarch64-linux-android/release/liblibrustdesk.so flutter/android/app/src/main/jniLibs/arm64-v8a/librustdesk.so
+          cp "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so" flutter/android/app/src/main/jniLibs/arm64-v8a/
+          python3 -c 'import build; build.ffi_bindgen_function_refactor()'
+      - name: Configure permanent Android signing identity
+        env:
+          GEODOMDESK_ANDROID_KEYSTORE: ${{ secrets.GEODOMDESK_ANDROID_KEYSTORE }}
+          GEODOMDESK_ANDROID_KEY_PASSWORD: ${{ secrets.GEODOMDESK_ANDROID_KEY_PASSWORD }}
+        run: python3 ../geodomdesk/android_release.py prepare --source . --file "$RUNNER_TEMP/geodomdesk-signing.p12"
+      - name: Build and verify signed Android APK
+        run: |
+          sed -i 's/org.gradle.jvmargs=-Xmx1024M/org.gradle.jvmargs=-Xmx2g/' flutter/android/gradle.properties
+          cd flutter
+          flutter pub get
+          dart run flutter_launcher_icons -f ../../geodomdesk/android-icons.yaml
+          flutter build apk --release --target-platform android-arm64 --split-per-abi --build-name "$VERSION" --build-number "$BUILD_NUMBER"
+          cd ..
+          python3 ../geodomdesk/android_release.py verify --source . --file flutter/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
+          mkdir -p ../android-artifact
+          cp flutter/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk ../android-artifact/geodomdesk.apk
+          cp geodomdesk-build-config.json ../android-artifact/
+      - name: Remove temporary signing inputs
+        if: always()
+        run: |
+          python3 -c 'import os,pathlib; pathlib.Path(os.environ["RUNNER_TEMP"], "geodomdesk-signing.p12").unlink(missing_ok=True); pathlib.Path("flutter/android/key.properties").unlink(missing_ok=True)'
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: geodomdesk-android
+          if-no-files-found: error
+          path: android-artifact/*
+
   release:
-    needs: [plan, windows, ubuntu]
+    needs: [plan, windows, ubuntu, android]
     env:
       VERSION: ${{ needs.plan.outputs.version }}
       UPSTREAM_COMMIT: ${{ needs.plan.outputs.upstream_commit }}
@@ -302,11 +449,16 @@ jobs:
         with:
           name: geodomdesk-ubuntu
           path: ubuntu
-      - name: Validate both builds and write release descriptor
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: geodomdesk-android
+          path: android
+      - name: Validate all builds and write release descriptor
         run: |
           cmp windows/geodomdesk-build-config.json ubuntu/geodomdesk-build-config.json
+          cmp windows/geodomdesk-build-config.json android/geodomdesk-build-config.json
           python3 -m pip install -r geodomdesk/requirements.txt
-          python3 geodomdesk/release_bundle.py --version "$VERSION" --repository "$GITHUB_REPOSITORY" --windows windows/GeodomDesk.exe --ubuntu ubuntu/geodomdesk.deb --source-archive ubuntu/geodomdesk-source.tar.gz --build-config windows/geodomdesk-build-config.json --output release
+          python3 geodomdesk/release_bundle.py --version "$VERSION" --repository "$GITHUB_REPOSITORY" --windows windows/GeodomDesk.exe --ubuntu ubuntu/geodomdesk.deb --android android/geodomdesk.apk --source-archive ubuntu/geodomdesk-source.tar.gz --build-config windows/geodomdesk-build-config.json --output release
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: geodomdesk-release

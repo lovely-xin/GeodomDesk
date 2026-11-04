@@ -33,5 +33,15 @@
   "src/flutter_ffi.rs": "400191f6761117e67562a68bb02cf0adb834e8e01134cbfc47ed0b634fa9d607",
   "src/lang/cn.rs": "40bda0638fad2a471e22c0bd4e331629d4d442b487cd69e5cfe6778630e5a698",
   "flutter/lib/common/widgets/login.dart": "cba8ee99aae7dd6b383148441674efb06ef08dd5d4b57bd563e5ad56f609a66a",
-  "libs/hbb_common/src/lib.rs": "809771784b8897011742e647ad11669705b1d64cae908858534cac7d38570562"
+  "libs/hbb_common/src/lib.rs": "809771784b8897011742e647ad11669705b1d64cae908858534cac7d38570562",
+  "flutter/android/app/build.gradle": "450a93d75c8f524591d0245bdc504fde60fcc8e1c68ceee9be0dff9664aa5c3d",
+  "flutter/android/app/src/main/AndroidManifest.xml": "f2e9ef08e6596886e4ca3c8d31cddbfca9bff935f995c8a9a829431ca16dff8f",
+  "flutter/android/app/src/main/res/values/strings.xml": "45eaea9b7b3cec7d6cbb980759e5eb1a71fb833ac9a176490a6495efd869812f",
+  "flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt": "4f07abeddf71efa6a804d6d354b4419820a7442a071c80b23ab86f344861c206",
+  "flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/BootReceiver.kt": "c453c1e7e380d18c7940b52796cd8fd05786a3a5b5c41ea327c6469515f2e8fe",
+  "flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/DocumentLogs.kt": "3621721bc202bfbd69a8960780bcb5128f9e07ae624e442eda19c07ee33d4d74",
+  "flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/DocumentTree.kt": "41f14aa0edfcd8d4e031f9efd6c64d19f63d58fe2bb82220f97b787e8815efe0",
+  "flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainActivity.kt": "6156821a71d1b1f37fe9fb098d10756b8916f4c80252810a203d901fe481989d",
+  "flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/FloatingWindowService.kt": "5361e86a9de07dbc22b71b365b6fb55091be261e38f317e35fa975f42870593f",
+  "flutter/lib/mobile/pages/connection_page.dart": "8a39e3b6a31bfd522ec6ca28de60a7ba032a44f8f0de60718bed41e6fd8de651"
 }

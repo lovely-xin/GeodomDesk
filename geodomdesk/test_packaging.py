@@ -120,9 +120,9 @@ class PackagingTests(unittest.TestCase):
         (source / "src/geodomdesk_import").mkdir()
         (source / "src/geodomdesk_import.rs").write_text("mod data;\n")
         (source / "src/geodomdesk_import/data.rs").write_text("// import parser\n")
-        binding = source/'libs/hbb_common/src/geodomdesk_clone_guard.rs'
+        binding = source / "libs/hbb_common/src/geodomdesk_clone_guard.rs"
         binding.parent.mkdir(parents=True)
-        binding.write_text('// clone guard\n')
+        binding.write_text("// clone guard\n")
         custom = self.root / "custom"
         (custom / "reference").mkdir(parents=True)
         (custom / "reference/Cargo.toml").write_text("reviewed baseline")

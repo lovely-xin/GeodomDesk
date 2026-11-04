@@ -6,7 +6,16 @@ import subprocess
 from pathlib import Path
 
 from channel import make_release_id
-from . import account_login, branding, clone_guard, identity, update_channel, upstream, user_data
+from . import (
+    account_login,
+    android,
+    branding,
+    clone_guard,
+    identity,
+    update_channel,
+    upstream,
+    user_data,
+)
 from .edits import SourceEdits, replace_once
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,6 +28,7 @@ def prepare(source, version, build_number=1):
     baseline = upstream.load_baseline(ROOT)
     changes = SourceEdits({name: data.decode("utf-8") for name, data in baseline.items()})
     identity.apply(changes)
+    android.apply(changes, cfg)
     clone_guard.apply(changes)
     account_login.apply(changes)
     update_channel.apply(changes, cfg)

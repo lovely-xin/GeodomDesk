@@ -1,6 +1,6 @@
 # 开发与维护说明
 
-GeodomDesk 基于官方 RustDesk 稳定版，支持 Windows x64、Ubuntu amd64。此目录包含客户端定制、构建、打包与更新发布代码。
+GeodomDesk 基于官方 RustDesk 稳定版，支持 Windows x64、Ubuntu amd64、Android ARM64。此目录包含客户端定制、构建、打包与更新发布代码。
 
 ## 目录职责
 
@@ -10,6 +10,7 @@ GeodomDesk 基于官方 RustDesk 稳定版，支持 Windows x64、Ubuntu amd64�
 | `customizations/identity.py` | 应用、服务、配置、IPC、进程与本机监听隔离 |
 | `customizations/account_login.py` | 账号登录错误处理及重试控制 |
 | `customizations/update_channel.py` | 更新检查、公钥及更新界面适配 |
+| `customizations/android.py` | Android 应用标识、公开服务器默认值及移动更新入口 |
 | `customizations/clone_guard.py` | Ubuntu 克隆配置的硬件绑定与 ID 恢复 |
 | `customizations/user_data.py` | 设置页的可选设备记录导入入口 |
 | `customizations/branding.py` | 图标与 Logo 资源 |
@@ -57,18 +58,24 @@ python3 prepare_client.py --source /path/to/source --version 1.5.1 --build-numbe
 
 ## 打包与更新
 
-两种平台原生编译，不使用 Docker。每个内部构建使用独立的不可变目录，完整校验所有产物后才切换更新指针，拒绝回退到旧版本或旧构建。
+三种平台原生编译，不使用 Docker。每个内部构建使用独立的不可变目录，完整校验所有产物后才切换更新指针，拒绝回退到旧版本或旧构建。
 
-产物包含 Windows 原生更新 EXE、配置安装包、Ubuntu DEB、RUN 安装包、对应源码、更新清单及签名。
+产物包含 Windows 原生更新 EXE、配置安装包、Ubuntu DEB、RUN 安装包、Android ARM64 APK、对应源码、更新清单及签名。
 
 Windows 原生更新使用单文件客户端 EXE 的 `--update`；外层 NSIS 用于安装和预置配置。Ubuntu 提供更新提示与下载，由管理员运行新 RUN 安装包，不支持静默自动安装。
 
 保留官方签名、哈希、大小、临时文件复核和提升权限流程。应用标识、更新信任公钥及签名上下文独立。签名私钥和正式访问密码只保存在部署环境的受限配置中。已有安装保留原永久密码及验证模式。
 
+## Android
+
+使用独立应用标识与固定的正式签名证书，可与官方客户端共存。保留原生 JNI/Kotlin 命名空间，设备数据由 Android 应用沙箱隔离。预置公开服务器参数，账号令牌和远程访问密码不进入客户端源码。
+
+APK 显示版本跟随官方，版本代码使用递增的内部构建序号。更新提示指向独立下载页，安装由 Android 系统确认；屏幕录制、无障碍和后台权限保留官方授权流程。构建后核对应用标识、版本、ARM64 库和签名证书。签名私钥只存放在受限部署目录与 Actions Secrets。
+
 ## 验证
 
 ```sh
-python3 -m unittest test_channel test_packaging test_plan -v
+python3 -m unittest test_channel test_packaging test_plan test_android -v
 python3 verify_rust.py
 ```
 

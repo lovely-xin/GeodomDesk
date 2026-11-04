@@ -1,6 +1,6 @@
 # GeodomDesk
 
-基于 RustDesk 的独立远程工具，支持 Windows x64 和 Ubuntu amd64，可与官方客户端共存。
+基于 RustDesk 的独立远程工具，支持 Windows x64、Ubuntu amd64 和 Android ARM64，可与官方客户端共存。
 
 ## 主要特性
 
@@ -15,9 +15,9 @@
 
 ## 构建与发布
 
-GitHub Actions 原生构建 Windows、Ubuntu，不使用 Docker。每 6 小时检查官方稳定版，也可手动运行 **Build GeodomDesk**。官方源码与实际定制均未变化时跳过，纯说明修改不重编译。
+GitHub Actions 原生构建 Windows、Ubuntu、Android，不使用 Docker。每 6 小时检查官方稳定版，也可手动运行 **Build GeodomDesk**。官方源码与实际定制均未变化时跳过，纯说明修改不重编译。
 
-两种平台均构建成功后才发布 Release；发生合并冲突、构建或校验失败时，保留当前版本。云端发布程序根据 Release 制作安装包和更新清单。
+三种平台均构建成功后才发布 Release；发生合并冲突、构建或校验失败时，保留当前版本。云端发布程序根据 Release 制作安装包和更新清单。
 
 完整二进制的共存安装及互通仍需构建后实机验证。
 

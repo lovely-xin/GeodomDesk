@@ -17,6 +17,7 @@ import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from pathlib import Path
 
 import channel
@@ -211,10 +212,10 @@ def validate_build(build, release, config):
     if not re.fullmatch(r"[0-9a-f]{40}", build.get("upstream_commit", "")):
         raise ValueError("Source commit is required")
     items = build.get("artifacts", [])
-    if len(items) != 2 or {
+    if len(items) != len(channel.TARGETS) or {
         (a.get("platform"), a.get("arch"), a.get("format")) for a in items
     } != set(channel.TARGETS):
-        raise ValueError("Release requires Windows x64 EXE and Ubuntu amd64 DEB")
+        raise ValueError("Release requires Windows x64 EXE, Ubuntu amd64 DEB and Android ARM64 APK")
     for item in items:
         if item.get("file_name") != channel.file_name(release_id, item["platform"], item["format"]):
             raise ValueError("Unexpected GeodomDesk payload name")
@@ -257,6 +258,13 @@ def check_deb(payload, version, build_number=0):
                 raise ValueError("DEB maintainer script references stock RustDesk")
 
 
+def check_apk(payload):
+    with zipfile.ZipFile(payload) as archive:
+        for name in ["AndroidManifest.xml", "classes.dex", "lib/arm64-v8a/librustdesk.so"]:
+            if not archive.getinfo(name).file_size:
+                raise ValueError("Android release is missing its native application payload")
+
+
 def page(version):
     # The local download page remains concise; latest.json is the only mutable pointer.
     return (
@@ -266,7 +274,9 @@ def page(version):
         + version
         + """-windows-x64-setup.exe" download><strong>Windows</strong><span>x64 · 下载安装包 ↗</span></a><a class="card" href="geodomdesk-"""
         + version
-        + """-ubuntu-amd64.run" download><strong>Ubuntu</strong><span>amd64 · 下载安装包 ↗</span></a></div><div class="foot"><a href="geodomdesk-"""
+        + """-ubuntu-amd64.run" download><strong>Ubuntu</strong><span>amd64 · 下载安装包 ↗</span></a><a class="card" href="geodomdesk-"""
+        + version
+        + """-android-arm64.apk" download><strong>Android</strong><span>ARM64 · 下载 APK ↗</span></a></div><div class="foot"><a href="geodomdesk-"""
         + version
         + """-source.tar.gz">源代码</a><a href="https://geodom.cn">geodom.cn</a></div></main></html>"""
     ).encode()
@@ -295,6 +305,8 @@ def publish_pointer(public, manifest):
         "windows_url": channel.release_url(release_id)
         + f"geodomdesk-{release_id}-windows-x64-setup.exe",
         "ubuntu_url": channel.release_url(release_id) + f"geodomdesk-{release_id}-ubuntu-amd64.run",
+        "android_url": channel.release_url(release_id)
+        + f"geodomdesk-{release_id}-android-arm64.apk",
     }
     # All targets are in immutable, verified directories before exposing the pointer.
     save_json(public / "latest.json", latest)
@@ -311,7 +323,7 @@ def portal_update(portal, version):
     text = before.decode("utf-8")
     if text.count(START) != 1 or text.count(END) != 1:
         raise ValueError("Download section markers are missing or ambiguous")
-    fragment = f"""<section class="client-downloads" aria-labelledby="clients-title"><div class="section-heading"><h2 id="clients-title">远程工具</h2><p>GeodomDesk {channel.release_parts(version)[0]}</p></div><div class="client-list"><div class="client-row"><div class="client-name"><h3>Windows</h3><p>x64</p></div><div class="client-links"><a href="{channel.release_url(version)}geodomdesk-{version}-windows-x64-setup.exe" download>下载 Windows 版<svg aria-hidden="true"><use href="#download"/></svg></a></div></div><div class="client-row"><div class="client-name"><h3>Ubuntu</h3><p>amd64</p></div><div class="client-links"><a href="{channel.release_url(version)}geodomdesk-{version}-ubuntu-amd64.run" download>下载 Ubuntu 版<svg aria-hidden="true"><use href="#download"/></svg></a></div></div></div></section>"""
+    fragment = f"""<section class="client-downloads" aria-labelledby="clients-title"><div class="section-heading"><h2 id="clients-title">远程工具</h2><p>GeodomDesk {channel.release_parts(version)[0]}</p></div><div class="client-list"><div class="client-row"><div class="client-name"><h3>Windows</h3><p>x64</p></div><div class="client-links"><a href="{channel.release_url(version)}geodomdesk-{version}-windows-x64-setup.exe" download>下载 Windows 版<svg aria-hidden="true"><use href="#download"/></svg></a></div></div><div class="client-row"><div class="client-name"><h3>Ubuntu</h3><p>amd64</p></div><div class="client-links"><a href="{channel.release_url(version)}geodomdesk-{version}-ubuntu-amd64.run" download>下载 Ubuntu 版<svg aria-hidden="true"><use href="#download"/></svg></a></div></div><div class="client-row"><div class="client-name"><h3>Android</h3><p>ARM64</p></div><div class="client-links"><a href="{channel.release_url(version)}geodomdesk-{version}-android-arm64.apk" download>下载 Android 版<svg aria-hidden="true"><use href="#download"/></svg></a></div></div></div></section>"""
     changed = text.split(START)[0] + START + "\n" + fragment + "\n" + END + text.split(END)[1]
     if portal.read_bytes() != before:
         raise RuntimeError("Portal changed during publication")
@@ -417,7 +429,7 @@ def run(config):
                             ROOT / "LICENSE.client",
                             stage / f"geodomdesk-{release_id}-windows-x64-setup.exe",
                         )
-                    else:
+                    elif platform == "linux":
                         check_deb(payload, version, build_number)
                         installer.make_linux(
                             payload,
@@ -428,6 +440,8 @@ def run(config):
                             version,
                             stage / f"geodomdesk-{release_id}-ubuntu-amd64.run",
                         )
+                    else:
+                        check_apk(payload)
                 metadata, signature = channel.signed_metadata(
                     release_id, release["published_at"], updates, seed
                 )

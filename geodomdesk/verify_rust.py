@@ -173,7 +173,7 @@ mod geodomdesk_contract_tests {
         let keys = [TrustedUpdateKey { key_id: "geodomdesk-2026-01", algorithm: "ed25519", public_key: key }];
         verify_update_metadata_with_options(&metadata, &signature, VerificationOptions {
             requirements: MetadataRequirements { expected_version: "1.5.2", expected_release_id: "1.5.2-r102",
-                artifact: UpdateArtifactQuery { platform, arch: "x86_64", format } },
+                artifact: UpdateArtifactQuery { platform, arch: if platform == "android" { "aarch64" } else { "x86_64" }, format } },
             expected_package_id: PUBLIC_UPDATE_PACKAGE_ID,
             artifact_url_policy: ArtifactUrlPolicy::ExactPrefix("https://www.qcjcpt.com/downloads/geodomdesk/releases/1.5.2-r102/"),
             trusted_keys: &keys,
@@ -182,6 +182,7 @@ mod geodomdesk_contract_tests {
     const TEST_KEY: [u8;32] = KEY_BYTES;
     #[test] fn verifies_python_windows_metadata() { assert_eq!(verify("valid","windows","exe",TEST_KEY).unwrap().size, 1234); }
     #[test] fn verifies_python_ubuntu_metadata() { assert!(verify("valid","linux","deb",TEST_KEY).is_ok()); }
+    #[test] fn verifies_python_android_metadata() { assert!(verify("valid","android","apk",TEST_KEY).is_ok()); }
     #[test] fn rejects_rustdesk_app() { assert!(verify("wrong-app","windows","exe",TEST_KEY).is_err()); }
     #[test] fn rejects_rustdesk_package() { assert!(verify("wrong-package","windows","exe",TEST_KEY).is_err()); }
     #[test] fn rejects_wrong_version() { assert!(verify("wrong-version","windows","exe",TEST_KEY).is_err()); }

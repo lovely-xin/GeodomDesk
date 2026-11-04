@@ -11,7 +11,7 @@ KEY_ID = "geodomdesk-2026-01"
 SIGNATURE_CONTEXT = b"GeodomDesk update metadata v1\n"
 METADATA_NAME = "geodomdesk-update.json"
 APP = "geodomdesk"
-TARGETS = (("windows", "x86_64", "exe"), ("linux", "x86_64", "deb"))
+TARGETS = (("windows", "x86_64", "exe"), ("linux", "x86_64", "deb"), ("android", "aarch64", "apk"))
 
 
 def version_tuple(version):
@@ -62,9 +62,10 @@ def release_url(version):
 
 def file_name(version, platform, fmt):
     release_parts(version)
-    return (
-        f"geodomdesk-{version}-{'windows-x64' if platform == 'windows' else 'ubuntu-amd64'}.{fmt}"
-    )
+    suffix = {"windows": "windows-x64", "linux": "ubuntu-amd64", "android": "android-arm64"}[
+        platform
+    ]
+    return f"geodomdesk-{version}-{suffix}.{fmt}"
 
 
 def public_key(seed):
@@ -84,7 +85,7 @@ def signed_metadata(version, published_at, artifacts, seed):
     official_version, build_number = release_parts(version)
     selectors = {(item["platform"], item["arch"], item["format"]) for item in artifacts}
     if selectors != set(TARGETS) or len(artifacts) != len(TARGETS):
-        raise ValueError("Both native Windows EXE and Ubuntu DEB updates are required")
+        raise ValueError("Native Windows EXE, Ubuntu DEB and Android APK updates are required")
     for item in artifacts:
         name = file_name(version, item["platform"], item["format"])
         if (

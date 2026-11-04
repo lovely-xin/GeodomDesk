@@ -11,7 +11,7 @@ from channel import TARGETS, file_name, make_release_id, sha256, stable_json, ve
 from plan_upstream import customization_hash
 
 
-def bundle(version, repository, windows, ubuntu, source_archive, output, build_config):
+def bundle(version, repository, windows, ubuntu, android, source_archive, output, build_config):
     version_tuple(version)
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
         raise ValueError("Expected the GitHub owner/repository")
@@ -23,7 +23,7 @@ def bundle(version, repository, windows, ubuntu, source_archive, output, build_c
         raise ValueError("Build revision mismatch")
     output.mkdir(parents=True, exist_ok=True)
     artifacts = []
-    for payload, (platform, arch, fmt) in zip([windows, ubuntu], TARGETS):
+    for payload, (platform, arch, fmt) in zip([windows, ubuntu, android], TARGETS):
         name = file_name(release_id, platform, fmt)
         if not 1000000 <= payload.stat().st_size <= 512 * 1024 * 1024:
             raise ValueError("Unexpected build artifact size")
@@ -65,7 +65,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     for arg in ["version", "repository"]:
         parser.add_argument("--" + arg, required=True)
-    for arg in ["windows", "ubuntu", "source-archive", "output", "build-config"]:
+    for arg in ["windows", "ubuntu", "android", "source-archive", "output", "build-config"]:
         parser.add_argument("--" + arg, required=True, type=Path)
     args = parser.parse_args()
     bundle(
@@ -73,6 +73,7 @@ if __name__ == "__main__":
         args.repository,
         args.windows,
         args.ubuntu,
+        args.android,
         args.source_archive,
         args.output,
         args.build_config,

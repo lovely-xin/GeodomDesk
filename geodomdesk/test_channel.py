@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest import mock
 
@@ -69,10 +70,10 @@ class ChannelTests(unittest.TestCase):
         for changed in [
             items[:1],
             items * 2,
-            [{**items[0], "url": "https://example.com/file"}, items[1]],
-            [{**items[0], "sha256": "abc"}, items[1]],
-            [{**items[0], "size": 0}, items[1]],
-            [{**items[0], "file_name": "rustdesk.exe"}, items[1]],
+            [{**items[0], "url": "https://example.com/file"}, *items[1:]],
+            [{**items[0], "sha256": "abc"}, *items[1:]],
+            [{**items[0], "size": 0}, *items[1:]],
+            [{**items[0], "file_name": "rustdesk.exe"}, *items[1:]],
         ]:
             with self.subTest(changed=changed), self.assertRaises(ValueError):
                 channel.signed_metadata("1.5.2", "2026-11-04T00:00:00Z", changed, bytes(32))
@@ -128,6 +129,13 @@ class ChannelTests(unittest.TestCase):
                 'RwLock::new("GeodomDesk".to_owned())',
                 (source / "libs/hbb_common/src/config.rs").read_text(),
             )
+            gradle = (source / "flutter/android/app/build.gradle").read_text()
+            self.assertIn('applicationId "cn.geodom.geodomdesk"', gradle)
+            self.assertIn('namespace "com.carriez.flutter_hbb"', gradle)
+            manifest = (source / "flutter/android/app/src/main/AndroidManifest.xml").read_text()
+            self.assertIn('android:scheme="geodomdesk"', manifest)
+            self.assertNotIn('android:label="RustDesk', manifest)
+            self.assertIn("cn.geodom.geodomdesk.DEBUG_BOOT_COMPLETED", manifest)
             self.assertIn(
                 "dir.join(APP_PREFIX)", (source / "libs/portable/src/main.rs").read_text()
             )
@@ -270,6 +278,14 @@ class PublisherTests(unittest.TestCase):
             name = channel.file_name(release_id, platform, fmt)
             path = self.root / name
             path.write_bytes((b"MZ" if fmt == "exe" else b"deb") * 1024)
+            if fmt == "apk":
+                with zipfile.ZipFile(path, "w") as archive:
+                    for entry in [
+                        "AndroidManifest.xml",
+                        "classes.dex",
+                        "lib/arm64-v8a/librustdesk.so",
+                    ]:
+                        archive.writestr(entry, b"APK fixture")
             build["artifacts"].append(
                 {
                     "platform": platform,
@@ -345,6 +361,7 @@ class PublisherTests(unittest.TestCase):
             self.p.run(self.config)
         latest = json.loads((self.public / "latest.json").read_text())
         self.assertEqual(latest["url"], channel.release_url("1.5.2"))
+        self.assertTrue(latest["android_url"].endswith("geodomdesk-1.5.2-android-arm64.apk"))
         target = self.public / "releases/1.5.2"
         metadata = (target / channel.METADATA_NAME).read_bytes()
         signature = json.loads((target / (channel.METADATA_NAME + ".sig")).read_bytes())

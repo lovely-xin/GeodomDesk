@@ -3,3 +3,7 @@ __pycache__/
 /client/
 /target/
 *.log
+*.p12
+*.jks
+*.keystore
+key.properties
