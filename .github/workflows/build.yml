@@ -125,8 +125,8 @@ jobs:
           sed -i 's/extended_text: 13.0.0/extended_text: 14.0.0/g' flutter/pubspec.yaml
           cd flutter
           flutter pub get
-          dart format lib/models/model.dart lib/common/widgets/login.dart lib/desktop/pages/desktop_setting_page.dart lib/mobile/pages/connection_page.dart
-          flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings lib/models/model.dart lib/common/widgets/login.dart lib/desktop/pages/desktop_setting_page.dart lib/mobile/pages/connection_page.dart
+          dart format lib/models/model.dart lib/common/widgets/login.dart lib/desktop/pages/desktop_setting_page.dart lib/mobile/pages/connection_page.dart lib/mobile/pages/settings_page.dart
+          flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings lib/models/model.dart lib/common/widgets/login.dart lib/desktop/pages/desktop_setting_page.dart lib/mobile/pages/connection_page.dart lib/mobile/pages/settings_page.dart
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: geodomdesk-bridge
@@ -140,6 +140,7 @@ jobs:
             client/flutter/lib/common/widgets/login.dart
             client/flutter/lib/desktop/pages/desktop_setting_page.dart
             client/flutter/lib/mobile/pages/connection_page.dart
+            client/flutter/lib/mobile/pages/settings_page.dart
 
   windows:
     needs: [plan, bridge]

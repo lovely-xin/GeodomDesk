@@ -7,6 +7,7 @@ from pathlib import Path
 
 from channel import make_release_id
 from . import (
+    about,
     account_login,
     android,
     branding,
@@ -29,6 +30,7 @@ def prepare(source, version, build_number=1):
     changes = SourceEdits({name: data.decode("utf-8") for name, data in baseline.items()})
     identity.apply(changes)
     android.apply(changes, cfg)
+    about.apply(changes)
     clone_guard.apply(changes)
     account_login.apply(changes)
     update_channel.apply(changes, cfg)
