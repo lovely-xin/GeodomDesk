@@ -8,7 +8,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import installer
 import repack_deb
 
 
@@ -89,22 +88,6 @@ class PackagingTests(unittest.TestCase):
             ],
         )
 
-    def test_linux_wrapper_embedded_package_verification(self):
-        payload = self.stub_deb()
-        output = self.root / "geodomdesk-ubuntu.run"
-        asset = {"digest": "sha256:" + installer.sha(payload)}
-        installer.make_linux(payload, asset, "deb", "x86_64", self.config, "1.5.2", output)
-        result = subprocess.run(
-            ["sh", str(output), "--check"], capture_output=True, text=True, check=True
-        )
-        self.assertIn("Verified GeodomDesk", result.stdout)
-        data = bytearray(output.read_bytes())
-        data[-1] ^= 1
-        output.write_bytes(data)
-        self.assertNotEqual(
-            subprocess.run(["sh", str(output), "--check"], capture_output=True).returncode, 0
-        )
-
     def test_source_archive_includes_new_modules_and_baseline(self):
         import tarfile
         import archive_source
@@ -139,25 +122,6 @@ class PackagingTests(unittest.TestCase):
             "libs/hbb_common/src/geodomdesk_clone_guard.rs",
         ]:
             self.assertIn("geodomdesk-client/" + name, names)
-
-    @unittest.skipUnless(shutil.which("makensis") and shutil.which("7z"), "NSIS and 7z required")
-    def test_windows_nsis_embeds_only_the_expected_payload(self):
-        payload = self.root / "GeodomDesk.exe"
-        payload.write_bytes(b"MZ" + b"inert fixture " * 100)
-        output = self.root / "geodomdesk-setup.exe"
-        license_file = Path(__file__).parent / "LICENSE.client"
-        asset = {"digest": "sha256:" + installer.sha(payload)}
-        installer.make_windows(
-            payload, asset, self.config, "1.5.2", self.root, license_file, output
-        )
-        self.assertTrue(output.read_bytes().startswith(b"MZ"))
-        unpacked = self.root / "verify-nsis"
-        subprocess.run(
-            ["7z", "x", "-y", "-o" + str(unpacked), str(output)], check=True, capture_output=True
-        )
-        embedded = list(unpacked.rglob("geodomdesk-client.exe"))
-        self.assertEqual(len(embedded), 1)
-        self.assertEqual(installer.sha(embedded[0]), installer.sha(payload))
 
 
 if __name__ == "__main__":

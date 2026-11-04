@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Package custom GitHub Releases and publish GeodomDesk's signed update channel."""
+"""Verify native GitHub Releases and publish the signed GeodomDesk update channel."""
 import argparse
 import base64
 import contextlib
@@ -23,7 +23,6 @@ import zipfile
 from pathlib import Path
 
 import channel
-import installer
 
 ROOT = Path(__file__).resolve().parent
 LIMIT = 512 * 1024 * 1024
@@ -302,21 +301,27 @@ def check_apk(payload):
                 raise ValueError("Android release is missing its native application payload")
 
 
-def page(version):
-    # The local download page remains concise; latest.json is the only mutable pointer.
-    return (
-        """<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>GeodomDesk · 远程工具</title><style>body{margin:0;background:#f4f5f4;color:#192a32;font:16px system-ui,"Microsoft YaHei",sans-serif}main{max-width:760px;margin:10vh auto;padding:32px}header{display:flex;align-items:center;gap:18px}header img{width:64px;height:64px}h1{font-size:32px;margin:0}header p{margin:8px 0;color:#687981}.links{display:grid;gap:16px;margin:40px 0}a{color:inherit}a.card{display:flex;justify-content:space-between;align-items:center;text-decoration:none;border:1px solid #d8dfdd;border-radius:14px;padding:24px;background:#fff}.card span{color:#257678}.foot{color:#687981;font-size:13px;display:flex;gap:24px}a:focus-visible{outline:3px solid #169baf;outline-offset:4px}</style><main><header><img src="../../geodomdesk.png" alt=""><div><h1>GeodomDesk</h1><p>远程工具 · """
-        + html.escape(channel.release_parts(version)[0])
-        + """</p></div></header><div class="links"><a class="card" href="geodomdesk-"""
-        + version
-        + """-windows-x64-setup.exe" download><strong>Windows</strong><span>x64 · 下载安装包 ↗</span></a><a class="card" href="geodomdesk-"""
-        + version
-        + """-ubuntu-amd64.run" download><strong>Ubuntu</strong><span>amd64 · 下载安装包 ↗</span></a><a class="card" href="geodomdesk-"""
-        + version
-        + """-android-arm64.apk" download><strong>Android</strong><span>ARM64 · 下载 APK ↗</span></a></div><div class="foot"><a href="geodomdesk-"""
-        + version
-        + """-source.tar.gz">源代码</a><a href="https://geodom.cn">geodom.cn</a></div></main></html>"""
-    ).encode()
+def download_names(version, native_config):
+    return {
+        "windows": (
+            channel.file_name(version, "windows", "exe")
+            if native_config
+            else f"geodomdesk-{version}-windows-x64-setup.exe"
+        ),
+        "ubuntu": (
+            channel.file_name(version, "linux", "deb")
+            if native_config
+            else f"geodomdesk-{version}-ubuntu-amd64.run"
+        ),
+        "android": channel.file_name(version, "android", "apk"),
+    }
+
+
+def page(version, native_config=True):
+    names = download_names(version, native_config)
+    style = 'body{margin:0;background:#f4f5f4;color:#192a32;font:16px system-ui,"Microsoft YaHei",sans-serif}main{max-width:760px;margin:10vh auto;padding:32px}header{display:flex;align-items:center;gap:18px}header img{width:64px;height:64px}h1{font-size:32px;margin:0}header p{margin:8px 0;color:#687981}.links{display:grid;gap:16px;margin:40px 0}a{color:inherit}a.card{display:flex;justify-content:space-between;align-items:center;text-decoration:none;border:1px solid #d8dfdd;border-radius:14px;padding:24px;background:#fff}.card span{color:#257678}.foot{color:#687981;font-size:13px;display:flex;gap:24px}a:focus-visible{outline:3px solid #169baf;outline-offset:4px}'
+    display_version = html.escape(channel.release_parts(version)[0])
+    return f"""<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>GeodomDesk · 远程工具</title><style>{style}</style><main><header><img src="../../geodomdesk.png" alt=""><div><h1>GeodomDesk</h1><p>远程工具 · {display_version}</p></div></header><div class="links"><a class="card" href="{names["windows"]}" download><strong>Windows</strong><span>x64 · 下载安装包 ↗</span></a><a class="card" href="{names["ubuntu"]}" download><strong>Ubuntu</strong><span>amd64 · 下载 DEB ↗</span></a><a class="card" href="{names["android"]}" download><strong>Android</strong><span>ARM64 · 下载 APK ↗</span></a></div><div class="foot"><a href="geodomdesk-{version}-source.tar.gz">源代码</a><a href="https://geodom.cn">geodom.cn</a></div></main></html>""".encode()
 
 
 def public_complete(directory, manifest):
@@ -338,7 +343,7 @@ def publish_directory(stage, destination, manifest):
         if error.errno != errno.EXDEV:
             raise
         # systemd can bind-mount two paths separately even on the same device.
-        # Only verified public files remain in stage; private installer inputs are gone.
+        # The complete release has already been verified before it reaches this path.
         with tempfile.TemporaryDirectory(prefix=".publish-", dir=destination.parent) as temporary:
             copied = Path(temporary) / "release"
             shutil.copytree(stage, copied)
@@ -350,16 +355,16 @@ def publish_directory(stage, destination, manifest):
 def publish_pointer(public, manifest):
     version = manifest["version"]
     release_id = manifest.get("release_id", version)
+    names = download_names(release_id, manifest.get("native_config", False))
     latest = {
         "url": channel.release_url(release_id),
         "version": version,
         "build_number": manifest.get("build_number", 0),
         "metadata_url": channel.release_url(release_id) + channel.METADATA_NAME,
-        "windows_url": channel.release_url(release_id)
-        + f"geodomdesk-{release_id}-windows-x64-setup.exe",
-        "ubuntu_url": channel.release_url(release_id) + f"geodomdesk-{release_id}-ubuntu-amd64.run",
-        "android_url": channel.release_url(release_id)
-        + f"geodomdesk-{release_id}-android-arm64.apk",
+        "windows_url": channel.release_url(release_id) + names["windows"],
+        "ubuntu_url": channel.release_url(release_id) + names["ubuntu"],
+        "android_url": channel.release_url(release_id) + names["android"],
+        "native_config": manifest.get("native_config", False),
     }
     # All targets are in immutable, verified directories before exposing the pointer.
     save_json(public / "latest.json", latest)
@@ -371,12 +376,13 @@ def publish_pointer(public, manifest):
     )
 
 
-def portal_update(portal, version):
+def portal_update(portal, version, native_config=True):
+    names = download_names(version, native_config)
     before = portal.read_bytes()
     text = before.decode("utf-8")
     if text.count(START) != 1 or text.count(END) != 1:
         raise ValueError("Download section markers are missing or ambiguous")
-    fragment = f"""<section class="client-downloads" aria-labelledby="clients-title"><div class="section-heading"><h2 id="clients-title">远程工具</h2><p>GeodomDesk {channel.release_parts(version)[0]}</p></div><div class="client-list"><div class="client-row"><div class="client-name"><h3>Windows</h3><p>x64</p></div><div class="client-links"><a href="{channel.release_url(version)}geodomdesk-{version}-windows-x64-setup.exe" download>下载 Windows 版<svg aria-hidden="true"><use href="#download"/></svg></a></div></div><div class="client-row"><div class="client-name"><h3>Ubuntu</h3><p>amd64</p></div><div class="client-links"><a href="{channel.release_url(version)}geodomdesk-{version}-ubuntu-amd64.run" download>下载 Ubuntu 版<svg aria-hidden="true"><use href="#download"/></svg></a></div></div><div class="client-row"><div class="client-name"><h3>Android</h3><p>ARM64</p></div><div class="client-links"><a href="{channel.release_url(version)}geodomdesk-{version}-android-arm64.apk" download>下载 Android 版<svg aria-hidden="true"><use href="#download"/></svg></a></div></div></div></section>"""
+    fragment = f"""<section class="client-downloads" aria-labelledby="clients-title"><div class="section-heading"><h2 id="clients-title">远程工具</h2><p>GeodomDesk {channel.release_parts(version)[0]}</p></div><div class="client-list"><div class="client-row"><div class="client-name"><h3>Windows</h3><p>x64</p></div><div class="client-links"><a href="{channel.release_url(version)}{names["windows"]}" download>下载 Windows 版<svg aria-hidden="true"><use href="#download"/></svg></a></div></div><div class="client-row"><div class="client-name"><h3>Ubuntu</h3><p>amd64</p></div><div class="client-links"><a href="{channel.release_url(version)}{names["ubuntu"]}" download>下载 Ubuntu 版<svg aria-hidden="true"><use href="#download"/></svg></a></div></div><div class="client-row"><div class="client-name"><h3>Android</h3><p>ARM64</p></div><div class="client-links"><a href="{channel.release_url(version)}{names["android"]}" download>下载 Android 版<svg aria-hidden="true"><use href="#download"/></svg></a></div></div></div></section>"""
     changed = text.split(START)[0] + START + "\n" + fragment + "\n" + END + text.split(END)[1]
     if portal.read_bytes() != before:
         raise RuntimeError("Portal changed during publication")
@@ -399,7 +405,6 @@ def run(config):
         seed = Path(config["signing_key"]).read_bytes()
         if base64.b64encode(channel.public_key(seed)).decode() != config["public_key"]:
             raise ValueError("Signing key does not match the compiled client trust key")
-        installer.validate_server(config)
         public = Path(config["public_dir"])
         portal = Path(config["portal_file"])
         if (
@@ -446,6 +451,8 @@ def run(config):
             ):
                 raise ValueError("Immutable release changed or damaged; publish a new version")
         else:
+            if build.get("native_config") is not True:
+                raise ValueError("New releases must contain compiled fixed connection settings")
             if shutil.disk_usage(state).free < 1024 * 1024 * 1024:
                 raise ValueError("At least 1 GiB free disk is required")
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -470,26 +477,11 @@ def run(config):
                     payload, asset = payloads[name]
                     updates.append(channel.artifact(stage / name, release_id, platform, arch, fmt))
                     if platform == "windows":
-                        installer.make_windows(
-                            payload,
-                            asset,
-                            config,
-                            version,
-                            stage,
-                            ROOT / "LICENSE.client",
-                            stage / f"geodomdesk-{release_id}-windows-x64-setup.exe",
-                        )
+                        with payload.open("rb") as stream:
+                            if stream.read(2) != b"MZ":
+                                raise ValueError("Invalid native Windows executable")
                     elif platform == "linux":
                         check_deb(payload, version, build_number)
-                        installer.make_linux(
-                            payload,
-                            asset,
-                            "deb",
-                            "x86_64",
-                            config,
-                            version,
-                            stage / f"geodomdesk-{release_id}-ubuntu-amd64.run",
-                        )
                     else:
                         check_apk(payload)
                 metadata, signature = channel.signed_metadata(
@@ -497,10 +489,7 @@ def run(config):
                 )
                 (stage / channel.METADATA_NAME).write_bytes(metadata)
                 (stage / (channel.METADATA_NAME + ".sig")).write_bytes(signature)
-                (stage / "index.html").write_bytes(page(release_id))
-                # Never publish the generated installer script separately: it can contain a preset password.
-                for temporary_name in ["install-windows.ps1", "installer.nsi"]:
-                    (stage / temporary_name).unlink(missing_ok=True)
+                (stage / "index.html").write_bytes(page(release_id, True))
                 files = [
                     {"name": p.name, "size": p.stat().st_size, "sha256": channel.sha256(p)}
                     for p in stage.iterdir()
@@ -510,6 +499,7 @@ def run(config):
                     "version": version,
                     "release_id": release_id,
                     "build_number": build_number,
+                    "native_config": True,
                     "published_at": now(),
                     "build_sha256": channel.sha256(descriptor),
                     "files": files,
@@ -532,7 +522,7 @@ def run(config):
                     raise RuntimeError(
                         "Stop the former builder before activating this portal producer"
                     )
-            portal_update(portal, release_id)
+            portal_update(portal, release_id, manifest.get("native_config", False))
         save_json(
             state / "status.json", {"status": "published", "version": version, "checked_at": now()}
         )

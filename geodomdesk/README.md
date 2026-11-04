@@ -10,7 +10,8 @@ GeodomDesk 基于官方 RustDesk 稳定版，支持 Windows x64、Ubuntu amd64�
 | `customizations/identity.py` | 应用、服务、配置、IPC、进程与本机监听隔离 |
 | `customizations/account_login.py` | 账号登录错误处理及重试控制 |
 | `customizations/update_channel.py` | 更新检查、公钥及更新界面适配 |
-| `customizations/android.py` | Android 应用标识、公开服务器默认值及移动更新入口 |
+| `customizations/android.py` | Android 应用标识及移动更新入口 |
+| `customizations/server_config.py` | 三平台固定连接参数，忽略外部注入并隐藏修改入口 |
 | `customizations/about.py` | 关于页面的公司官网、开源来源说明与对应源码入口 |
 | `customizations/clone_guard.py` | Ubuntu 克隆配置的硬件绑定与 ID 恢复 |
 | `customizations/user_data.py` | 设置页的可选设备记录导入入口 |
@@ -23,7 +24,7 @@ GeodomDesk 基于官方 RustDesk 稳定版，支持 Windows x64、Ubuntu amd64�
 | `repack_deb.py` | Ubuntu 软件包和服务隔离 |
 | `archive_source.py`、`release_bundle.py` | 对应源码及发布清单 |
 | `channel.py` | 版本、产物与签名契约 |
-| `publisher.py`、`installer.py`、安装模板 | 云端打包与更新发布 |
+| `publisher.py` | 原生安装文件校验、签名和发布 |
 
 正式构建工作流位于仓库 `.github/workflows/build.yml`。新增定制应归入对应模块，不直接编辑临时 checkout；变更基线时同步审查 `source-lock.json`。
 
@@ -61,11 +62,11 @@ python3 prepare_client.py --source /path/to/source --version 1.5.1 --build-numbe
 
 三种平台原生编译，不使用 Docker。每个内部构建使用独立的不可变目录，完整校验所有产物后才切换更新指针，拒绝回退到旧版本或旧构建。
 
-产物包含 Windows 原生更新 EXE、配置安装包、Ubuntu DEB、RUN 安装包、Android ARM64 APK、对应源码、更新清单及签名。
+产物包含 Windows 原生 EXE、Ubuntu DEB、Android ARM64 APK、对应源码、更新清单及签名。公开连接参数在编译时写入固定配置；界面和配置文件均不能覆盖这些连接参数；API 可留空，不预置永久密码，不覆盖已有密码与验证模式。
 
-Windows 原生更新使用单文件客户端 EXE 的 `--update`；外层 NSIS 用于安装和预置配置。Ubuntu 提供更新提示与下载，由管理员运行新 RUN 安装包，不支持静默自动安装。
+Windows 原生 EXE 自带安装入口，更新使用同一程序的 `--update`。Ubuntu 提供更新提示与下载，由管理员安装 DEB，不支持静默自动安装。云端只校验、复制已构建的文件并生成签名更新清单，不重新封装或注入配置。
 
-保留官方签名、哈希、大小、临时文件复核和提升权限流程。应用标识、更新信任公钥及签名上下文独立。签名私钥和正式访问密码只保存在部署环境的受限配置中。已有安装保留原永久密码及验证模式。
+保留官方签名、哈希、大小、临时文件复核和提升权限流程。应用标识、更新信任公钥及签名上下文独立。签名私钥只保存在受限部署环境与 Actions Secrets；账号、令牌和远程访问密码不进入源码或安装包默认值。
 
 Android 资源修复可在手动构建中填写 `reuse_desktop_run`，复用同一失败工作流尚未发布的桌面产物。复用前核对实际生成的桌面源码、构建配置、工具链和桌面构建步骤；任一变化均拒绝复用。
 
@@ -82,7 +83,7 @@ python3 -m unittest test_channel test_packaging test_plan test_android -v
 python3 verify_rust.py
 ```
 
-Windows 另运行 `test-windows-installer.ps1`。
+Windows 在临时 CI 环境另运行 `test-windows-native.ps1`，核对实际安装与固定连接参数。
 
 验证覆盖上游改动保留、冲突不写入、监听隔离、账号错误不重试、签名篡改、同版本构建更新、回退保护、打包失败不切换及源码归档完整性。
 

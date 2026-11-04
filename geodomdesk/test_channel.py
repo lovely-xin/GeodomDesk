@@ -287,14 +287,6 @@ class ChannelTests(unittest.TestCase):
         ]:
             self.assertEqual(changes[name], baseline[name].decode("utf-8").replace(old, new, 1))
 
-    def test_no_stock_installation_targets(self):
-        for name in ["install-windows.ps1.in", "linux-installer.sh.in"]:
-            text = (ROOT / name).read_text()
-            self.assertNotIn("RustDesk\\RustDesk.exe", text)
-            self.assertNotIn("/usr/bin/rustdesk", text)
-            self.assertNotIn("-Name 'RustDesk'", text)
-            self.assertIn("Preserve" if name.endswith("ps1.in") else "PRESERVE_PASSWORD", text)
-
 
 @unittest.skipUnless(os.name == "posix", "Linux publisher and packaging tests")
 class PublisherTests(unittest.TestCase):
@@ -336,6 +328,7 @@ class PublisherTests(unittest.TestCase):
         build = {
             "schema_version": 1,
             "app": "GeodomDesk",
+            "native_config": True,
             "package_id": "geodomdesk",
             "repository": self.config["repository"],
             "version": version,
@@ -408,17 +401,6 @@ class PublisherTests(unittest.TestCase):
         )
         stack.enter_context(mock.patch.object(self.p, "check_deb"))
 
-        def pack(payload, asset, config, version, stage, license, destination):
-            destination.write_bytes(b"installer fixture windows")
-
-        stack.enter_context(mock.patch.object(self.p.installer, "make_windows", side_effect=pack))
-        stack.enter_context(
-            mock.patch.object(
-                self.p.installer,
-                "make_linux",
-                side_effect=lambda *a: a[-1].write_bytes(b"installer fixture linux"),
-            )
-        )
         return stack
 
     def test_disabled_leaves_existing_downloads_and_portal(self):
@@ -435,6 +417,14 @@ class PublisherTests(unittest.TestCase):
         latest = json.loads((self.public / "latest.json").read_text())
         self.assertEqual(latest["url"], channel.release_url("1.5.2"))
         self.assertTrue(latest["android_url"].endswith("geodomdesk-1.5.2-android-arm64.apk"))
+        self.assertTrue(latest["windows_url"].endswith("geodomdesk-1.5.2-windows-x64.exe"))
+        self.assertTrue(latest["ubuntu_url"].endswith("geodomdesk-1.5.2-ubuntu-amd64.deb"))
+        self.assertFalse(
+            any(
+                "setup" in f.name or f.suffix == ".run"
+                for f in (self.public / "releases/1.5.2").iterdir()
+            )
+        )
         target = self.public / "releases/1.5.2"
         metadata = (target / channel.METADATA_NAME).read_bytes()
         signature = json.loads((target / (channel.METADATA_NAME + ".sig")).read_bytes())
@@ -451,13 +441,43 @@ class PublisherTests(unittest.TestCase):
         before = (self.public / "latest.json").read_bytes()
         release, _, local = self.build_fixture("1.5.3")
         with self.mocks(release, local), mock.patch.object(
-            self.p.installer, "make_windows", side_effect=RuntimeError("packing failed")
+            self.p, "check_deb", side_effect=RuntimeError("invalid native package")
         ):
             with self.assertRaises(RuntimeError):
                 self.p.run(self.config)
         self.assertEqual(before, (self.public / "latest.json").read_bytes())
         self.assertFalse((self.public / "releases/1.5.3").exists())
         self.assertEqual([], list(self.state.glob("build-*")))
+
+    def test_existing_legacy_links_survive_until_native_release(self):
+        release, build, local = self.build_fixture()
+        build.pop("native_config")
+        descriptor = local["geodomdesk-build.json"]
+        descriptor.write_bytes(channel.stable_json(build))
+        target = self.public / "releases/1.5.2"
+        target.mkdir(parents=True)
+        files = []
+        for name in self.p.download_names("1.5.2", False).values():
+            path = target / name
+            path.write_bytes(b"previously verified legacy download")
+            files.append(
+                {"name": name, "size": path.stat().st_size, "sha256": channel.sha256(path)}
+            )
+        manifest = {"version": "1.5.2", "build_sha256": channel.sha256(descriptor), "files": files}
+        (target / "publication.json").write_bytes(channel.stable_json(manifest))
+        with self.mocks(release, local):
+            self.p.run(self.config)
+        latest = json.loads((self.public / "latest.json").read_text())
+        self.assertTrue(latest["windows_url"].endswith("windows-x64-setup.exe"))
+        self.assertTrue(latest["ubuntu_url"].endswith("ubuntu-amd64.run"))
+        self.assertFalse(latest["native_config"])
+        release, _, local = self.build_fixture("1.5.3")
+        native = json.loads(local["geodomdesk-build.json"].read_text())
+        native.pop("native_config")
+        local["geodomdesk-build.json"].write_bytes(channel.stable_json(native))
+        with self.mocks(release, local), self.assertRaises(ValueError):
+            self.p.run(self.config)
+        self.assertEqual(latest, json.loads((self.public / "latest.json").read_text()))
 
     def test_cross_mount_publication_and_failed_copy_preserve_atomicity(self):
         real_replace = self.p.os.replace

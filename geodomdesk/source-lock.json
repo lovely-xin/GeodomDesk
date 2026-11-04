@@ -45,5 +45,6 @@
   "flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/FloatingWindowService.kt": "5361e86a9de07dbc22b71b365b6fb55091be261e38f317e35fa975f42870593f",
   "flutter/lib/mobile/pages/connection_page.dart": "8a39e3b6a31bfd522ec6ca28de60a7ba032a44f8f0de60718bed41e6fd8de651",
   "flutter/android/app/src/main/res/values/ic_launcher_background.xml": "d5d95100301cb149608eecadc042884efbf6c4f88bf6022578847a0857596731",
-  "flutter/lib/mobile/pages/settings_page.dart": "67066f7357135e79deffe2ea92b2063eee78ac54608b90c9c4acea672932e010"
+  "flutter/lib/mobile/pages/settings_page.dart": "67066f7357135e79deffe2ea92b2063eee78ac54608b90c9c4acea672932e010",
+  "flutter/lib/mobile/widgets/dialog.dart": "4d394e53df64cd69eb9343120ff4517b94ef4382611b30396c43c54973f5cacc"
 }

@@ -1,6 +1,4 @@
-"""Android coexist identity, public server defaults and the existing mobile update UI."""
-
-import json
+"""Android coexist identity and the existing mobile update UI."""
 
 
 def apply(changes, config):
@@ -36,29 +34,6 @@ def apply(changes, config):
         "flutter/android/app/src/main/res/values/ic_launcher_background.xml",
         '    <color name="ic_launcher_background">#ffffff</color>\n',
         "",
-    )
-    defaults = {
-        "custom-rendezvous-server": config["server"]["host"],
-        "key": config["server"]["key"],
-        "websocket-port": config["server"]["websocket_port"],
-    }
-    entries = ",\n".join(
-        "            (" + json.dumps(key) + ".to_owned(), " + json.dumps(value) + ".to_owned())"
-        for key, value in defaults.items()
-    )
-    change(
-        "libs/hbb_common/src/config.rs",
-        "pub static ref DEFAULT_SETTINGS: RwLock<HashMap<String, String>> = Default::default();",
-        """pub static ref DEFAULT_SETTINGS: RwLock<HashMap<String, String>> = RwLock::new({
-        #[cfg(target_os = "android")]
-        { HashMap::from([
-"""
-        + entries
-        + """
-        ]) }
-        #[cfg(not(target_os = "android"))]
-        { HashMap::new() }
-    });""",
     )
     change(
         "flutter/lib/mobile/pages/connection_page.dart",

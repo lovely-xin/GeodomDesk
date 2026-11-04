@@ -13,6 +13,7 @@ from . import (
     branding,
     clone_guard,
     identity,
+    server_config,
     update_channel,
     upstream,
     user_data,
@@ -30,6 +31,7 @@ def prepare(source, version, build_number=1):
     changes = SourceEdits({name: data.decode("utf-8") for name, data in baseline.items()})
     identity.apply(changes)
     android.apply(changes, cfg)
+    server_config.apply(changes, cfg)
     about.apply(changes)
     clone_guard.apply(changes)
     account_login.apply(changes)

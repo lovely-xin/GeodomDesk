@@ -47,6 +47,48 @@ def verify(source=None, update_lock=False):
         (crate / "src/geodomdesk_clone_guard.rs").write_bytes(
             (source / "libs/hbb_common/src/geodomdesk_clone_guard.rs").read_bytes()
         )
+        config_source = (source / "libs/hbb_common/src/config.rs").read_text(encoding="utf-8")
+        begin = config_source.index("pub static ref OVERWRITE_SETTINGS:")
+        begin = config_source.index(" = ", begin) + 3
+        end = config_source.index(";\n", begin)
+        fixed = config_source[begin:end]
+        begin = config_source.index("fn get_or(")
+        end = config_source.index("\n#[inline]\npub fn is_incoming_only", begin)
+        (crate / "src/server_config_verification.rs").write_text(
+            "use std::{collections::HashMap, sync::RwLock};\n"
+            + "fn fixed() -> RwLock<HashMap<String, String>> { "
+            + fixed
+            + " }\n"
+            + config_source[begin:end]
+            + """
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn imported_server_values_cannot_override_compiled_settings() {
+        let fixed = fixed();
+        let defaults = RwLock::new(HashMap::new());
+        let compiled = fixed.read().unwrap().clone();
+        assert_eq!(compiled.len(), 5);
+        let imported = compiled.keys().map(|k| (k.clone(), "old-injected-value".to_owned())).collect();
+        for (key, value) in compiled {
+            assert_eq!(get_or(&fixed, &imported, &defaults, &key), Some(value));
+            assert!(!is_option_can_save(&fixed, &key, &defaults, "user-edited-value"));
+        }
+        assert_eq!(get_or(&fixed, &imported, &defaults, "api-server"), Some(String::new()));
+    }
+    #[test]
+    fn personal_password_mode_is_not_locked_or_overwritten() {
+        let fixed = fixed();
+        let defaults = RwLock::new(HashMap::new());
+        let personal = HashMap::from([("verification-method".to_owned(), "use-permanent-password".to_owned())]);
+        assert_eq!(get_or(&fixed, &personal, &defaults, "verification-method"), Some("use-permanent-password".to_owned()));
+        assert!(is_option_can_save(&fixed, "verification-method", &defaults, "use-temporary-password"));
+        assert!(!fixed.read().unwrap().contains_key("password"));
+    }
+}
+"""
+        )
         # artifact policy is unchanged by preparation; use the full source if present.
         policy = source / "src/update_metadata/artifact.rs"
         if not policy.exists():
@@ -100,6 +142,7 @@ mod geodomdesk_update;
 mod geodomdesk_auth;
 mod geodomdesk_import_data;
 mod geodomdesk_clone_guard;
+mod server_config_verification;
 mod update_metadata;
 fn use_ws() -> bool { true }
 """
