@@ -22,6 +22,73 @@ import prepare_client
 ROOT = Path(__file__).resolve().parent
 
 
+@unittest.skipUnless(os.name == "posix", "Publisher runs on Linux")
+class DownloadTests(unittest.TestCase):
+    def test_parallel_ranges_strip_credentials_and_verified_cache_skips_network(self):
+        self.check_download()
+
+    def test_corrupt_ranges_do_not_publish_partial_cache(self):
+        for failure in ["short", "range", "hash"]:
+            with self.subTest(failure=failure):
+                self.check_download(failure)
+
+    def check_download(self, failure=None):
+        import publisher
+
+        data = bytes(range(256)) * (5 * 1024 * 1024 // 256)
+        requests = []
+
+        class Response(io.BytesIO):
+            status = 206
+
+            def __init__(self, start, end):
+                block = data[start : end + 1]
+                if end > start:
+                    if failure == "short":
+                        block = block[:-1]
+                    if failure == "hash":
+                        block = b"x" + block[1:]
+                super().__init__(block)
+                self.headers = {"Content-Range": f"bytes {start}-{end}/{len(data)}"}
+                if failure == "range" and end > start:
+                    self.headers["Content-Range"] = "bytes 0-1/2"
+
+            def geturl(self):
+                return "https://release-assets.githubusercontent.com/fixture"
+
+        class Opener:
+            def open(self, request, **kwargs):
+                requests.append(request)
+                start, end = map(int, request.get_header("Range").removeprefix("bytes=").split("-"))
+                return Response(start, end)
+
+        with tempfile.TemporaryDirectory(prefix="geodomdesk-download-test-") as tmp:
+            cache = Path(tmp)
+            asset = {
+                "name": "fixture.exe",
+                "url": "https://api.github.com/repos/owner/repo/releases/assets/1",
+                "size": len(data),
+                "digest": "sha256:" + hashlib.sha256(data).hexdigest(),
+            }
+            with mock.patch.object(publisher.urllib.request, "build_opener", return_value=Opener()):
+                if failure:
+                    with self.assertRaises(ValueError):
+                        publisher.download(asset, cache, {"Authorization": "Bearer test-only"})
+                    self.assertEqual(list(cache.iterdir()), [])
+                    return
+                result = publisher.download(asset, cache, {"Authorization": "Bearer test-only"})
+                self.assertEqual(result.read_bytes(), data)
+            self.assertEqual(len(requests), 6)
+            self.assertTrue(requests[0].get_header("Authorization"))
+            self.assertTrue(all(not r.get_header("Authorization") for r in requests[1:]))
+            with mock.patch.object(
+                publisher.urllib.request,
+                "build_opener",
+                side_effect=AssertionError("Unexpected download"),
+            ):
+                self.assertEqual(publisher.download(asset, cache, {}), result)
+
+
 class ChannelTests(unittest.TestCase):
     def test_version_contract(self):
         self.assertLess(channel.version_tuple("1.5.2"), channel.version_tuple("1.5.10"))

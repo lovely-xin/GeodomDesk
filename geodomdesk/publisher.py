@@ -3,6 +3,7 @@
 import argparse
 import base64
 import contextlib
+import concurrent.futures
 import datetime
 import fcntl
 import hashlib
@@ -173,23 +174,58 @@ def download(asset, cache, headers):
             asset["url"],
             headers={**headers, "User-Agent": USER_AGENT, "Accept": "application/octet-stream"},
         )
+        if asset["size"] > 4 * 1024 * 1024:
+            request.add_header("Range", "bytes=0-0")
         opener = urllib.request.build_opener(DownloadRedirect())
-        digest_actual = hashlib.sha256()
         length = 0
-        with os.fdopen(fd, "wb") as stream, opener.open(request, timeout=60) as response:
-            for block in iter(lambda: response.read(1024 * 1024), b""):
-                length += len(block)
-                if length > asset["size"]:
-                    raise ValueError("Download exceeds declared size")
-                stream.write(block)
-                digest_actual.update(block)
-        if length != asset["size"] or digest_actual.hexdigest() != digest:
+        with os.fdopen(fd, "wb") as stream:
+            with opener.open(request, timeout=60) as response:
+                ranged = response.status == 206
+                if ranged:
+                    if response.headers.get("Content-Range") != f'bytes 0-0/{asset["size"]}':
+                        raise ValueError("Unexpected GitHub range response")
+                    url = response.geturl()
+                else:
+                    for block in iter(lambda: response.read(1024 * 1024), b""):
+                        length += len(block)
+                        if length > asset["size"]:
+                            raise ValueError("Download exceeds declared size")
+                        stream.write(block)
+            if ranged:
+                stream.truncate(asset["size"])
+                download_ranges(url, asset["size"], stream.fileno(), headers)
+                length = asset["size"]
+        if length != asset["size"] or channel.sha256(temp) != digest:
             raise ValueError("Release asset size or SHA256 mismatch")
         os.replace(temp, final)
         return final
     finally:
         with contextlib.suppress(FileNotFoundError):
             os.unlink(temp)
+
+
+def download_ranges(url, size, fd, headers):
+    headers = {**headers, "User-Agent": USER_AGENT, "Accept": "application/octet-stream"}
+    if urllib.parse.urlsplit(url).hostname != "api.github.com":
+        headers = {k: v for k, v in headers.items() if k.lower() != "authorization"}
+
+    def part(start):
+        end = min(start + 1024 * 1024, size) - 1
+        request = urllib.request.Request(url, headers={**headers, "Range": f"bytes={start}-{end}"})
+        opener = urllib.request.build_opener(DownloadRedirect())
+        with opener.open(request, timeout=60) as response:
+            if (
+                response.status != 206
+                or response.headers.get("Content-Range") != f"bytes {start}-{end}/{size}"
+            ):
+                raise ValueError("GitHub did not honor the requested download range")
+            data = response.read(end - start + 2)
+        if len(data) != end - start + 1 or os.pwrite(fd, data, start) != len(data):
+            raise ValueError("Incomplete release asset download range")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        for _ in pool.map(part, range(0, size, 1024 * 1024)):
+            pass
 
 
 def validate_build(build, release, config):
@@ -336,11 +372,12 @@ def run(config):
     with (state / "lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         if not config.get("enabled") or not config.get("repository"):
+            status = "staged" if config.get("repository") else "waiting-for-build-repository"
             save_json(
                 state / "status.json",
-                {"status": "waiting-for-build-repository", "checked_at": now()},
+                {"status": status, "checked_at": now()},
             )
-            logging.info("Waiting for the GeodomDesk build repository; current downloads unchanged")
+            logging.info("GeodomDesk publisher %s; current downloads unchanged", status)
             return
         seed = Path(config["signing_key"]).read_bytes()
         if base64.b64encode(channel.public_key(seed)).decode() != config["public_key"]:
