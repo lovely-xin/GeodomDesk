@@ -37,7 +37,7 @@ try {
       return $text
     } finally {$client.Dispose()}
   }
-  function Read-Option([string]$Name) {return Invoke-Client @('--option',$Name)}
+  function Read-Option([string]$Name) {return Invoke-Client -ClientArgs @('--option',$Name)}
   $expected=@{
     'custom-rendezvous-server'=$config.server.host
     'key'=$config.server.key
@@ -51,13 +51,13 @@ try {
   }
   # Negative tests: command-line edits and the former wrapper's import must be ignored.
   foreach($name in @('custom-rendezvous-server','key','api-server','relay-server','websocket-port')) {
-    $null=Invoke-Client @('--option',$name,'blocked.invalid')
+    $null=Invoke-Client -ClientArgs @('--option',$name,'blocked.invalid')
     if((Read-Option $name) -cne [string]($expected[$name])){throw "Fixed setting could be changed: $name"}
   }
   $injected=@{host='blocked.invalid';key='unused';api='https://blocked.invalid';relay='blocked.invalid'} | ConvertTo-Json -Compress
   $encoded=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($injected)).Replace('+','-').Replace('/','_')
   $characters=$encoded.ToCharArray();[Array]::Reverse($characters)
-  $null=Invoke-Client @('--config',(-join $characters))
+  $null=Invoke-Client -ClientArgs @('--config',(-join $characters))
   foreach($name in @('custom-rendezvous-server','key','api-server','relay-server','websocket-port')) {
     if((Read-Option $name) -cne [string]($expected[$name])){throw "Imported setting overrode the compiled value: $name"}
   }
