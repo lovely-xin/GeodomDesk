@@ -28,6 +28,24 @@ GeodomDesk 基于官方 RustDesk 稳定版，支持 Windows x64、Ubuntu amd64�
 
 正式构建工作流位于仓库 `.github/workflows/build.yml`。新增定制应归入对应模块，不直接编辑临时 checkout；变更基线时同步审查 `source-lock.json`。
 
+## 执行链路
+
+| 链路 | 入口与产物 | 边界与失败处理 |
+| --- | --- | --- |
+| 官方同步 | `plan_upstream.py` → 官方稳定版本、提交与内部构建号 | 定时检查无变化时跳过；不直接修改已发布客户端 |
+| 源码定制 | `prepare_client.py` → `customizations/build.py` → 定制源码 | 先校验基线并完成三方合并，冲突时停止写入 |
+| 原生构建 | Actions 的 `bridge` → `windows` / `ubuntu` / `android` | UI 分析与原生检查通过，三平台成功后才生成 Release |
+| 产物契约 | `release_bundle.py` → `geodomdesk-build.json` 与对应源码 | 三平台版本、构建号和配置必须一致；逐文件记录大小与 SHA-256 |
+| 云端发布 | `publisher.py` → 不可变发布目录、签名更新清单、`latest.json` | 复核来源和摘要，使用同目录原子替换；构建或文件校验失败不切换指针 |
+| 下载入口 | `publisher.py` 的 `portal_update` → 导航页下载区域 | 只替换标记区域，保留现有布局；旧生产任务必须停用 |
+| 客户端更新 | `client/geodomdesk_update.rs` → 官方 updater | 限定独立通道；下载、签名、摘要与提升权限继续使用官方流程 |
+
+连接参数的编译来源只有 `client-channel.json`；云端 `config.example.json` 只描述发布任务、签名密钥位置和输出目录。客户端不读取云端发布配置，发布端不生成访问密码或客户端配置脚本。
+
+账号登录由 `account_login.py` 和 `client/geodomdesk_auth.rs` 适配官方客户端界面：识别服务端登录错误、取消重试、打开已有登录窗口；不在此项目实现或修改服务端的账号验证。Ubuntu 克隆恢复与用户资料导入分别由独立模块处理，不进入发布程序。
+
+构建错误先查看 Actions 中失败的 job / step。云端日志统一由 systemd journal 管理，使用 `journalctl -u geodomdesk-builder.service --since today` 查看；最近一次结果保存在 `/var/lib/geodomdesk-builder/status.json`。发布程序不常驻进程，不另建无限增长的日志文件。
+
 ## 兼容边界
 
 保留官方设备 ID、消息协议、密钥交换、加密、打洞、中继和 WebSocket 行为。双方使用相同服务端及公钥时，设备 ID 连接保持兼容；完整二进制互通仍需实机验证。

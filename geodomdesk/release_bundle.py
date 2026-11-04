@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write the release contract consumed by the cloud installer/update publisher."""
+"""Write the release contract consumed by the native release/update publisher."""
 import argparse
 import json
 import os
