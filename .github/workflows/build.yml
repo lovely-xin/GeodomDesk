@@ -450,12 +450,20 @@ jobs:
           cd flutter
           flutter pub get
           dart run flutter_launcher_icons -f ../../geodomdesk/android-icons.yaml
-          flutter build apk --release --target-platform android-arm64 --split-per-abi --build-name "$VERSION" --build-number "$BUILD_NUMBER"
+          # One ABI needs no split; Flutter otherwise adds an ABI offset to versionCode.
+          flutter build apk --release --target-platform android-arm64 --build-name "$VERSION" --build-number "$BUILD_NUMBER"
           cd ..
-          python3 ../geodomdesk/android_release.py verify --source . --file flutter/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
+          python3 ../geodomdesk/android_release.py verify --source . --file flutter/build/app/outputs/flutter-apk/app-release.apk
           mkdir -p ../android-artifact
-          cp flutter/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk ../android-artifact/geodomdesk.apk
+          cp flutter/build/app/outputs/flutter-apk/app-release.apk ../android-artifact/geodomdesk.apk
           cp geodomdesk-build-config.json ../android-artifact/
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: failure()
+        with:
+          name: geodomdesk-android-diagnostic
+          if-no-files-found: ignore
+          retention-days: 3
+          path: client/flutter/build/app/outputs/flutter-apk/app-release.apk
       - name: Remove temporary signing inputs
         if: always()
         run: |

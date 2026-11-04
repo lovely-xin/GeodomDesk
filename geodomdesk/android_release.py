@@ -41,7 +41,9 @@ def verify(source, apk):
     )
     expected = (config["android_package_id"], str(config["build_number"]), config["version"])
     if not package or package.groups() != expected:
-        raise ValueError("Android application ID or version differs from the prepared client")
+        raise ValueError(
+            f"Android identity differs: expected {expected}, got {package.groups() if package else None}"
+        )
     if "launchable-activity: name='com.carriez.flutter_hbb.MainActivity'" not in badging:
         raise ValueError("The Android entry point does not match the native JNI namespace")
     with zipfile.ZipFile(apk) as archive:
