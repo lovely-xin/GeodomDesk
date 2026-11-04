@@ -60,7 +60,7 @@ try {
   foreach($name in @('custom-rendezvous-server','key','api-server','relay-server','websocket-port')) {
     if((Read-Option $name) -cne [string]($expected[$name])){throw "Imported setting overrode the compiled value: $name"}
   }
-  Write-Output 'Native installation and fixed connection settings verified; external configuration ignored and no password provisioned.' 
+  Write-Output 'Native installation and fixed connection settings verified; external configuration ignored and no password provisioned.'
 } finally {
   Stop-Service -Name 'GeodomDesk' -ErrorAction SilentlyContinue
 }
