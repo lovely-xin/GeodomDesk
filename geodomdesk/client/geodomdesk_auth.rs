@@ -16,6 +16,7 @@ mod tests {
             "Please log in before starting a remote connection"
         ));
         assert!(requires_login("Invalid account or password"));
+        assert!(requires_login("  Invalid account or password\n"));
     }
 
     #[test]

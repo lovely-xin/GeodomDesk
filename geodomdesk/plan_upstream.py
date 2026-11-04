@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Resolve the latest official release and decide whether a custom rebuild is needed."""
 import json
+import hashlib
 import os
 import re
 import urllib.error
@@ -9,6 +10,42 @@ import urllib.request
 from pathlib import Path
 
 from channel import version_tuple
+
+
+def customization_hash(root=None):
+    root = Path(root) if root else Path(__file__).resolve().parent
+    paths = list(root.glob("*.py")) + list(root.glob("*.in"))
+    for directory, pattern in [
+        ("customizations", "*.py"),
+        ("client", "*"),
+        ("assets", "*.png"),
+        ("assets", "*.ico"),
+    ]:
+        paths.extend(
+            p
+            for p in (root / directory).rglob(pattern)
+            if p.is_file() and (directory != "client" or p.suffix in (".rs", ".in"))
+        )
+    paths.extend(
+        root / name
+        for name in [
+            "client-channel.json",
+            "source-lock.json",
+            "requirements.txt",
+            "client-tests/Cargo.lock",
+        ]
+        if (root / name).is_file()
+    )
+    digest = hashlib.sha256()
+    for path in sorted(set(paths)):
+        digest.update(path.relative_to(root).as_posix().encode() + b"\0")
+        digest.update(hashlib.sha256(path.read_bytes()).digest())
+    workflow = root.parent / ".github/workflows/build.yml"
+    if not workflow.is_file():
+        workflow = root / "ci/build.yml"
+    if workflow.is_file():
+        digest.update(hashlib.sha256(workflow.read_bytes()).digest())
+    return digest.hexdigest()
 
 
 def get(path):
@@ -50,7 +87,7 @@ def plan():
                 current = json.load(response)
             required = (
                 current.get("upstream_commit") != upstream
-                or current.get("customization_commit") != os.environ["GITHUB_SHA"]
+                or current.get("customization_hash") != customization_hash()
             )
         except (urllib.error.HTTPError, StopIteration, ValueError):
             required = True

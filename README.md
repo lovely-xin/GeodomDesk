@@ -14,7 +14,7 @@
 
 ## 构建与发布
 
-GitHub Actions 原生构建 Windows、Ubuntu，不使用 Docker。每 6 小时检查官方稳定版，也可手动运行 **Build GeodomDesk**。
+GitHub Actions 原生构建 Windows、Ubuntu，不使用 Docker。每 6 小时检查官方稳定版，也可手动运行 **Build GeodomDesk**。官方源码与实际定制均未变化时跳过，纯说明修改不重编译。
 
 两种平台均构建成功后才发布 Release；发生合并冲突、构建或校验失败时，保留当前版本。云端发布程序根据 Release 制作安装包和更新清单。
 

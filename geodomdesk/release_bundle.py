@@ -8,6 +8,7 @@ import shutil
 from pathlib import Path
 
 from channel import TARGETS, file_name, make_release_id, sha256, stable_json, version_tuple
+from plan_upstream import customization_hash
 
 
 def bundle(version, repository, windows, ubuntu, source_archive, output, build_config):
@@ -46,6 +47,7 @@ def bundle(version, repository, windows, ubuntu, source_archive, output, build_c
     descriptor = {
         **cfg,
         "customization_commit": os.environ.get("GITHUB_SHA", ""),
+        "customization_hash": customization_hash(),
         "schema_version": 1,
         "repository": repository,
         "artifacts": artifacts,

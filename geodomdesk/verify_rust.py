@@ -121,23 +121,24 @@ mod account_retry_tests {
 }
 """
         )
+        release_id = "1.5.2-r102"
         artifacts = []
         for platform, arch, fmt in channel.TARGETS:
-            name = channel.file_name("1.5.2", platform, fmt)
+            name = channel.file_name(release_id, platform, fmt)
             artifacts.append(
                 {
                     "platform": platform,
                     "arch": arch,
                     "format": fmt,
                     "file_name": name,
-                    "url": channel.release_url("1.5.2") + name,
+                    "url": channel.release_url(release_id) + name,
                     "size": 1234,
                     "sha256": "a" * 64,
                 }
             )
         seed = bytes(range(32))
         metadata, signature = channel.signed_metadata(
-            "1.5.2", "2026-11-04T00:00:00Z", artifacts, seed
+            release_id, "2026-11-04T00:00:00Z", artifacts, seed
         )
         fixtures = {"valid": json.loads(metadata)}
         for name, field, value in [
@@ -167,10 +168,10 @@ mod geodomdesk_contract_tests {
         let signature = std::fs::read(format!("fixtures/{name}.sig"))?;
         let keys = [TrustedUpdateKey { key_id: "geodomdesk-2026-01", algorithm: "ed25519", public_key: key }];
         verify_update_metadata_with_options(&metadata, &signature, VerificationOptions {
-            requirements: MetadataRequirements { expected_version: "1.5.2", expected_release_id: "1.5.2",
+            requirements: MetadataRequirements { expected_version: "1.5.2", expected_release_id: "1.5.2-r102",
                 artifact: UpdateArtifactQuery { platform, arch: "x86_64", format } },
             expected_package_id: PUBLIC_UPDATE_PACKAGE_ID,
-            artifact_url_policy: ArtifactUrlPolicy::ExactPrefix("https://www.qcjcpt.com/downloads/geodomdesk/releases/1.5.2/"),
+            artifact_url_policy: ArtifactUrlPolicy::ExactPrefix("https://www.qcjcpt.com/downloads/geodomdesk/releases/1.5.2-r102/"),
             trusted_keys: &keys,
         })
     }

@@ -20,7 +20,8 @@ def apply(changes):
         """pub fn check_if_retry(msgtype: &str, title: &str, text: &str, retry_for_relay: bool) -> bool {
     msgtype""",
         """pub fn check_if_retry(msgtype: &str, title: &str, text: &str, retry_for_relay: bool) -> bool {
-    !crate::geodomdesk_auth::requires_login(text) && msgtype""",
+    !crate::geodomdesk_auth::requires_login(text)
+        && msgtype""",
     )
     change(
         "flutter/lib/models/model.dart",
@@ -37,8 +38,10 @@ def apply(changes):
         """    if (type == 're-input-password') {""",
         """    if (type == 'account-login-required' ||
         (title == 'Connection Error' &&
-            (text == 'Please log in before starting a remote connection' ||
-             text == 'Invalid account or password'))) {
+            const {
+              'Please log in before starting a remote connection',
+              'Invalid account or password',
+            }.contains(text is String ? text.trim() : text))) {
       _requestAccountLogin(sessionId, dialogManager);
       return;
     }
@@ -52,6 +55,8 @@ def apply(changes):
       SessionID sessionId, OverlayDialogManager dialogManager) async {
     _timer?.cancel();
     _timer = null;
+    waitForImageTimer?.cancel();
+    waitForImageTimer = null;
     resetRestartReconnectState();
     _reconnects = 1;
     _offlineReconnectStartTime = null;
@@ -59,7 +64,7 @@ def apply(changes):
     _accountLoginPending = true;
     dialogManager.dismissAll();
     try {
-      final authenticated = await loginDialog();
+      final authenticated = await loginDialog().catchError((_) => false);
       if (authenticated == true && parent.target?.closed == false) {
         if (isDesktop) {
           rustDeskWinManager.call(WindowType.Main, kWindowRefreshCurrentUser, '');
@@ -76,4 +81,17 @@ def apply(changes):
   }
 
   void resetRestartReconnectState() {""",
+    )
+
+    change(
+        "flutter/lib/common/widgets/login.dart",
+        "  if (res != null) {\n    await UserModel.updateOtherModels();\n  }",
+        """  if (res == true) {
+    try {
+      await UserModel.updateOtherModels();
+    } catch (_) {
+      // Account-data refresh must not discard a successful authentication.
+      debugPrint('Failed to refresh account data after login');
+    }
+  }""",
     )

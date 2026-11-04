@@ -43,7 +43,9 @@ class PlanTests(unittest.TestCase):
                 "GITHUB_RUN_ATTEMPT": "2",
                 "GITHUB_OUTPUT": str(output),
             }
-            with mock.patch.dict(os.environ, env), mock.patch.object(
+            with mock.patch.object(
+                plan_upstream, "customization_hash", return_value="b" * 64
+            ), mock.patch.dict(os.environ, env), mock.patch.object(
                 plan_upstream, "get", side_effect=get
             ), mock.patch.object(
                 plan_upstream.urllib.request,
@@ -63,16 +65,28 @@ class PlanTests(unittest.TestCase):
 
     def test_scheduled_unchanged_skips_build(self):
         result = self.run_plan(
-            "schedule", {"upstream_commit": "a" * 40, "customization_commit": "b" * 40}
+            "schedule", {"upstream_commit": "a" * 40, "customization_hash": "b" * 64}
         )
         self.assertEqual(result["build"], "false")
 
     def test_scheduled_either_source_change_rebuilds(self):
-        for upstream, custom in [("c" * 40, "b" * 40), ("a" * 40, "c" * 40)]:
+        for upstream, custom in [("c" * 40, "b" * 64), ("a" * 40, "c" * 64)]:
             result = self.run_plan(
-                "schedule", {"upstream_commit": upstream, "customization_commit": custom}
+                "schedule", {"upstream_commit": upstream, "customization_hash": custom}
             )
             self.assertEqual(result["build"], "true")
+
+    def test_documentation_changes_do_not_trigger_a_rebuild(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "client").mkdir()
+            (root / "client/module.rs").write_text("// initial implementation\n")
+            (root / "README.md").write_text("initial documentation")
+            before = plan_upstream.customization_hash(root)
+            (root / "README.md").write_text("updated documentation")
+            self.assertEqual(before, plan_upstream.customization_hash(root))
+            (root / "client/module.rs").write_text("// changed implementation\n")
+            self.assertNotEqual(before, plan_upstream.customization_hash(root))
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ['geodomdesk/**', '.github/workflows/build.yml']
+    paths: ['geodomdesk/**', '.github/workflows/build.yml', '!geodomdesk/**/*.md', '!geodomdesk/assets/DESIGN.txt']
   schedule:
     - cron: '15 */6 * * *'
 
@@ -66,6 +66,7 @@ jobs:
         with:
           workspaces: client
           prefix-key: geodomdesk-bridge
+          cache-on-failure: true
       - uses: subosito/flutter-action@2783a3f08e1baf891508463f8c6653c258246225
         with:
           flutter-version: '3.22.3'
@@ -126,6 +127,7 @@ jobs:
         with:
           workspaces: client
           prefix-key: geodomdesk-windows
+          cache-on-failure: true
       - uses: subosito/flutter-action@2783a3f08e1baf891508463f8c6653c258246225
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
@@ -227,6 +229,7 @@ jobs:
         with:
           workspaces: client
           prefix-key: geodomdesk-ubuntu
+          cache-on-failure: true
       - uses: subosito/flutter-action@2783a3f08e1baf891508463f8c6653c258246225
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
@@ -247,6 +250,13 @@ jobs:
         run: |
           sdk=$(dirname "$(dirname "$(command -v flutter)")")
           git -C "$sdk" apply "$PWD/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff"
+      - name: Validate the customized settings UI before native compilation
+        run: |
+          python3 -c 'import build; build.ffi_bindgen_function_refactor()'
+          cd flutter
+          flutter pub get
+          dart format lib/models/model.dart lib/common/widgets/login.dart lib/desktop/pages/desktop_setting_page.dart
+          flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings lib/desktop/pages/desktop_setting_page.dart
       - uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2
         with:
           vcpkgDirectory: /opt/artifacts/vcpkg

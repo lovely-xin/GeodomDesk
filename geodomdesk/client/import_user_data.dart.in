@@ -10,20 +10,21 @@
   }
 
   Future<void> _importOfficialUserData() async {
-    final confirmed = await gFFI.dialogManager.show<bool>((setState, close, context) {
-      return CustomAlertDialog(
-        title: translate('Import RustDesk device records'),
-        content: Text(translate('Only recent devices, favorites and aliases will be imported. Server settings, passwords, login tokens and display preferences will not be imported.')),
-        actions: [
-          dialogButton('Cancel', onPressed: () => close(false), isOutline: true),
-          dialogButton('Import', onPressed: () => close(true)),
-        ],
-        onCancel: () => close(false),
-      );
-    });
-    if (confirmed != true || !mounted) return;
+    if (_importingUserData) return;
     setState(() { _importingUserData = true; _importUserDataStatus = ''; });
     try {
+      final confirmed = await gFFI.dialogManager.show<bool>((setState, close, context) {
+        return CustomAlertDialog(
+          title: translate('Import RustDesk device records'),
+          content: Text(translate('Only recent devices, favorites and aliases will be imported. Server settings, passwords, login tokens and display preferences will not be imported.')),
+          actions: [
+            dialogButton('Cancel', onPressed: () => close(false), isOutline: true),
+            dialogButton('Import', onPressed: () => close(true)),
+          ],
+          onCancel: () => close(false),
+        );
+      });
+      if (confirmed != true || !mounted) return;
       final result = jsonDecode(await bind.mainImportOfficialUserData());
       await bind.mainLoadRecentPeers();
       await bind.mainLoadFavPeers();

@@ -9,7 +9,7 @@ def apply(changes, root):
     change(
         "src/flutter_ffi.rs",
         "pub fn main_get_fav() -> Vec<String> {",
-        """pub fn main_import_official_user_data() -> ResultType<String> {
+        """pub fn main_import_official_user_data() -> hbb_common::anyhow::Result<String> {
     Ok(serde_json::to_string(&crate::geodomdesk_import::import()?)?)
 }
 
