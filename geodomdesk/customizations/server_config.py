@@ -81,10 +81,11 @@ def apply(changes, config):
 }
 """,
     )
-    begin = changes[name].index("pub fn prepare_custom_client_update() -> ResultType<bool> {")
+    begin = changes[name].index("// Prepare custom client update by copying staged custom.txt")
     finish = changes[name].index("\npub fn get_license_from_exe_name", begin)
     changes.replace(
         name,
         changes[name][begin:finish],
+        "// Connection settings are compiled; updates do not stage external presets.\n"
         "pub fn prepare_custom_client_update() -> ResultType<bool> { Ok(true) }\n",
     )
