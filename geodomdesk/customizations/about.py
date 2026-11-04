@@ -15,7 +15,12 @@ def apply(changes):
     change(
         desktop,
         "              SelectionArea(\n                  child: Text('${translate('Version')}: $version')",
-        "              SelectionArea(\n"
+        "              Image.asset('assets/geodom-logo.png', height: 28,\n"
+        + "                  fit: BoxFit.contain, semanticLabel: 'Geodom',\n"
+        + "                  color: Theme.of(context).brightness == Brightness.dark\n"
+        + "                      ? Colors.white : null)\n"
+        + "                      .marginSymmetric(vertical: 8.0),\n"
+        + "              SelectionArea(\n"
         + "                  child: Text(translate('"
         + attribution
         + "').replaceAll('%upstream%', 'RustDesk'))\n"
@@ -23,12 +28,14 @@ def apply(changes):
         + "              SelectionArea(\n                  child: Text('${translate('Version')}: $version')",
     )
     change(
-        desktop, "launchUrlString('https://rustdesk.com');", "launchUrlString('https://geodom.cn');"
+        desktop,
+        "launchUrlString('https://rustdesk.com');",
+        "launchUrlString('https://www.geodom.cn');",
     )
     change(
         desktop,
         "                    translate('Website'),",
-        "                    '${translate('Website')}: geodom.cn',",
+        "                    '${translate('Website')}: www.geodom.cn',",
     )
     change(
         desktop,
@@ -53,6 +60,11 @@ def apply(changes):
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+        Image.asset('assets/geodom-logo.png', height: 28,
+            fit: BoxFit.contain, semanticLabel: 'Geodom',
+            color: Theme.of(context).brightness == Brightness.dark
+                ? Colors.white : null),
+        const SizedBox(height: 12),
         Text('${translate('Version')}: $version'),
         const SizedBox(height: 12),
         Text(translate('"""
@@ -64,10 +76,25 @@ def apply(changes):
         change(
             mobile,
             indent + "const url = 'https://rustdesk.com/';",
-            indent + "const url = 'https://geodom.cn';",
+            indent + "const url = 'https://www.geodom.cn';",
         )
     for indent in ["                  ", "              "]:
-        change(mobile, indent + "child: Text('rustdesk.com',", indent + "child: Text('geodom.cn',")
+        change(
+            mobile, indent + "child: Text('rustdesk.com',", indent + "child: Text('www.geodom.cn',"
+        )
+    change(
+        mobile,
+        """          title: Text(translate("About")),
+          tiles: [""",
+        """          title: Text(translate("About")),
+          tiles: [
+            SettingsTile(
+                title: Image.asset('assets/geodom-logo.png', height: 28,
+                    fit: BoxFit.contain, alignment: Alignment.centerLeft,
+                    semanticLabel: 'Geodom',
+                    color: Theme.of(context).brightness == Brightness.dark
+                        ? Colors.white : null)),""",
+    )
     change(
         mobile,
         """            SettingsTile(

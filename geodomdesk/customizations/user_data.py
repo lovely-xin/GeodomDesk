@@ -35,6 +35,7 @@ pub fn main_get_fav() -> Vec<String> {""",
         + "  Widget keyboardShortcuts() {",
     )
     translations = {
+        "Import": "导入",
         "Data migration": "数据迁移",
         "Import RustDesk device records": "导入 RustDesk 设备记录",
         "Import RustDesk device records only; existing records and settings are preserved.": "仅导入 RustDesk 设备资料，保留现有记录与设置。",

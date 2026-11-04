@@ -1,11 +1,13 @@
   Widget importOfficialUserData() {
     return _Card(title: 'Data migration', children: [
-      Text(translate('Import RustDesk device records only; existing records and settings are preserved.'))
-          .marginOnly(left: _kContentHMargin),
       _Button('Import RustDesk device records', _importOfficialUserData,
-          enabled: !_importingUserData),
+          enabled: !_importingUserData,
+          tip: 'Import RustDesk device records only; existing records and settings are preserved.'),
       if (_importUserDataStatus.isNotEmpty)
-        Text(_importUserDataStatus).marginOnly(left: _kContentHMargin),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: Text(_importUserDataStatus),
+        ).marginOnly(left: _kContentHMargin),
     ]);
   }
 

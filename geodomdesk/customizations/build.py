@@ -30,6 +30,7 @@ def prepare(source, version, build_number=1):
     baseline = upstream.load_baseline(ROOT)
     changes = SourceEdits({name: data.decode("utf-8") for name, data in baseline.items()})
     identity.apply(changes)
+    branding.apply(changes)
     android.apply(changes, cfg)
     server_config.apply(changes, cfg)
     about.apply(changes)

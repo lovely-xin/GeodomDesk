@@ -125,8 +125,8 @@ jobs:
           sed -i 's/extended_text: 13.0.0/extended_text: 14.0.0/g' flutter/pubspec.yaml
           cd flutter
           flutter pub get
-          dart format lib/models/model.dart lib/common/widgets/login.dart lib/desktop/pages/desktop_setting_page.dart lib/mobile/pages/connection_page.dart lib/mobile/pages/settings_page.dart lib/mobile/widgets/dialog.dart
-          flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings lib/models/model.dart lib/common/widgets/login.dart lib/desktop/pages/desktop_setting_page.dart lib/mobile/pages/connection_page.dart lib/mobile/pages/settings_page.dart lib/mobile/widgets/dialog.dart
+          dart format lib/desktop/pages/desktop_home_page.dart lib/models/model.dart lib/common/widgets/login.dart lib/desktop/pages/desktop_setting_page.dart lib/mobile/pages/connection_page.dart lib/mobile/pages/settings_page.dart lib/mobile/widgets/dialog.dart
+          flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings lib/desktop/pages/desktop_home_page.dart lib/models/model.dart lib/common/widgets/login.dart lib/desktop/pages/desktop_setting_page.dart lib/mobile/pages/connection_page.dart lib/mobile/pages/settings_page.dart lib/mobile/widgets/dialog.dart
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: geodomdesk-bridge
@@ -136,6 +136,7 @@ jobs:
             client/src/bridge_generated.io.rs
             client/flutter/lib/generated_bridge.dart
             client/flutter/lib/generated_bridge.freezed.dart
+            client/flutter/lib/desktop/pages/desktop_home_page.dart
             client/flutter/lib/models/model.dart
             client/flutter/lib/common/widgets/login.dart
             client/flutter/lib/desktop/pages/desktop_setting_page.dart

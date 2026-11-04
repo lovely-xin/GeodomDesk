@@ -24,6 +24,7 @@ def archive(source, customization, output):
             "src/geodomdesk_import.rs",
             "src/geodomdesk_import/data.rs",
             "libs/hbb_common/src/geodomdesk_clone_guard.rs",
+            "flutter/assets/geodom-logo.png",
             "geodomdesk-build-config.json",
         ]
     )

@@ -106,6 +106,9 @@ class PackagingTests(unittest.TestCase):
         binding = source / "libs/hbb_common/src/geodomdesk_clone_guard.rs"
         binding.parent.mkdir(parents=True)
         binding.write_text("// clone guard\n")
+        logo = source / "flutter/assets/geodom-logo.png"
+        logo.parent.mkdir(parents=True)
+        logo.write_bytes(b"fixture-logo")
         custom = self.root / "custom"
         (custom / "reference").mkdir(parents=True)
         (custom / "reference/Cargo.toml").write_text("reviewed baseline")
@@ -120,6 +123,7 @@ class PackagingTests(unittest.TestCase):
             "src/geodomdesk_import.rs",
             "src/geodomdesk_import/data.rs",
             "libs/hbb_common/src/geodomdesk_clone_guard.rs",
+            "flutter/assets/geodom-logo.png",
         ]:
             self.assertIn("geodomdesk-client/" + name, names)
 
