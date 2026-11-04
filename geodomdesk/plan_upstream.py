@@ -15,6 +15,7 @@ from channel import version_tuple
 def customization_hash(root=None):
     root = Path(root) if root else Path(__file__).resolve().parent
     paths = list(root.glob("*.py")) + list(root.glob("*.in"))
+    paths.extend(root.glob("*.ps1"))
     for directory, pattern in [
         ("customizations", "*.py"),
         ("client", "*"),

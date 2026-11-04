@@ -62,6 +62,7 @@ try {
     if((Read-Option $name) -cne [string]($expected[$name])){throw "Imported setting overrode the compiled value: $name"}
   }
   Write-Output 'Native installation and fixed connection settings verified; external configuration ignored and no password provisioned.'
+  & (Join-Path $PSScriptRoot 'test-windows-import.ps1') -Client $installed -BuildConfig $BuildConfig
 } finally {
   Stop-Service -Name 'GeodomDesk' -ErrorAction SilentlyContinue
 }

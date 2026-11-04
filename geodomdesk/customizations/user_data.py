@@ -1,4 +1,4 @@
-"""Explicit UI opt-in for device data; application settings remain isolated."""
+"""First-run and explicit same-server import; application settings remain isolated."""
 
 import json
 
@@ -6,6 +6,13 @@ import json
 def apply(changes, root):
     change = changes.replace
     change("src/lib.rs", "mod updater;", "mod updater;\nmod geodomdesk_import;")
+    change(
+        "src/flutter_ffi.rs",
+        "    initialize(&app_dir, &custom_client_config);",
+        "    initialize(&app_dir, &custom_client_config);\n"
+        '    #[cfg(any(target_os = "windows", target_os = "linux"))]\n'
+        "    crate::geodomdesk_import::import_on_first_run();",
+    )
     change(
         "src/flutter_ffi.rs",
         "pub fn main_get_fav() -> Vec<String> {",
@@ -38,8 +45,8 @@ pub fn main_get_fav() -> Vec<String> {""",
         "Import": "导入",
         "Data migration": "数据迁移",
         "Import %upstream%": "导入 %upstream%",
-        "Import recent connections, favorites and device aliases from %upstream%.": "从 %upstream% 导入最近连接、收藏和设备备注。",
-        "Only recent devices, favorites and aliases will be imported. Server settings, passwords, login tokens and display preferences will not be imported.": "只导入最近连接、收藏与设备备注。不导入服务器设置、密码、登录令牌及显示偏好。",
+        "Import matching-server device records from %upstream%.": "从 %upstream% 导入服务器公钥相同的设备记录、收藏和备注。",
+        "Only device records with the same ID-server public key will be imported. Existing records, settings and passwords are preserved.": "仅导入 ID 服务器公钥相同的设备记录、收藏和备注。保留现有记录、设置和密码。",
         "Import complete": "导入完成",
         "Added": "新增",
         "Existing": "已存在",

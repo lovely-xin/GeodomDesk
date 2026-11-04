@@ -3,7 +3,7 @@
       Align(
         alignment: Alignment.centerLeft,
         child: Text(
-          _translateImportText('Import recent connections, favorites and device aliases from %upstream%.'),
+          _translateImportText('Import matching-server device records from %upstream%.'),
           style: Theme.of(context).textTheme.bodySmall,
         ),
       ).marginOnly(left: _kContentHMargin, right: _kContentHMargin, bottom: 10),
@@ -26,7 +26,7 @@
       final confirmed = await gFFI.dialogManager.show<bool>((setState, close, context) {
         return CustomAlertDialog(
           title: Text(_translateImportText('Import %upstream%')),
-          content: Text(translate('Only recent devices, favorites and aliases will be imported. Server settings, passwords, login tokens and display preferences will not be imported.')),
+          content: Text(translate('Only device records with the same ID-server public key will be imported. Existing records, settings and passwords are preserved.')),
           actions: [
             dialogButton('Cancel', onPressed: () => close(false), isOutline: true),
             dialogButton('Import', onPressed: () => close(true)),
