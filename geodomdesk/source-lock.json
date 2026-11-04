@@ -32,5 +32,6 @@
   "src/ui_interface.rs": "b2ee60f90428af0483d5f4fc0b0306510264ad3535b0168aff54bbbdbbb0639d",
   "src/flutter_ffi.rs": "400191f6761117e67562a68bb02cf0adb834e8e01134cbfc47ed0b634fa9d607",
   "src/lang/cn.rs": "40bda0638fad2a471e22c0bd4e331629d4d442b487cd69e5cfe6778630e5a698",
-  "flutter/lib/common/widgets/login.dart": "cba8ee99aae7dd6b383148441674efb06ef08dd5d4b57bd563e5ad56f609a66a"
+  "flutter/lib/common/widgets/login.dart": "cba8ee99aae7dd6b383148441674efb06ef08dd5d4b57bd563e5ad56f609a66a",
+  "libs/hbb_common/src/lib.rs": "809771784b8897011742e647ad11669705b1d64cae908858534cac7d38570562"
 }

@@ -23,6 +23,7 @@ def archive(source, customization, output):
             "src/geodomdesk_auth.rs",
             "src/geodomdesk_import.rs",
             "src/geodomdesk_import/data.rs",
+            "libs/hbb_common/src/geodomdesk_clone_guard.rs",
             "geodomdesk-build-config.json",
         ]
     )

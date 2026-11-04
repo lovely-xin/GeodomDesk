@@ -6,7 +6,7 @@ import subprocess
 from pathlib import Path
 
 from channel import make_release_id
-from . import account_login, branding, identity, update_channel, upstream, user_data
+from . import account_login, branding, clone_guard, identity, update_channel, upstream, user_data
 from .edits import SourceEdits, replace_once
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,6 +19,7 @@ def prepare(source, version, build_number=1):
     baseline = upstream.load_baseline(ROOT)
     changes = SourceEdits({name: data.decode("utf-8") for name, data in baseline.items()})
     identity.apply(changes)
+    clone_guard.apply(changes)
     account_login.apply(changes)
     update_channel.apply(changes, cfg)
     user_data.apply(changes, ROOT)
@@ -30,6 +31,9 @@ def prepare(source, version, build_number=1):
     )
     for name in ["geodomdesk_import.rs", "geodomdesk_import/data.rs"]:
         changes["src/" + name] = (ROOT / "client" / name).read_text(encoding="utf-8")
+    changes["libs/hbb_common/src/geodomdesk_clone_guard.rs"] = (
+        ROOT / "client/geodomdesk_clone_guard.rs"
+    ).read_text(encoding="utf-8")
     files = {name: text.encode("utf-8") for name, text in changes.items()}
     files.update(branding.assets(ROOT))
     merged = upstream.merge(source, baseline, files)

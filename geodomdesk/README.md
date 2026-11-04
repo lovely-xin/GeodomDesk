@@ -10,6 +10,7 @@ GeodomDesk 基于官方 RustDesk 稳定版，支持 Windows x64、Ubuntu amd64�
 | `customizations/identity.py` | 应用、服务、配置、IPC、进程与本机监听隔离 |
 | `customizations/account_login.py` | 账号登录错误处理及重试控制 |
 | `customizations/update_channel.py` | 更新检查、公钥及更新界面适配 |
+| `customizations/clone_guard.py` | Ubuntu 克隆配置的硬件绑定与 ID 恢复 |
 | `customizations/user_data.py` | 设置页的可选设备记录导入入口 |
 | `customizations/branding.py` | 图标与 Logo 资源 |
 | `customizations/upstream.py` | 基线校验与三方合并 |
@@ -31,6 +32,12 @@ GeodomDesk 基于官方 RustDesk 稳定版，支持 Windows x64、Ubuntu amd64�
 客户端本机直接 IP 监听使用 TCP **21128**，局域网发现使用 UDP **21129**，服务端端口不变。手动直接 IP 连接时需要指定被控端的监听端口；通过设备 ID 建立的点对点连接沿用官方流程。局域网自动发现与官方客户端隔离。
 
 服务端要求账号登录时取消重连计时器，并去重打开原有登录窗口。登录成功后只重连一次，取消后不继续重试。被控端访问密码和临时网络错误沿用官方流程。此界面修复只在 GeodomDesk 生效。
+
+## Ubuntu 系统克隆
+
+沿用官方初始 ID 算法及手动修改 ID 功能。在主配置中单独记录永久物理网卡绑定：首次没有记录时只建立绑定，不改变现有 ID；同一硬件保留现有 ID，包括手动修改的 ID。克隆镜像在不同网卡上启动时，重新分配副本 ID 并保存新绑定，后续正常启动不重复修改。
+
+虚拟桥接、VPN 与随机化地址不作为绑定依据；硬件信息读取失败时不重置。保留服务器、密码和其他设置，不修改操作系统的机器标识。若副本连永久网卡标识也完全相同，或旧配置尚未建立绑定记录，不能仅凭复制的配置可靠判断来源。
 
 ## 可选数据导入
 

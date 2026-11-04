@@ -13,7 +13,7 @@ permissions:
 
 concurrency:
   group: geodomdesk-native-build
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   RUST_VERSION: '1.85.1'
@@ -237,7 +237,7 @@ jobs:
       - name: Install native build dependencies
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y build-essential clang cmake curl git libayatana-appindicator3-dev libasound2-dev libclang-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgtk-3-dev libpulse-dev libva-dev libxcb-randr0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxdo-dev libxfixes-dev libxtst-dev libxrandr-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev wayland-protocols libdbus-1-dev libpam0g-dev nasm ninja-build pkg-config unzip xz-utils libssl-dev autoconf automake libtool
+          sudo apt-get install -y build-essential clang cmake curl git libayatana-appindicator3-dev libasound2-dev libclang-dev libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgtk-3-dev libpulse-dev libva-dev libxcb-randr0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxdo-dev libxfixes-dev libxtst-dev libxrandr-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev wayland-protocols libdbus-1-dev libpam0g-dev nasm ninja-build pkg-config unzip xz-utils libssl-dev autoconf automake libtool
           python3 -m pip install cmake==4.3.0 -r ../geodomdesk/requirements.txt
           python3 -c "import sysconfig; print(sysconfig.get_path('scripts'))" >> "$GITHUB_PATH"
       - name: Prepare independent client identity
@@ -322,5 +322,5 @@ jobs:
           else
             gh release create "$VERSION" "${payloads[@]}" --target "$GITHUB_SHA" --draft --title "GeodomDesk $VERSION" --notes 'Follows the official RustDesk version with GeodomDesk customization. Immutable custom build assets are listed in geodomdesk-build.json.'
             gh release upload "$VERSION" release/geodomdesk-build.json
-            gh release edit "$VERSION" --draft=false --latest
           fi
+          gh release edit "$VERSION" --draft=false --latest

@@ -44,6 +44,9 @@ def verify(source=None, update_lock=False):
         (crate / "src/geodomdesk_import_data.rs").write_bytes(
             (source / "src/geodomdesk_import/data.rs").read_bytes()
         )
+        (crate / "src/geodomdesk_clone_guard.rs").write_bytes(
+            (source / "libs/hbb_common/src/geodomdesk_clone_guard.rs").read_bytes()
+        )
         # artifact policy is unchanged by preparation; use the full source if present.
         policy = source / "src/update_metadata/artifact.rs"
         if not policy.exists():
@@ -96,6 +99,7 @@ mod common {
 mod geodomdesk_update;
 mod geodomdesk_auth;
 mod geodomdesk_import_data;
+mod geodomdesk_clone_guard;
 mod update_metadata;
 fn use_ws() -> bool { true }
 """

@@ -114,6 +114,10 @@ class ChannelTests(unittest.TestCase):
             self.assertIn(b'version = "1.5.2"', cargo.read_bytes())
             self.assertNotIn(b"GeodomDesk", (source / "libs/hbb_common/src/config.rs").read_bytes())
             bad.write_bytes(original + b"// upstream change outside the customization\n")
+            # Match a Windows checkout while retaining real upstream changes to merge.
+            for name in lock:
+                path = source / name
+                path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
             with contextlib.redirect_stdout(io.StringIO()):
                 prepare_client.prepare(source, "1.5.2")
             self.assertTrue(
@@ -165,6 +169,24 @@ class ChannelTests(unittest.TestCase):
             self.assertIn("await loginDialog()", ui)
             self.assertIn("_accountLoginPending", ui)
             self.assertIn("'account-login-required'", ui)
+            baseline_config = (ROOT / "reference/libs/hbb_common/src/config.rs").read_text(
+                encoding="utf-8"
+            )
+            prepared_config = (source / "libs/hbb_common/src/config.rs").read_text(encoding="utf-8")
+
+            def auto_id(text):
+                start = text.index("    fn get_auto_id() -> Option<String> {")
+                return text[start : text.index("    pub fn get_auto_password(", start)]
+
+            self.assertEqual(auto_id(baseline_config), auto_id(prepared_config))
+            self.assertIn("geodomdesk_clone_guard::refresh(", prepared_config)
+            baseline_uuid = (ROOT / "reference/libs/hbb_common/src/lib.rs").read_text(
+                encoding="utf-8"
+            )
+            prepared_uuid = (source / "libs/hbb_common/src/lib.rs").read_text(encoding="utf-8")
+            start = baseline_uuid.index("pub fn get_uuid() -> Vec<u8> {")
+            uuid_body = baseline_uuid[start : baseline_uuid.index("\n#[inline]", start)]
+            self.assertIn(uuid_body, prepared_uuid)
 
     def test_customizations_do_not_change_wire_protocol(self):
         from customizations import upstream, identity, update_channel, account_login
