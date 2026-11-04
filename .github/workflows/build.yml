@@ -87,6 +87,19 @@ jobs:
           sed -i 's/extended_text: 14.0.0/extended_text: 13.0.0/g' flutter/pubspec.yaml
           (cd flutter && flutter pub get)
           flutter_rust_bridge_codegen --rust-input ./src/flutter_ffi.rs --dart-output ./flutter/lib/generated_bridge.dart --c-output ./flutter/macos/Runner/bridge_generated.h
+      - uses: subosito/flutter-action@2783a3f08e1baf891508463f8c6653c258246225
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - name: Validate the customized UI before native compilation
+        run: |
+          python3 ../geodomdesk/patch_flutter_sdk.py
+          python3 -c 'import build; build.ffi_bindgen_function_refactor()'
+          sed -i 's/extended_text: 13.0.0/extended_text: 14.0.0/g' flutter/pubspec.yaml
+          cd flutter
+          flutter pub get
+          dart format lib/models/model.dart lib/common/widgets/login.dart lib/desktop/pages/desktop_setting_page.dart
+          flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings lib/models/model.dart lib/common/widgets/login.dart lib/desktop/pages/desktop_setting_page.dart
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: geodomdesk-bridge
@@ -96,6 +109,9 @@ jobs:
             client/src/bridge_generated.io.rs
             client/flutter/lib/generated_bridge.dart
             client/flutter/lib/generated_bridge.freezed.dart
+            client/flutter/lib/models/model.dart
+            client/flutter/lib/common/widgets/login.dart
+            client/flutter/lib/desktop/pages/desktop_setting_page.dart
 
   windows:
     needs: [plan, bridge]
@@ -149,10 +165,7 @@ jobs:
           name: geodomdesk-bridge
           path: client
       - name: Patch the pinned Flutter SDK
-        shell: bash
-        run: |
-          sdk=$(dirname "$(dirname "$(command -v flutter)")")
-          git -C "$sdk" apply "$PWD/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff"
+        run: python ../geodomdesk/patch_flutter_sdk.py
       - uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2
         with:
           vcpkgDirectory: C:\vcpkg
@@ -247,16 +260,7 @@ jobs:
           name: geodomdesk-bridge
           path: client
       - name: Patch the pinned Flutter SDK
-        run: |
-          sdk=$(dirname "$(dirname "$(command -v flutter)")")
-          git -C "$sdk" apply "$PWD/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff"
-      - name: Validate the customized settings UI before native compilation
-        run: |
-          python3 -c 'import build; build.ffi_bindgen_function_refactor()'
-          cd flutter
-          flutter pub get
-          dart format lib/models/model.dart lib/common/widgets/login.dart lib/desktop/pages/desktop_setting_page.dart
-          flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings lib/desktop/pages/desktop_setting_page.dart
+        run: python3 ../geodomdesk/patch_flutter_sdk.py
       - uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2
         with:
           vcpkgDirectory: /opt/artifacts/vcpkg

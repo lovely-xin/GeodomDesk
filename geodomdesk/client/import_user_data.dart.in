@@ -15,7 +15,7 @@
     try {
       final confirmed = await gFFI.dialogManager.show<bool>((setState, close, context) {
         return CustomAlertDialog(
-          title: translate('Import RustDesk device records'),
+          title: Text(translate('Import RustDesk device records')),
           content: Text(translate('Only recent devices, favorites and aliases will be imported. Server settings, passwords, login tokens and display preferences will not be imported.')),
           actions: [
             dialogButton('Cancel', onPressed: () => close(false), isOutline: true),
@@ -37,11 +37,15 @@
             '${translate('Favorites')} +${result['favorites_added']}';
       });
     } catch (_) {
-      if (mounted) setState(() {
-        _importUserDataStatus = translate('Unable to import RustDesk device records. Check that RustDesk user data exists for this user.');
-      });
+      if (mounted) {
+        setState(() {
+          _importUserDataStatus = translate('Unable to import RustDesk device records. Check that RustDesk user data exists for this user.');
+        });
+      }
     } finally {
-      if (mounted) setState(() => _importingUserData = false);
+      if (mounted) {
+        setState(() => _importingUserData = false);
+      }
     }
   }
 
