@@ -1,0 +1,7 @@
+Mode: built-in imagegen
+Reference: work/tomcat-welcome/assets/geodom-logo.png
+Master: assets/icon-master.png
+Exports: assets/geodomdesk.ico (16/24/32/48/64/128/256), assets/geodomdesk.png (512)
+
+Prompt:
+Use case: logo-brand. Asset type: production Windows/Ubuntu application icon for GeodomDesk, a company remote-desktop client. The referenced PNG is the company's existing Geodom logo; use its leftmost standalone blue emblem as the brand reference, preserve its recognizable geometry and proportions, and omit the wide wordmark and Chinese lettering. Design one single centered square app icon, not a presentation sheet or mockup. A deep ink/navy rounded-square tile with the Geodom emblem prominently in its existing cyan/blue brand color. Crisp, confident, flat geometric construction with restrained depth only if it aids separation; no shiny glass, metallic bevels, gradients full of effects, perspective, or tiny decorations. Convey remote connection with a very small, simple secondary two-way-link detail only if it remains clear at 24 pixels. Generous optical padding, impeccable centering and balanced spacing, distinct silhouette and bold enough forms for 16px taskbar rendering. No words, no app name, no slogans, no watermark, no external frame or device mockup. Truly transparent outside the rounded-square icon. Output a high-resolution square icon suitable for deriving standard application icon sizes.

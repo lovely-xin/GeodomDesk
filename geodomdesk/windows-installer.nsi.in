@@ -1,0 +1,41 @@
+Unicode True
+!include "MUI2.nsh"
+!include "x64.nsh"
+Name "GeodomDesk @@VERSION@@"
+OutFile "@@OUTPUT@@"
+RequestExecutionLevel admin
+Icon "@@ICON@@"
+!define MUI_ICON "@@ICON@@"
+SetCompressor zlib
+BrandingText "Geodom | geodom.cn"
+VIProductVersion "@@VERSION@@.0"
+VIAddVersionKey "ProductName" "GeodomDesk"
+VIAddVersionKey "FileDescription" "GeodomDesk remote access client"
+VIAddVersionKey "FileVersion" "@@VERSION@@"
+!define MUI_WELCOMEPAGE_TEXT "安装 GeodomDesk 客户端，并自动配置 Geodom 自建服务器。$\r$\n$\r$\n服务器：@@HOST@@$\r$\n$\r$\n@@PASSWORD_NOTICE@@"
+!insertmacro MUI_PAGE_WELCOME
+!insertmacro MUI_PAGE_LICENSE "@@LICENSE@@"
+!insertmacro MUI_PAGE_INSTFILES
+!define MUI_FINISHPAGE_TEXT "安装完成。服务器与公钥已配置并核对，请从开始菜单打开 GeodomDesk。"
+!insertmacro MUI_PAGE_FINISH
+!insertmacro MUI_LANGUAGE "SimpChinese"
+Function .onInit
+  ${IfNot} ${RunningX64}
+    MessageBox MB_ICONSTOP "此安装包需要 64 位 Windows。"
+    Abort
+  ${EndIf}
+FunctionEnd
+Section "GeodomDesk"
+  InitPluginsDir
+  SetOutPath "$PLUGINSDIR"
+  File /oname=geodomdesk-client.exe "@@PAYLOAD@@"
+  File /oname=install.ps1 "@@SCRIPT@@"
+  DetailPrint "正在安装 GeodomDesk 并配置 Geodom 服务器……"
+  nsExec::ExecToLog /TIMEOUT=600000 '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\install.ps1"'
+  Pop $0
+  ${If} $0 != 0
+    MessageBox MB_ICONSTOP "安装或服务器配置失败，请查看安装详情后重试。"
+    SetErrorLevel 1
+    Abort
+  ${EndIf}
+SectionEnd

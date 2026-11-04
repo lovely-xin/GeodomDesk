@@ -1,0 +1,11 @@
+[Unit]
+Description=Check GeodomDesk build releases every six hours
+
+[Timer]
+OnCalendar=*-*-* 00,06,12,18:25:00 Asia/Shanghai
+RandomizedDelaySec=10m
+Persistent=true
+Unit=geodomdesk-builder.service
+
+[Install]
+WantedBy=timers.target

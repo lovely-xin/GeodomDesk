@@ -1,0 +1,313 @@
+name: Build GeodomDesk
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['geodomdesk/**', '.github/workflows/build.yml']
+  schedule:
+    - cron: '15 */6 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: geodomdesk-native-build
+  cancel-in-progress: false
+
+env:
+  RUST_VERSION: '1.85.1'
+  FLUTTER_VERSION: '3.24.5'
+  VCPKG_COMMIT: 9e593bb18ea69cc5095e012465dcd675a822ed0d
+  CARGO_INCREMENTAL: '0'
+  CARGO_BUILD_JOBS: '3'
+
+jobs:
+  plan:
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      upstream_commit: ${{ steps.plan.outputs.upstream_commit }}
+      build_number: ${{ steps.plan.outputs.build_number }}
+      build: ${{ steps.plan.outputs.build }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Follow the latest official stable source
+        id: plan
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 geodomdesk/plan_upstream.py
+
+  bridge:
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+      UPSTREAM_COMMIT: ${{ needs.plan.outputs.upstream_commit }}
+      BUILD_NUMBER: ${{ needs.plan.outputs.build_number }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          repository: rustdesk/rustdesk
+          ref: ${{ env.UPSTREAM_COMMIT }}
+          submodules: recursive
+          path: client
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          workspaces: client
+          prefix-key: geodomdesk-bridge
+      - uses: subosito/flutter-action@2783a3f08e1baf891508463f8c6653c258246225
+        with:
+          flutter-version: '3.22.3'
+          cache: true
+      - name: Install code generation prerequisites
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y clang cmake libclang-dev libgtk-3-dev ninja-build pkg-config nasm
+          python3 -m pip install -r ../geodomdesk/requirements.txt
+      - name: Prepare and validate source
+        run: |
+          python3 ../geodomdesk/prepare_client.py --source . --version "$VERSION" --build-number "$BUILD_NUMBER"
+          python3 ../geodomdesk/verify_rust.py --source .
+      - name: Generate Flutter bridge
+        run: |
+          cargo install cargo-expand --version 1.0.95 --locked
+          cargo install flutter_rust_bridge_codegen --version 1.80.1 --features uuid --locked
+          sed -i 's/extended_text: 14.0.0/extended_text: 13.0.0/g' flutter/pubspec.yaml
+          (cd flutter && flutter pub get)
+          flutter_rust_bridge_codegen --rust-input ./src/flutter_ffi.rs --dart-output ./flutter/lib/generated_bridge.dart --c-output ./flutter/macos/Runner/bridge_generated.h
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: geodomdesk-bridge
+          if-no-files-found: error
+          path: |
+            client/src/bridge_generated.rs
+            client/src/bridge_generated.io.rs
+            client/flutter/lib/generated_bridge.dart
+            client/flutter/lib/generated_bridge.freezed.dart
+
+  windows:
+    needs: [plan, bridge]
+    runs-on: windows-2022
+    timeout-minutes: 180
+    defaults:
+      run:
+        working-directory: client
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+      UPSTREAM_COMMIT: ${{ needs.plan.outputs.upstream_commit }}
+      BUILD_NUMBER: ${{ needs.plan.outputs.build_number }}
+      VCPKG_DEFAULT_TRIPLET: x64-windows-static
+      VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          repository: rustdesk/rustdesk
+          ref: ${{ env.UPSTREAM_COMMIT }}
+          submodules: recursive
+          path: client
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          workspaces: client
+          prefix-key: geodomdesk-windows
+      - uses: subosito/flutter-action@2783a3f08e1baf891508463f8c6653c258246225
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - uses: KyleMayes/install-llvm-action@ebc0426251bc40c7cd31162802432c68818ab8f0
+        with:
+          version: '15.0.6'
+      - name: Install current CMake for pinned vcpkg
+        shell: pwsh
+        run: |
+          python -m pip install cmake==4.3.0
+          python -m pip install -r ../geodomdesk/requirements.txt
+          $scripts = python -c "import sysconfig; print(sysconfig.get_path('scripts'))"
+          $scripts | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Prepare independent client identity
+        run: python ../geodomdesk/prepare_client.py --source . --version $env:VERSION --build-number $env:BUILD_NUMBER
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: geodomdesk-bridge
+          path: client
+      - name: Patch the pinned Flutter SDK
+        shell: bash
+        run: |
+          sdk=$(dirname "$(dirname "$(command -v flutter)")")
+          git -C "$sdk" apply "$PWD/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff"
+      - uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2
+        with:
+          vcpkgDirectory: C:\vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT }}
+          doNotCache: false
+      - name: Build native dependencies
+        shell: bash
+        run: |
+          cd "$GITHUB_WORKSPACE/client"
+          "$VCPKG_ROOT/vcpkg" install --triplet x64-windows-static --x-install-root="$VCPKG_ROOT/installed"
+      - name: Build Windows Flutter bundle
+        run: |
+          python ./build.py --portable --flutter --skip-portable-pack --hwcodec --vram
+          if ($LASTEXITCODE -ne 0) { throw 'Native Windows build failed' }
+          $exe = './flutter/build/windows/x64/runner/Release/GeodomDesk.exe'
+          $version = (& $exe --version | Out-String).Trim()
+          if ($version -ne $env:VERSION) { throw "Wrong compiled client version: $version" }
+          $info = [Diagnostics.FileVersionInfo]::GetVersionInfo((Resolve-Path $exe))
+          if ($info.ProductName -ne 'GeodomDesk') { throw 'The runner is not GeodomDesk' }
+      - name: Build the independent privacy helper
+        shell: pwsh
+        run: |
+          git clone https://github.com/rustdesk-org/RustDeskTempTopMostWindow ../topmost-helper
+          git -C ../topmost-helper checkout ecd8d6a139eee76845ea66423fb739af450fda90
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products '*' -requires Microsoft.Component.MSBuild -property installationPath
+          & "$vs\MSBuild\Current\Bin\MSBuild.exe" ../topmost-helper/WindowInjection/WindowInjection.vcxproj -p:Configuration=Release -p:Platform=x64 -p:TargetVersion=Windows10
+          if ($LASTEXITCODE -ne 0) { throw 'Privacy helper build failed' }
+          Copy-Item ../topmost-helper/WindowInjection/x64/Release/WindowInjection.dll ./flutter/build/windows/x64/runner/Release/
+      - name: Create portable update executable
+        shell: pwsh
+        run: |
+          python -m pip install -r ./libs/portable/requirements.txt
+          Push-Location libs/portable
+          python ./generate.py -f ../../flutter/build/windows/x64/runner/Release -o . -e ../../flutter/build/windows/x64/runner/Release/GeodomDesk.exe
+          if ($LASTEXITCODE -ne 0) { throw 'Portable packer failed' }
+          Pop-Location
+          New-Item -ItemType Directory -Force ../windows-artifact | Out-Null
+          Copy-Item ./target/release/rustdesk-portable-packer.exe ../windows-artifact/GeodomDesk.exe
+          Copy-Item ./geodomdesk-build-config.json ../windows-artifact/
+      - name: Check installer commands
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File ../geodomdesk/test-windows-installer.ps1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: geodomdesk-windows
+          if-no-files-found: error
+          path: windows-artifact/*
+
+  ubuntu:
+    needs: [plan, bridge]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    defaults:
+      run:
+        working-directory: client
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+      UPSTREAM_COMMIT: ${{ needs.plan.outputs.upstream_commit }}
+      BUILD_NUMBER: ${{ needs.plan.outputs.build_number }}
+      VCPKG_DEFAULT_TRIPLET: x64-linux
+      VCPKG_DEFAULT_HOST_TRIPLET: x64-linux
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          repository: rustdesk/rustdesk
+          ref: ${{ env.UPSTREAM_COMMIT }}
+          submodules: recursive
+          path: client
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          workspaces: client
+          prefix-key: geodomdesk-ubuntu
+      - uses: subosito/flutter-action@2783a3f08e1baf891508463f8c6653c258246225
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y build-essential clang cmake curl git libayatana-appindicator3-dev libasound2-dev libclang-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgtk-3-dev libpulse-dev libva-dev libxcb-randr0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxdo-dev libxfixes-dev libxtst-dev libxrandr-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev wayland-protocols libdbus-1-dev libpam0g-dev nasm ninja-build pkg-config unzip xz-utils libssl-dev autoconf automake libtool
+          python3 -m pip install cmake==4.3.0 -r ../geodomdesk/requirements.txt
+          python3 -c "import sysconfig; print(sysconfig.get_path('scripts'))" >> "$GITHUB_PATH"
+      - name: Prepare independent client identity
+        run: python3 ../geodomdesk/prepare_client.py --source . --version "$VERSION" --build-number "$BUILD_NUMBER"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: geodomdesk-bridge
+          path: client
+      - name: Patch the pinned Flutter SDK
+        run: |
+          sdk=$(dirname "$(dirname "$(command -v flutter)")")
+          git -C "$sdk" apply "$PWD/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff"
+      - uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2
+        with:
+          vcpkgDirectory: /opt/artifacts/vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT }}
+          doNotCache: false
+      - name: Build native dependencies and Ubuntu package
+        run: |
+          "$VCPKG_ROOT/vcpkg" install --triplet x64-linux --x-install-root="$VCPKG_ROOT/installed"
+          export DEB_ARCH=amd64
+          python3 ./build.py --flutter --hwcodec --unix-file-copy-paste
+          mkdir -p ../ubuntu-artifact
+          python3 ../geodomdesk/repack_deb.py --input "rustdesk-$VERSION.deb" --output ../ubuntu-artifact/geodomdesk.deb --version "$VERSION" --build-number "$BUILD_NUMBER"
+          cp geodomdesk-build-config.json ../ubuntu-artifact/
+      - name: Archive corresponding source including modified submodules
+        run: |
+          python3 ../geodomdesk/archive_source.py --source . --customization ../geodomdesk --output ../ubuntu-artifact/geodomdesk-source.tar.gz
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: geodomdesk-ubuntu
+          if-no-files-found: error
+          path: ubuntu-artifact/*
+
+  release:
+    needs: [plan, windows, ubuntu]
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+      UPSTREAM_COMMIT: ${{ needs.plan.outputs.upstream_commit }}
+      BUILD_NUMBER: ${{ needs.plan.outputs.build_number }}
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: geodomdesk-windows
+          path: windows
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: geodomdesk-ubuntu
+          path: ubuntu
+      - name: Validate both builds and write release descriptor
+        run: |
+          cmp windows/geodomdesk-build-config.json ubuntu/geodomdesk-build-config.json
+          python3 -m pip install -r geodomdesk/requirements.txt
+          python3 geodomdesk/release_bundle.py --version "$VERSION" --repository "$GITHUB_REPOSITORY" --windows windows/GeodomDesk.exe --ubuntu ubuntu/geodomdesk.deb --source-archive ubuntu/geodomdesk-source.tar.gz --build-config windows/geodomdesk-build-config.json --output release
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: geodomdesk-release
+          if-no-files-found: error
+          path: release/*
+      - name: Publish a new stable Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          payloads=()
+          for file in release/*; do
+            if [ "$(basename "$file")" != geodomdesk-build.json ]; then payloads+=("$file"); fi
+          done
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            gh release upload "$VERSION" "${payloads[@]}"
+            gh release upload "$VERSION" release/geodomdesk-build.json --clobber
+          else
+            gh release create "$VERSION" "${payloads[@]}" --target "$GITHUB_SHA" --draft --title "GeodomDesk $VERSION" --notes 'Follows the official RustDesk version with GeodomDesk customization. Immutable custom build assets are listed in geodomdesk-build.json.'
+            gh release upload "$VERSION" release/geodomdesk-build.json
+            gh release edit "$VERSION" --draft=false --latest
+          fi

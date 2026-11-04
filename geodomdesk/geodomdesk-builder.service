@@ -1,0 +1,23 @@
+[Unit]
+Description=GeodomDesk installer and signed update publisher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/home/geodom/script/geodomdesk-builder
+ExecStart=/usr/bin/python3 /home/geodom/script/geodomdesk-builder/publisher.py
+UMask=0022
+Nice=10
+CPUQuota=80%
+MemoryHigh=256M
+MemoryMax=512M
+TimeoutStartSec=3h
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/geodomdesk-builder /home/geodom/tomcat/webapps/ROOT
+NoNewPrivileges=yes
+
+# The timer only creates downloads and metadata; it never restarts the RustDesk server.

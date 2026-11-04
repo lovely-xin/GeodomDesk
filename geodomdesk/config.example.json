@@ -1,0 +1,15 @@
+{
+  "enabled": false,
+  "repository": "",
+  "activate_portal": false,
+  "public_key": "fd1H8jN3QtH2s+YlF6MLXcm91ZnmGi2czprn5B7H8H0=",
+  "signing_key": "/etc/geodomdesk-builder/update-signing-key",
+  "state_dir": "/var/lib/geodomdesk-builder",
+  "public_dir": "/home/geodom/tomcat/webapps/ROOT/downloads/geodomdesk",
+  "portal_file": "/home/geodom/tomcat/webapps/ROOT/index.html",
+  "host": "www.qcjcpt.com",
+  "relay": "",
+  "api": "",
+  "websocket_port": 21114,
+  "key": "AKJROlsG4WAI103ADqoVrBs4Nb7+6dpbHYVO+MVd81Y="
+}
