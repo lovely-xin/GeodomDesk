@@ -37,9 +37,15 @@ def apply(changes):
         "                    translate('Website'),",
         "                    '${translate('Website')}: www.geodom.cn',",
     )
+    start = changes[desktop].index(
+        "              Container(\n"
+        "                decoration: const BoxDecoration(color: Color(0xFF2c8cff)),"
+    )
+    end_marker = "              ).marginSymmetric(vertical: 4.0)"
+    end = changes[desktop].index(end_marker, start) + len(end_marker)
     change(
         desktop,
-        "              Container(\n                decoration: const BoxDecoration(color: Color(0xFF2c8cff)),",
+        changes[desktop][start:end],
         """              InkWell(
                   onTap: () {
                     launchUrlString('"""
@@ -47,12 +53,16 @@ def apply(changes):
         + """');
                   },
                   child: Text(
-                    translate('GeodomDesk source code'),
+                    translate('Source code'),
                     style: linkStyle,
-                  ).marginSymmetric(vertical: 4.0)),
-              Container(
-                decoration: const BoxDecoration(color: Color(0xFF2c8cff)),""",
+                  ).marginSymmetric(vertical: 4.0)),""",
     )
+    for unused in [
+        "      final license = await bind.mainGetLicense();\n",
+        "        'license': license,\n",
+        "      final license = data['license'].toString();\n",
+    ]:
+        change(desktop, unused, "")
     change(
         mobile,
         "      content: Wrap(direction: Axis.vertical, spacing: 12, children: [\n        Text('Version: $version'),",
@@ -110,7 +120,7 @@ def apply(changes):
         + source_url
         + """'));
                 },
-                title: Text(translate('GeodomDesk source code')),
+                title: Text(translate('Source code')),
                 leading: Icon(Icons.code)),
             SettingsTile(
                 title: Text(translate("Build Date")),""",
@@ -132,7 +142,7 @@ class ScanButton""",
             },
             child: Padding(
               padding: EdgeInsets.symmetric(vertical: 8),
-              child: Text(translate('GeodomDesk source code'),
+              child: Text(translate('Source code'),
                   style: TextStyle(decoration: TextDecoration.underline)),
             )),
       ]),
@@ -146,7 +156,7 @@ class ScanButton""",
     translations = {
         "About GeodomDesk": "关于 GeodomDesk",
         attribution: "GeodomDesk 基于 %upstream% 开源项目定制。",
-        "GeodomDesk source code": "GeodomDesk 源代码",
+        "Source code": "源代码",
     }
     entries = "".join(
         "        ("

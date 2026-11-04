@@ -1,8 +1,9 @@
   Widget importOfficialUserData() {
     return _Card(title: 'Data migration', children: [
-      _Button('Import RustDesk device records', _importOfficialUserData,
+      _Button('Import %upstream%', _importOfficialUserData,
           enabled: !_importingUserData,
-          tip: 'Import RustDesk device records only; existing records and settings are preserved.'),
+          tip: 'Import %upstream% device records only; existing records and settings are preserved.',
+          translator: _translateImportText),
       if (_importUserDataStatus.isNotEmpty)
         Align(
           alignment: Alignment.centerLeft,
@@ -11,13 +12,16 @@
     ]);
   }
 
+  String _translateImportText(String key) =>
+      translate(key).replaceAll('%upstream%', 'RustDesk');
+
   Future<void> _importOfficialUserData() async {
     if (_importingUserData) return;
     setState(() { _importingUserData = true; _importUserDataStatus = ''; });
     try {
       final confirmed = await gFFI.dialogManager.show<bool>((setState, close, context) {
         return CustomAlertDialog(
-          title: Text(translate('Import RustDesk device records')),
+          title: Text(_translateImportText('Import %upstream%')),
           content: Text(translate('Only recent devices, favorites and aliases will be imported. Server settings, passwords, login tokens and display preferences will not be imported.')),
           actions: [
             dialogButton('Cancel', onPressed: () => close(false), isOutline: true),
@@ -41,7 +45,7 @@
     } catch (_) {
       if (mounted) {
         setState(() {
-          _importUserDataStatus = translate('Unable to import RustDesk device records. Check that RustDesk user data exists for this user.');
+          _importUserDataStatus = _translateImportText('Unable to import %upstream% device records. Check that %upstream% user data exists for this user.');
         });
       }
     } finally {

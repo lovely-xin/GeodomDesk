@@ -28,6 +28,7 @@ def assets(root):
     for name in [
         "flutter/windows/runner/resources/app_icon.ico",
         "res/icon.ico",
+        "res/tray-icon.ico",
         "flutter/assets/icon.ico",
     ]:
         result[name] = (root / "assets/geodomdesk.ico").read_bytes()
