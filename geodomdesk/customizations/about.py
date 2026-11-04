@@ -7,7 +7,8 @@ def apply(changes):
     change = changes.replace
     desktop = "flutter/lib/desktop/pages/desktop_setting_page.dart"
     mobile = "flutter/lib/mobile/pages/settings_page.dart"
-    attribution = "GeodomDesk is customized from the RustDesk open-source project."
+    # The upstream translator rebrands literal RustDesk; insert the credit afterwards.
+    attribution = "GeodomDesk is customized from the %upstream% open-source project."
     source_url = "https://github.com/lovely-xin/GeodomDesk"
     for name in [desktop, mobile]:
         change(name, "translate('About RustDesk')", "translate('About GeodomDesk')")
@@ -17,7 +18,7 @@ def apply(changes):
         "              SelectionArea(\n"
         + "                  child: Text(translate('"
         + attribution
-        + "'))\n"
+        + "').replaceAll('%upstream%', 'RustDesk'))\n"
         + "                      .marginSymmetric(vertical: 4.0)),\n"
         + "              SelectionArea(\n                  child: Text('${translate('Version')}: $version')",
     )
@@ -56,7 +57,7 @@ def apply(changes):
         const SizedBox(height: 12),
         Text(translate('"""
         + attribution
-        + """')),
+        + """').replaceAll('%upstream%', 'RustDesk')),
         const SizedBox(height: 12),""",
     )
     for indent in ["\n", "              "]:
@@ -74,7 +75,7 @@ def apply(changes):
         """            SettingsTile(
                 title: Text(translate('"""
         + attribution
-        + """')),
+        + """').replaceAll('%upstream%', 'RustDesk')),
                 leading: Icon(Icons.info_outline)),
             SettingsTile(
                 onPressed: (context) async {
@@ -117,7 +118,7 @@ class ScanButton""",
     )
     translations = {
         "About GeodomDesk": "关于 GeodomDesk",
-        attribution: "GeodomDesk 基于 RustDesk 开源项目定制。",
+        attribution: "GeodomDesk 基于 %upstream% 开源项目定制。",
         "GeodomDesk source code": "GeodomDesk 源代码",
     }
     entries = "".join(
