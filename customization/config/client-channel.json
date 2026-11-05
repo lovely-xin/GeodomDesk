@@ -7,6 +7,12 @@
   "upstream_commit": "23e5bb471a040d62f0a6ad52591fb30784265b73",
   "android_package_id": "cn.geodom.geodomdesk",
   "native_config": true,
+  "ice_servers": [
+    "stun:stun.chat.bilibili.com:3478",
+    "stun:stun.miwifi.com:3478",
+    "stun:stun.cloudflare.com:3478",
+    "stun:stun.nextcloud.com:443"
+  ],
   "server": {
     "host": "www.qcjcpt.com",
     "key": "AKJROlsG4WAI103ADqoVrBs4Nb7+6dpbHYVO+MVd81Y=",

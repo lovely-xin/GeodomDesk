@@ -26,8 +26,11 @@ def apply(changes, config):
     changes.replace(
         "libs/hbb_common/src/config.rs",
         "pub static ref DEFAULT_SETTINGS: RwLock<HashMap<String, String>> = Default::default();",
-        """pub static ref DEFAULT_SETTINGS: RwLock<HashMap<String, String>> = RwLock::new(HashMap::from([
-        #[cfg(target_os = "windows")]
+        "pub static ref DEFAULT_SETTINGS: RwLock<HashMap<String, String>> = RwLock::new(HashMap::from([\n"
+        + '        ("ice-servers".to_owned(), '
+        + json.dumps(",".join(config["ice_servers"]))
+        + ".to_owned()),\n"
+        + """        #[cfg(target_os = "windows")]
         ("allow-auto-update".to_owned(), "Y".to_owned())
     ]));""",
     )
