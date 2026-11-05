@@ -40,6 +40,11 @@ def apply(changes, root):
     }
 
     pub fn set_id(id: &str) {""")
+    change(name, """    pub fn set(cfg: Config) -> bool {
+        let mut lock = CONFIG.write().unwrap();""", """    pub fn set(mut cfg: Config) -> bool {
+        let mut lock = CONFIG.write().unwrap();
+        // Default identity belongs to this host, not to a synchronized settings snapshot.
+        cfg.default_id = lock.default_id.clone();""")
     change(name, """        Config::set_id(&new_id);
         log::info!("id updated from {} to {}", id, new_id);""", """        let mut config = CONFIG.write().unwrap();
         if config.default_id == id {
@@ -86,8 +91,8 @@ pub async fn main_restore_default_id() -> String {
 
 pub fn main_change_id(new_id: String) {""")
     name = "flutter/lib/desktop/pages/desktop_setting_page.dart"
-    change(name, "  final GlobalKey _minToolbarOptionKey = GlobalKey();",
-           "  final GlobalKey _minToolbarOptionKey = GlobalKey();\n  bool _restoringDefaultId = false;")
+    change(name, "class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {",
+           "class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {\n  bool _restoringDefaultId = false;")
     change(name, """          return _Button('Change ID', changeIdDialog,
               enabled: !locked && model.connectStatus > 0);""", """          final enabled = !locked && model.connectStatus > 0 && !_restoringDefaultId;
           return Wrap(runSpacing: 8, children: [

@@ -44,7 +44,9 @@
         );
       });
     } catch (_) {
-      msgBox(gFFI.sessionId, 'custom-nocancel', 'Error', 'Unable to read default ID', '', gFFI.dialogManager);
+      if (mounted) {
+        msgBox(gFFI.sessionId, 'custom-nocancel', 'Error', 'Unable to read default ID', '', gFFI.dialogManager);
+      }
     } finally {
       if (mounted) setState(() => _restoringDefaultId = false);
     }
