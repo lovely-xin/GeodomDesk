@@ -17,6 +17,7 @@ GeodomDesk 基于官方 RustDesk 稳定版，支持 Windows x64、Ubuntu amd64�
 | `customizations/clone_guard.py` | Ubuntu 克隆配置的硬件绑定与 ID 恢复 |
 | `customizations/user_data.py` | 首次启动与手动导入，统一按服务器公钥筛选 |
 | `customizations/branding.py` | 独立应用图标，公司标识仅出现在关于页面 |
+| `client/geodomdesk_window_icons.h` | Windows 窗口与任务栏的 DPI 图标加载和句柄释放 |
 | `customizations/upstream.py` | 基线校验与三方合并 |
 | `customizations/build.py` | 组合定制、版本记录和统一写入 |
 | `client/` | 编译进客户端的独立 Rust 模块 |
@@ -57,7 +58,7 @@ GeodomDesk 基于官方 RustDesk 稳定版，支持 Windows x64、Ubuntu amd64�
 
 客户端本机直接 IP 监听使用 TCP **21128**，局域网发现使用 UDP **21129**，服务端端口不变。手动直接 IP 连接时需要指定被控端的监听端口；通过设备 ID 建立的点对点连接沿用官方流程。局域网自动发现与官方客户端隔离。
 
-服务端要求账号登录时取消重连计时器，并去重打开原有登录窗口。登录成功后只重连一次，取消后不继续重试。被控端访问密码和临时网络错误沿用官方流程。此界面修复只在 GeodomDesk 生效。
+通过设备 ID 发起的远程控制、文件传输、TCP 隧道、RDP、摄像头和终端共用服务端账号验证。服务端要求登录时取消重连计时器，并去重打开原有登录窗口；中继回退包装的登录错误同样处理。普通会话登录成功后只重连一次，取消后不继续重试。TCP 隧道和 RDP 保留原监听，每次新的本地连接读取当前账号令牌；被拒绝的本地应用连接需要重新发起，不重建监听或套用桌面画面等待流程。被控端访问密码和临时网络错误沿用官方流程。此界面修复只在 GeodomDesk 生效。
 
 ## Ubuntu 系统克隆
 
