@@ -33,7 +33,6 @@ def apply(changes):
     change(common, "launchUrl(Uri.parse('https://rustdesk.com'));",
            "launchUrl(Uri.parse('https://www.geodom.cn'));")
     connection = "flutter/lib/desktop/pages/connection_page.dart"
-    change(connection, 'const url = "https://rustdesk.com/pricing";', 'const url = "https://www.geodom.cn";')
     change(connection, "            if (!isIncomingOnly) setupServerWidget(),", "")
     # Remove the unused marketing widget and handler rather than retaining dead controls.
     text = changes[connection]

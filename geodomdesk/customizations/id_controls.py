@@ -81,15 +81,24 @@ pub(crate) async fn change_id_registered(id: String, old_id: String) -> &'static
     change("src/ui_interface.rs", """        crate::ipc::set_config_async("id", id.to_owned()).await.ok();""", """        if crate::ipc::set_id_verified(id.to_owned()).await.is_err() {
             return "Failed to update local ID";
         }""")
-    change("src/flutter_ffi.rs", "pub fn main_change_id(new_id: String) {", """pub async fn main_get_default_id() -> hbb_common::anyhow::Result<String> {
-    crate::geodomdesk_identity::default_id().await
+    change("src/flutter_ffi.rs", "pub fn main_change_id(new_id: String) {", """pub fn main_get_default_id() -> hbb_common::anyhow::Result<String> {
+    crate::geodomdesk_identity::read_default_id()
 }
 
-pub async fn main_restore_default_id() -> String {
-    crate::geodomdesk_identity::restore().await.to_owned()
+pub fn main_restore_default_id() -> String {
+    crate::geodomdesk_identity::restore().to_owned()
 }
 
 pub fn main_change_id(new_id: String) {""")
+    change("flutter/lib/web/bridge.dart", "  Future<void> mainChangeId({required String newId, dynamic hint}) {", """  Future<String> mainGetDefaultId({dynamic hint}) {
+    throw UnsupportedError('Default ID is managed by the native host service');
+  }
+
+  Future<String> mainRestoreDefaultId({dynamic hint}) {
+    throw UnsupportedError('Default ID is managed by the native host service');
+  }
+
+  Future<void> mainChangeId({required String newId, dynamic hint}) {""")
     name = "flutter/lib/desktop/pages/desktop_setting_page.dart"
     change(name, "class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {",
            "class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {\n  bool _restoringDefaultId = false;")

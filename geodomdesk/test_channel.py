@@ -160,6 +160,8 @@ class ChannelTests(unittest.TestCase):
                 path.write_bytes((ROOT / "reference" / name).read_bytes())
             (source / "res").mkdir(exist_ok=True)
             (source / "flutter/windows/runner/resources").mkdir(parents=True)
+            german = source / "src/lang/de.rs"
+            german.write_text('lazy_static! { pub static ref T = [\n        ("Restore default ID", "Bestehende Übersetzung"),\n    ].iter().cloned().collect();\n}\n', encoding="utf-8")
             cargo = source / "Cargo.toml"
             cargo.write_bytes(
                 cargo.read_bytes().replace(b'version = "1.5.1"', b'version = "1.5.2"', 1)
@@ -190,6 +192,14 @@ class ChannelTests(unittest.TestCase):
                 path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
             with contextlib.redirect_stdout(io.StringIO()):
                 prepare_client.prepare(source, "1.5.2")
+            self.assertIn('("Restore default ID", "Bestehende Übersetzung")', german.read_text(encoding="utf-8"))
+            self.assertIn('("Data and permissions", "")', german.read_text(encoding="utf-8"))
+            ffi = (source / "src/flutter_ffi.rs").read_text(encoding="utf-8")
+            self.assertIn("pub fn main_get_default_id()", ffi)
+            self.assertIn("pub fn main_restore_default_id()", ffi)
+            web_bridge = (source / "flutter/lib/web/bridge.dart").read_text(encoding="utf-8")
+            self.assertIn("mainImportOfficialUserData", web_bridge)
+            self.assertIn("mainRestoreDefaultId", web_bridge)
             self.assertTrue(
                 bad.read_bytes().endswith(b"// upstream change outside the customization\n")
             )

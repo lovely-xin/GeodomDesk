@@ -14,6 +14,7 @@ from . import (
     clone_guard,
     identity,
     id_controls,
+    localization,
     printer,
     server_config,
     settings_cleanup,
@@ -60,6 +61,7 @@ def prepare(source, version, build_number=1):
     files = {name: text.encode("utf-8") for name, text in changes.items()}
     files.update(branding.assets(ROOT))
     merged = upstream.merge(source, baseline, files)
+    localization.complete_catalog(source, baseline, merged)
     cargo = merged["Cargo.toml"].decode()
     actual = re.search(r'(?m)^version\s*=\s*"([^"]+)"', cargo).group(1)
     if actual != version:

@@ -1,7 +1,12 @@
 //! Restore the host service's saved default ID through the normal registration protocol.
 #[cfg(any(target_os = "android", target_os = "ios"))]
 use hbb_common::config::Config;
-use hbb_common::ResultType;
+use hbb_common::{tokio, ResultType};
+
+#[tokio::main(flavor = "current_thread")]
+pub(crate) async fn read_default_id() -> ResultType<String> {
+    default_id().await
+}
 
 pub(crate) async fn default_id() -> ResultType<String> {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -14,6 +19,7 @@ pub(crate) async fn default_id() -> ResultType<String> {
     Ok(id)
 }
 
+#[tokio::main(flavor = "current_thread")]
 pub(crate) async fn restore() -> &'static str {
     let Ok(id) = default_id().await else {
         return "Unable to read default ID";

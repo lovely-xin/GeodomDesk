@@ -14,6 +14,15 @@ def apply(changes, root):
         "        crate::geodomdesk_import::import_on_first_run();",
     )
     change(
+        "flutter/lib/web/bridge.dart",
+        "  Future<void> mainChangeId({required String newId, dynamic hint}) {",
+        """  Future<String> mainImportOfficialUserData({dynamic hint}) {
+    throw UnsupportedError('Device import requires native user data');
+  }
+
+  Future<void> mainChangeId({required String newId, dynamic hint}) {""",
+    )
+    change(
         "src/flutter_ffi.rs",
         "pub fn main_get_fav() -> Vec<String> {",
         """pub fn main_import_official_user_data() -> hbb_common::anyhow::Result<String> {
