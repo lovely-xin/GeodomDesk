@@ -27,6 +27,7 @@ def archive(source, customization, output):
             "libs/hbb_common/src/geodomdesk_id_policy.rs",
             "libs/hbb_common/src/geodomdesk_clone_guard.rs",
             "flutter/assets/geodom-logo.png",
+            "flutter/windows/runner/geodomdesk_window_icons.h",
             "geodomdesk-build-config.json",
         ]
     )

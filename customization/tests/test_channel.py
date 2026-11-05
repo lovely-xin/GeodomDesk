@@ -281,6 +281,9 @@ class ChannelTests(unittest.TestCase):
                 (source / "res/tray-icon.ico").read_bytes(),
                 (source / "flutter/assets/icon.ico").read_bytes(),
             )
+            window = (source / "flutter/windows/runner/win32_window.cpp").read_text(encoding="utf-8")
+            self.assertIn("icons_.Update(window, dpi);", window)
+            self.assertIn("icons_.Update(hwnd, HIWORD(wparam));", window)
             self.assertFalse("note-at-conn-end-tip" in desktop_settings + mobile_settings,
                              "An unsupported connection-note setting remained visible")
             baseline_config = (ROOT / "reference/libs/hbb_common/src/config.rs").read_text(

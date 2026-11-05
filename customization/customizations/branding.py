@@ -2,6 +2,26 @@
 
 
 def apply(changes):
+    changes.replace(
+        "flutter/windows/runner/win32_window.h",
+        "#include <windows.h>\n",
+        '#include <windows.h>\n\n#include "geodomdesk_window_icons.h"\n',
+    )
+    changes.replace(
+        "flutter/windows/runner/win32_window.h",
+        "  bool quit_on_close_ = false;\n",
+        "  GeodomDeskWindowIcons icons_;\n\n  bool quit_on_close_ = false;\n",
+    )
+    changes.replace(
+        "flutter/windows/runner/win32_window.cpp",
+        "  if (!showOnTaskBar) {\n",
+        "  icons_.Update(window, dpi);\n\n  if (!showOnTaskBar) {\n",
+    )
+    changes.replace(
+        "flutter/windows/runner/win32_window.cpp",
+        "    case WM_DPICHANGED: {\n",
+        "    case WM_DPICHANGED: {\n      icons_.Update(hwnd, HIWORD(wparam));\n",
+    )
     # The tray's external asset takes precedence over its embedded fallback.
     changes.replace(
         "src/tray.rs",
@@ -30,7 +50,10 @@ def apply(changes):
 
 
 def assets(root):
-    result = {}
+    result = {
+        "flutter/windows/runner/geodomdesk_window_icons.h":
+            (root / "client/geodomdesk_window_icons.h").read_bytes(),
+    }
     for name in [
         "flutter/windows/runner/resources/app_icon.ico",
         "res/icon.ico",
