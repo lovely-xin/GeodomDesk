@@ -26,6 +26,9 @@ GeodomDesk 基于官方 RustDesk 稳定版，支持 Windows x64、Ubuntu amd64�
 | `archive_source.py`、`release_bundle.py` | 对应源码及发布清单 |
 | `channel.py` | 版本、产物与签名契约 |
 | `publisher.py` | 原生安装文件校验、签名和发布 |
+| `tests/` | 定制回归、Windows 安装验证和 Rust 测试锁文件 |
+| `config/` | 编译连接参数、Android 图标设置和发布配置示例 |
+| `config/systemd/` | 云端发布任务的服务及定时器 |
 
 正式构建工作流位于仓库 `.github/workflows/build.yml`。新增定制应归入对应模块，不直接编辑临时 checkout；变更基线时同步审查 `reference/source-lock.json`。
 
