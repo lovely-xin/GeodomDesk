@@ -33,7 +33,10 @@ function Start-ImportFixture {
       if($process.HasExited){throw 'Client exited before first-run initialization'}
       Start-Sleep -Seconds 1
     }
-    throw 'First-run import did not complete'
+    $state=if(Test-Path -LiteralPath $local){
+      (Select-String -LiteralPath $local -Pattern '^geodomdesk-initial-import\s*=').Line
+    }else{'Local user configuration was not created'}
+    throw "First-run import did not complete: $state"
   } finally {
     if(-not $process.HasExited){Stop-Process -Id $process.Id -Force}
   }

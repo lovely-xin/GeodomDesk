@@ -7,11 +7,11 @@ def apply(changes, root):
     change = changes.replace
     change("src/lib.rs", "mod updater;", "mod updater;\nmod geodomdesk_import;")
     change(
-        "src/flutter_ffi.rs",
-        "    initialize(&app_dir, &custom_client_config);",
-        "    initialize(&app_dir, &custom_client_config);\n"
-        '    #[cfg(any(target_os = "windows", target_os = "linux"))]\n'
-        "    crate::geodomdesk_import::import_on_first_run();",
+        "src/core_main.rs",
+        '    if args.is_empty() || crate::common::is_empty_uni_link(&args[0]) {',
+        '    if args.is_empty() || crate::common::is_empty_uni_link(&args[0]) {\n'
+        '        #[cfg(any(target_os = "windows", target_os = "linux"))]\n'
+        "        crate::geodomdesk_import::import_on_first_run();",
     )
     change(
         "src/flutter_ffi.rs",
