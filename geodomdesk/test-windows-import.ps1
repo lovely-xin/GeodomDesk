@@ -25,6 +25,13 @@ other-server-key = "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
 $local=Join-Path $target 'GeodomDesk_local.toml'
 $matched=Join-Path $target 'peers\111333555.toml'
 $unmatched=Join-Path $target 'peers\111333556@different-host.toml'
+function Stop-ImportClients {
+  # Close the test user's tray too before editing an on-disk crash fixture.
+  # A surviving tray can otherwise save its older LocalConfig over that fixture.
+  $identity=[Security.Principal.WindowsIdentity]::GetCurrent().Name
+  Get-Process -Name GeodomDesk -IncludeUserName -ErrorAction SilentlyContinue |
+    Where-Object {$_.UserName -eq $identity} | Stop-Process -Force
+}
 function Start-ImportFixture {
   $process=Start-Process -FilePath $Client -WindowStyle Hidden -PassThru
   try {
@@ -39,6 +46,7 @@ function Start-ImportFixture {
     throw "First-run import did not complete: $state"
   } finally {
     if(-not $process.HasExited){Stop-Process -Id $process.Id -Force}
+    Stop-ImportClients
   }
 }
 Start-ImportFixture
@@ -55,11 +63,13 @@ try {
   if(Test-Path -LiteralPath (Join-Path $target 'peers\111333557.toml')){throw 'First-run import repeated on restart'}
 } finally {
   if(-not $process.HasExited){Stop-Process -Id $process.Id -Force}
+  Stop-ImportClients
 }
 Write-Output 'First-run same-server import, credential exclusion, favorites and one-time initialization verified.'
 # A pending migration resumes even after some device files were already written.
 Set-Content -LiteralPath $matched -Encoding utf8 -Value ((Get-Content -LiteralPath $matched -Raw).Replace('Matching server','Retained alias'))
 Set-Content -LiteralPath $local -Encoding utf8 -Value ((Get-Content -LiteralPath $local -Raw) -replace '(geodomdesk-initial-import\s*=\s*)["\x27]Y["\x27]','$1"pending"')
+if((Get-Content -LiteralPath $local -Raw) -notmatch 'geodomdesk-initial-import\s*=\s*["\x27]pending["\x27]'){throw 'Interrupted migration fixture was not staged'}
 Start-ImportFixture
 if(-not (Test-Path -LiteralPath (Join-Path $target 'peers\111333557.toml'))){throw 'Interrupted migration did not resume'}
 if((Get-Content -LiteralPath $matched -Raw) -notmatch 'Retained alias'){throw 'Resumed migration overwrote an existing record'}
