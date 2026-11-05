@@ -250,6 +250,22 @@ class ChannelTests(unittest.TestCase):
             self.assertIn("await loginDialog()", ui)
             self.assertIn("_accountLoginPending", ui)
             self.assertIn("'account-login-required'", ui)
+            for name in [
+                "flutter/lib/desktop/pages/desktop_setting_page.dart",
+                "flutter/lib/desktop/pages/desktop_home_page.dart",
+                "flutter/lib/desktop/pages/connection_page.dart",
+                "flutter/lib/desktop/pages/install_page.dart",
+                "flutter/lib/mobile/pages/settings_page.dart",
+                "flutter/lib/mobile/pages/connection_page.dart",
+            ]:
+                self.assertNotRegex((source / name).read_text(encoding="utf-8"),
+                                    r"https?://(?:[a-z0-9-]+\.)?rustdesk\.(?:com|org)(?:/|['\"])")
+            mobile_settings = (source / "flutter/lib/mobile/pages/settings_page.dart").read_text(encoding="utf-8")
+            self.assertNotIn("showDeployDialog", mobile_settings)
+            desktop_settings = (source / "flutter/lib/desktop/pages/desktop_setting_page.dart").read_text(encoding="utf-8")
+            self.assertIn("_Button('Restore', _restoreDefaultId", desktop_settings)
+            self.assertFalse("note-at-conn-end-tip" in desktop_settings + mobile_settings,
+                             "An unsupported connection-note setting remained visible")
             baseline_config = (ROOT / "reference/libs/hbb_common/src/config.rs").read_text(
                 encoding="utf-8"
             )

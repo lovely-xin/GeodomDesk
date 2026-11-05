@@ -44,6 +44,9 @@ def verify(source=None, update_lock=False):
         (crate / "src/geodomdesk_import_data.rs").write_bytes(
             (source / "src/geodomdesk_import/data.rs").read_bytes()
         )
+        (crate / "src/geodomdesk_id_policy.rs").write_bytes(
+            (source / "libs/hbb_common/src/geodomdesk_id_policy.rs").read_bytes()
+        )
         (crate / "src/geodomdesk_clone_guard.rs").write_bytes(
             (source / "libs/hbb_common/src/geodomdesk_clone_guard.rs").read_bytes()
         )
@@ -141,6 +144,7 @@ mod common {
 mod geodomdesk_update;
 mod geodomdesk_auth;
 mod geodomdesk_import_data;
+mod geodomdesk_id_policy;
 mod geodomdesk_clone_guard;
 mod server_config_verification;
 mod update_metadata;

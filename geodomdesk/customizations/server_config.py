@@ -36,6 +36,7 @@ def apply(changes, config):
         "pub static ref BUILTIN_SETTINGS: RwLock<HashMap<String, String>> = Default::default();",
         """pub static ref BUILTIN_SETTINGS: RwLock<HashMap<String, String>> = RwLock::new(HashMap::from([
         ("hide-server-settings".to_owned(), "Y".to_owned()),
+        ("hide-powered-by-me".to_owned(), "Y".to_owned()),
         ("allow-deep-link-server-settings".to_owned(), "N".to_owned())
     ]));""",
     )

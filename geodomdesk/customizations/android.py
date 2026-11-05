@@ -40,3 +40,13 @@ def apply(changes, config):
         "final url = 'https://rustdesk.com/download';",
         "final url = updateUrl;",
     )
+    name = "flutter/lib/mobile/pages/settings_page.dart"
+    change(name, "import '../widgets/deploy_dialog.dart';\n", "")
+    change(name, """          if (isAndroid && !bind.isOutgoingOnly())
+            SettingsTile(
+                title: Text(translate('Deploy')),
+                leading: Icon(Icons.cloud_upload),
+                onPressed: (context) {
+                  showDeployDialog();
+                }),
+""", "")

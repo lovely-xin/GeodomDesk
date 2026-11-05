@@ -1,0 +1,52 @@
+  Future<void> _restoreDefaultId() async {
+    if (_restoringDefaultId) return;
+    setState(() => _restoringDefaultId = true);
+    try {
+      final id = await bind.mainGetDefaultId();
+      if (!mounted) return;
+      var inProgress = false;
+      var error = '';
+      await gFFI.dialogManager.show((refresh, close, context) {
+        Future<void> submit() async {
+          if (inProgress) return;
+          refresh(() { inProgress = true; error = ''; });
+          try {
+            final status = await bind.mainRestoreDefaultId();
+            if (status.isEmpty) {
+              close();
+            } else {
+              refresh(() { inProgress = false; error = translate(status); });
+            }
+          } catch (_) {
+            refresh(() {
+              inProgress = false;
+              error = translate('Failed to restore default ID');
+            });
+          }
+        }
+        return CustomAlertDialog(
+          title: Text(translate('Restore default ID')),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(translate('Restore the automatically assigned ID %id%? Your passwords and settings will be kept.').replaceAll('%id%', id)),
+              if (error.isNotEmpty) Text(error, style: TextStyle(color: Theme.of(context).colorScheme.error)).marginOnly(top: 8),
+              if (inProgress) const LinearProgressIndicator().marginOnly(top: 12),
+            ],
+          ),
+          actions: [
+            dialogButton('Cancel', onPressed: inProgress ? null : close, isOutline: true),
+            dialogButton('Restore', onPressed: inProgress ? null : submit),
+          ],
+          onSubmit: submit,
+          onCancel: () { if (!inProgress) close(); },
+        );
+      });
+    } catch (_) {
+      msgBox(gFFI.sessionId, 'custom-nocancel', 'Error', 'Unable to read default ID', '', gFFI.dialogManager);
+    } finally {
+      if (mounted) setState(() => _restoringDefaultId = false);
+    }
+  }
+

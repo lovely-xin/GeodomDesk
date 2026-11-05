@@ -47,5 +47,9 @@
   "flutter/android/app/src/main/res/values/ic_launcher_background.xml": "d5d95100301cb149608eecadc042884efbf6c4f88bf6022578847a0857596731",
   "flutter/lib/mobile/pages/settings_page.dart": "67066f7357135e79deffe2ea92b2063eee78ac54608b90c9c4acea672932e010",
   "flutter/lib/mobile/widgets/dialog.dart": "4d394e53df64cd69eb9343120ff4517b94ef4382611b30396c43c54973f5cacc",
-  "src/core_main.rs": "e0af92ce060bc279eb2351b83d031d69b6f662abef5d078af7a831464d30778c"
+  "src/core_main.rs": "e0af92ce060bc279eb2351b83d031d69b6f662abef5d078af7a831464d30778c",
+  "src/ipc.rs": "3ff2d8b23e5d6a0f079c1076a6f07c81738c9db6066018aad241cfef8f08e94b",
+  "flutter/lib/desktop/pages/connection_page.dart": "87937e1472785ebd1e6d56485d63dc8428dbd54c376f616a303f288b7fc205f4",
+  "flutter/lib/desktop/pages/install_page.dart": "209ca8f5a2030f758ac435fe57311d2746d561e0101fa389c2d01222d48eb324",
+  "src/lang/en.rs": "ed0af492f1e87f442a4e262849e53562a1a4ccc53b433a000eb31157b3a6d5d8"
 }

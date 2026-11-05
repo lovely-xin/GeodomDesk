@@ -13,8 +13,10 @@ from . import (
     branding,
     clone_guard,
     identity,
+    id_controls,
     printer,
     server_config,
+    settings_cleanup,
     update_channel,
     upstream,
     user_data,
@@ -37,15 +39,19 @@ def prepare(source, version, build_number=1):
     about.apply(changes)
     printer.apply(changes)
     clone_guard.apply(changes)
+    id_controls.apply(changes, ROOT)
     account_login.apply(changes)
     update_channel.apply(changes, cfg)
     user_data.apply(changes, ROOT)
+    settings_cleanup.apply(changes)
     changes["src/geodomdesk_update.rs"] = (ROOT / "client/geodomdesk_update.rs").read_text(
         encoding="utf-8"
     )
     changes["src/geodomdesk_auth.rs"] = (ROOT / "client/geodomdesk_auth.rs").read_text(
         encoding="utf-8"
     )
+    changes["src/geodomdesk_identity.rs"] = (ROOT / "client/geodomdesk_identity.rs").read_text(encoding="utf-8")
+    changes["libs/hbb_common/src/geodomdesk_id_policy.rs"] = (ROOT / "client/geodomdesk_id_policy.rs").read_text(encoding="utf-8")
     for name in ["geodomdesk_import.rs", "geodomdesk_import/data.rs"]:
         changes["src/" + name] = (ROOT / "client" / name).read_text(encoding="utf-8")
     changes["libs/hbb_common/src/geodomdesk_clone_guard.rs"] = (

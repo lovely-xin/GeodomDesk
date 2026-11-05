@@ -38,6 +38,19 @@ try {
     } finally {$client.Dispose()}
   }
   function Read-Option([string]$Name) {return Invoke-Client -ClientArgs @('--option',$Name)}
+  $hostConfig=Join-Path $env:windir 'ServiceProfiles\LocalService\AppData\Roaming\GeodomDesk\config\GeodomDesk.toml'
+  $defaultId=''
+  for($i=0;$i -lt 15;$i++) {
+    if(Test-Path -LiteralPath $hostConfig) {
+      $content=Get-Content -LiteralPath $hostConfig -Raw
+      if($content -match '(?m)^default_id\s*=\s*["\x27]([0-9]{6,10})["\x27]'){$defaultId=$Matches[1];break}
+    }
+    Start-Sleep -Seconds 1
+  }
+  if(-not $defaultId){throw 'The host service did not persist its default ID'}
+  $currentId=Invoke-Client -ClientArgs @('--get-id')
+  if($currentId -cne $defaultId){throw 'A fresh installation did not retain its assigned ID as the default'}
+  Write-Output 'The host service retained its automatically assigned default ID.'
   $expected=@{
     'custom-rendezvous-server'=$config.server.host
     'key'=$config.server.key

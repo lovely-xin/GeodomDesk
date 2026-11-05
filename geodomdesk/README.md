@@ -106,6 +106,8 @@ python3 verify_rust.py
 
 Windows 在临时 CI 环境另运行 `test-windows-native.ps1`，核对实际安装与固定连接参数。
 
+`customizations/id_controls.py` 维护默认 ID 及原生恢复入口；`customizations/settings_cleanup.py` 维护设置项可见性和用户链接，保留网络兼容、权限与打印功能。用户说明位于 `USER_GUIDE.md`。
+
 验证覆盖上游改动保留、冲突不写入、监听隔离、账号错误不重试、签名篡改、同版本构建更新、回退保护、打包失败不切换及源码归档完整性。
 
 ## 许可

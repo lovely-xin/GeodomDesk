@@ -97,7 +97,7 @@ class PackagingTests(unittest.TestCase):
         subprocess.run(["git", "init", "-q", str(source)], check=True)
         (source / "Cargo.toml").write_text('[package]\nname="fixture"\n')
         subprocess.run(["git", "-C", str(source), "add", "Cargo.toml"], check=True)
-        for name in ["geodomdesk_update.rs", "geodomdesk_auth.rs"]:
+        for name in ["geodomdesk_update.rs", "geodomdesk_auth.rs", "geodomdesk_identity.rs"]:
             (source / "src").mkdir(exist_ok=True)
             (source / "src" / name).write_text("// untracked generated module\n")
         (source / "src/geodomdesk_import").mkdir()
@@ -106,6 +106,7 @@ class PackagingTests(unittest.TestCase):
         binding = source / "libs/hbb_common/src/geodomdesk_clone_guard.rs"
         binding.parent.mkdir(parents=True)
         binding.write_text("// clone guard\n")
+        (binding.parent / "geodomdesk_id_policy.rs").write_text("// default ID metadata\n")
         logo = source / "flutter/assets/geodom-logo.png"
         logo.parent.mkdir(parents=True)
         logo.write_bytes(b"fixture-logo")
@@ -119,6 +120,8 @@ class PackagingTests(unittest.TestCase):
         for name in [
             "src/geodomdesk_update.rs",
             "src/geodomdesk_auth.rs",
+            "src/geodomdesk_identity.rs",
+            "libs/hbb_common/src/geodomdesk_id_policy.rs",
             "geodomdesk/reference/Cargo.toml",
             "src/geodomdesk_import.rs",
             "src/geodomdesk_import/data.rs",
