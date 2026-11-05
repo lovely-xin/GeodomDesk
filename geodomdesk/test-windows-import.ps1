@@ -29,7 +29,7 @@ function Start-ImportFixture {
   $process=Start-Process -FilePath $Client -WindowStyle Hidden -PassThru
   try {
     for($i=0;$i -lt 45;$i++) {
-      if((Test-Path -LiteralPath $local) -and (Get-Content -LiteralPath $local -Raw) -match 'geodomdesk-initial-import\s*=\s*"Y"'){return}
+      if((Test-Path -LiteralPath $local) -and (Get-Content -LiteralPath $local -Raw) -match 'geodomdesk-initial-import\s*=\s*["\x27]Y["\x27]'){return}
       if($process.HasExited){throw 'Client exited before first-run initialization'}
       Start-Sleep -Seconds 1
     }
@@ -59,7 +59,7 @@ try {
 Write-Output 'First-run same-server import, credential exclusion, favorites and one-time initialization verified.'
 # A pending migration resumes even after some device files were already written.
 Set-Content -LiteralPath $matched -Encoding utf8 -Value ((Get-Content -LiteralPath $matched -Raw).Replace('Matching server','Retained alias'))
-Set-Content -LiteralPath $local -Encoding utf8 -Value ((Get-Content -LiteralPath $local -Raw) -replace '(geodomdesk-initial-import\s*=\s*)"Y"','$1"pending"')
+Set-Content -LiteralPath $local -Encoding utf8 -Value ((Get-Content -LiteralPath $local -Raw) -replace '(geodomdesk-initial-import\s*=\s*)["\x27]Y["\x27]','$1"pending"')
 Start-ImportFixture
 if(-not (Test-Path -LiteralPath (Join-Path $target 'peers\111333557.toml'))){throw 'Interrupted migration did not resume'}
 if((Get-Content -LiteralPath $matched -Raw) -notmatch 'Retained alias'){throw 'Resumed migration overwrote an existing record'}

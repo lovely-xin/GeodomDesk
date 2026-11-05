@@ -479,9 +479,26 @@ jobs:
           if-no-files-found: error
           path: android-artifact/*
 
+  reused_windows:
+    needs: plan
+    if: needs.plan.outputs.reuse_run != ''
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: geodomdesk-windows
+          path: reused-windows
+          run-id: ${{ needs.plan.outputs.reuse_run }}
+          github-token: ${{ github.token }}
+      - name: Revalidate the unchanged native Windows build
+        shell: pwsh
+        run: ./geodomdesk/test-windows-native.ps1 -Package ./reused-windows/GeodomDesk.exe -BuildConfig ./reused-windows/geodomdesk-build-config.json
+
   release:
-    needs: [plan, windows, ubuntu, android]
-    if: always() && needs.plan.result == 'success' && needs.android.result == 'success' && (needs.plan.outputs.reuse_run != '' || (needs.windows.result == 'success' && needs.ubuntu.result == 'success'))
+    needs: [plan, windows, ubuntu, android, reused_windows]
+    if: always() && needs.plan.result == 'success' && needs.android.result == 'success' && ((needs.plan.outputs.reuse_run != '' && needs.reused_windows.result == 'success') || (needs.windows.result == 'success' && needs.ubuntu.result == 'success'))
     env:
       VERSION: ${{ needs.plan.outputs.version }}
       UPSTREAM_COMMIT: ${{ needs.plan.outputs.upstream_commit }}
