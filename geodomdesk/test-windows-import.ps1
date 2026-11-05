@@ -56,7 +56,11 @@ if($peer -notmatch 'password\s*=\s*\[\s*\]' -or $peer -notmatch 'Matching server
 $settings=Get-Content -LiteralPath $local -Raw
 if($settings -notmatch '111333555' -or $settings -match '111333556'){throw 'Favorites were not filtered with device records'}
 # Later source changes must not silently import again on an ordinary restart.
-Set-Content -LiteralPath (Join-Path $source 'peers\111333557.toml') -Encoding utf8 -Value '[info]'
+Set-Content -LiteralPath (Join-Path $source 'peers\111333557.toml') -Encoding utf8 -Value @'
+[info]
+hostname = "Late fixture"
+platform = "Windows"
+'@
 $process=Start-Process -FilePath $Client -WindowStyle Hidden -PassThru
 try {
   Start-Sleep -Seconds 8
