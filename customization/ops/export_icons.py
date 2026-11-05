@@ -29,7 +29,7 @@ def export(master):
     render(450).save(ROOT / "assets/geodomdesk.png")
     render(500).save(
         ROOT / "assets/geodomdesk.ico",
-        sizes=[(size, size) for size in [16, 24, 32, 48, 64, 128, 256]],
+        sizes=[(size, size) for size in [16, 20, 24, 32, 40, 48, 64, 128, 256]],
     )
 
 

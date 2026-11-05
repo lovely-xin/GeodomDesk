@@ -2,6 +2,12 @@
 
 
 def apply(changes):
+    # The tray's external asset takes precedence over its embedded fallback.
+    changes.replace(
+        "src/tray.rs",
+        'let path = path.join(r"data\\flutter_assets\\assets\\icon.png");',
+        'let path = path.join(r"data\\flutter_assets\\assets\\icon.ico");',
+    )
     changes.replace(
         "flutter/lib/desktop/pages/desktop_home_page.dart",
         """      if (bind.isCustomClient())

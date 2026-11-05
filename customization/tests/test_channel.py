@@ -274,6 +274,13 @@ class ChannelTests(unittest.TestCase):
             self.assertNotIn("showDeployDialog", mobile_settings)
             desktop_settings = (source / "flutter/lib/desktop/pages/desktop_setting_page.dart").read_text(encoding="utf-8")
             self.assertIn("_Button('Restore', _restoreDefaultId", desktop_settings)
+            tray = (source / "src/tray.rs").read_text(encoding="utf-8")
+            self.assertIn('let path = path.join(r"data\\flutter_assets\\assets\\icon.ico");', tray)
+            self.assertNotIn('let path = path.join(r"data\\flutter_assets\\assets\\icon.png");', tray)
+            self.assertEqual(
+                (source / "res/tray-icon.ico").read_bytes(),
+                (source / "flutter/assets/icon.ico").read_bytes(),
+            )
             self.assertFalse("note-at-conn-end-tip" in desktop_settings + mobile_settings,
                              "An unsupported connection-note setting remained visible")
             baseline_config = (ROOT / "reference/libs/hbb_common/src/config.rs").read_text(
