@@ -15,6 +15,7 @@ from . import (
     identity,
     id_controls,
     localization,
+    p2p,
     printer,
     server_config,
     settings_cleanup,
@@ -42,6 +43,7 @@ def prepare(source, version, build_number=1):
     clone_guard.apply(changes)
     id_controls.apply(changes, ROOT)
     account_login.apply(changes)
+    p2p.apply(changes)
     update_channel.apply(changes, cfg)
     user_data.apply(changes, ROOT)
     settings_cleanup.apply(changes)
