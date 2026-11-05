@@ -35,6 +35,7 @@ struct Server {
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct Peer {
+    password: Vec<u8>,
     info: DeviceInfo,
     options: Notes,
 }
@@ -46,6 +47,7 @@ struct Local {
 }
 
 pub(super) struct Device {
+    pub password: Vec<u8>,
     pub id: String,
     pub info: DeviceInfo,
     pub alias: String,
@@ -132,6 +134,7 @@ fn device(path: &Path, source_key: &str, expected: &[u8]) -> ResultType<Device> 
     }
     let other_server = id.contains('@');
     Ok(Device {
+        password: peer.password,
         id,
         info: peer.info,
         alias: peer.options.alias,
@@ -193,7 +196,7 @@ mod tests {
     const KEY: &str = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=";
 
     #[test]
-    fn reads_device_data_without_credentials_or_settings() {
+    fn reads_saved_connection_password_without_host_or_account_settings() {
         let root =
             std::env::temp_dir().join(format!("geodomdesk-import-test-{}", std::process::id()));
         fs::create_dir_all(root.join("peers")).unwrap();
@@ -212,6 +215,7 @@ mod tests {
         let data = read(&root, KEY).unwrap();
         assert_eq!(data.devices.len(), 1);
         assert_eq!(data.devices[0].id, "123456");
+        assert_eq!(data.devices[0].password, [1, 2, 3]);
         assert_eq!(data.devices[0].alias, "Desk");
         assert_eq!(data.devices[0].info.hostname, "Workstation");
         assert_eq!(data.favorites, ["123456"]);

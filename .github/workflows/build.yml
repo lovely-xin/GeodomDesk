@@ -245,6 +245,8 @@ jobs:
       - name: Create portable update executable
         shell: pwsh
         run: |
+          python ../customization/prepare_printer.py --destination ./flutter/build/windows/x64/runner/Release --cache "$env:RUNNER_TEMP/printer-assets"
+          if ($LASTEXITCODE -ne 0) { throw 'Printer components missing or unverified' }
           python -m pip install -r ./libs/portable/requirements.txt
           Push-Location libs/portable
           python ./generate.py -f ../../flutter/build/windows/x64/runner/Release -o . -e ../../flutter/build/windows/x64/runner/Release/GeodomDesk.exe

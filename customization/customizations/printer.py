@@ -4,6 +4,40 @@ from .edits import SourceEdits
 
 
 def apply(changes):
+    setup = "libs/remote_printer/src/setup/setup.rs"
+    changes.replace(setup, """    let should_install_driver = match get_installed_driver_version(&rd_printer_driver_name)? {""", """    let installed_version = get_installed_driver_version(&rd_printer_driver_name)?;
+    // The signed v4 driver is shared; each application owns its queue and port.
+    if app_name == "GeodomDesk" && installed_version.is_some() {
+        if !super::is_rd_printer_installed(app_name)? {
+            add_printer(&rd_printer_name, &rd_printer_driver_name, &rd_printer_port)?;
+        }
+        return Ok(());
+    }
+    let should_install_driver = match installed_version {""")
+    changes.replace(setup, """    allow_err!(uninstall_driver(&rd_printer_driver_name));
+    allow_err!(check_delete_local_port(&rd_printer_port));""", """    if app_name == "GeodomDesk" {
+        match super::printer::is_driver_used(&rd_printer_driver_name) {
+            Ok(false) => allow_err!(uninstall_driver(&rd_printer_driver_name)),
+            Ok(true) => {}
+            Err(error) => log::warn!("Could not query shared printer driver usage: {error}"),
+        }
+    } else {
+        allow_err!(uninstall_driver(&rd_printer_driver_name));
+    }
+    allow_err!(check_delete_local_port(&rd_printer_port));""")
+    changes.replace("libs/remote_printer/src/setup/printer.rs",
+                    "pub fn add_printer(name: &PCWSTR, driver: &PCWSTR, port: &PCWSTR) -> ResultType<()> {",
+                    """pub(crate) fn is_driver_used(name: &PCWSTR) -> ResultType<bool> {
+    common_enum(
+        "EnumPrintersW", enum_local_printer, 2,
+        |info: &PRINTER_INFO_2W| {
+            if is_name_equal(name, info.pDriverName) { Some(true) } else { None }
+        },
+        || None,
+    ).map(|used| used.unwrap_or(false))
+}
+
+pub fn add_printer(name: &PCWSTR, driver: &PCWSTR, port: &PCWSTR) -> ResultType<()> {""")
     name = "flutter/lib/desktop/pages/desktop_setting_page.dart"
     start = changes[name].index("class __PrinterState extends State<_Printer> {")
     end = changes[name].index("class _About extends StatefulWidget", start)

@@ -52,5 +52,7 @@
   "flutter/lib/desktop/pages/connection_page.dart": "87937e1472785ebd1e6d56485d63dc8428dbd54c376f616a303f288b7fc205f4",
   "flutter/lib/desktop/pages/install_page.dart": "209ca8f5a2030f758ac435fe57311d2746d561e0101fa389c2d01222d48eb324",
   "src/lang/en.rs": "ed0af492f1e87f442a4e262849e53562a1a4ccc53b433a000eb31157b3a6d5d8",
-  "flutter/lib/web/bridge.dart": "07a42874865918f2ce044cc0436139dfe8e7a6e128610454eed968a6ab13b182"
+  "flutter/lib/web/bridge.dart": "07a42874865918f2ce044cc0436139dfe8e7a6e128610454eed968a6ab13b182",
+  "libs/remote_printer/src/setup/setup.rs": "afde11e2121fa56a286f6fa45c7511b20f19cc1941dc1700f8ebf81281ccf535",
+  "libs/remote_printer/src/setup/printer.rs": "abdee741f546b07ecf812d82958b92f78575188b4e46109cb2c9d8178e62a274"
 }

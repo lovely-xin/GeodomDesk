@@ -38,6 +38,27 @@ try {
     } finally {$client.Dispose()}
   }
   function Read-Option([string]$Name) {return Invoke-Client -ClientArgs @('--option',$Name)}
+  $appRoot=Split-Path -Parent $installed
+  foreach($name in @('printer_driver_adapter.dll','drivers\RustDeskPrinterDriver\RustDeskPrinterDriver.inf')) {
+    if(-not (Test-Path -LiteralPath (Join-Path $appRoot $name))){throw "Printer component missing from installed package: $name"}
+  }
+  $null=Invoke-Client -ClientArgs @('--install-remote-printer')
+  if(-not (Get-Printer -Name 'GeodomDesk Printer' -ErrorAction SilentlyContinue)){throw 'Native printer installation did not create the GeodomDesk queue'}
+  $fixtureCreated=$false
+  try {
+    if(-not (Get-Printer -Name 'RustDesk Printer' -ErrorAction SilentlyContinue)) {
+      if(-not (Get-PrinterPort -Name 'RustDesk Printer' -ErrorAction SilentlyContinue)){Add-PrinterPort -Name 'RustDesk Printer'}
+      Add-Printer -Name 'RustDesk Printer' -DriverName 'RustDesk v4 Printer Driver' -PortName 'RustDesk Printer'
+      $fixtureCreated=$true
+    }
+    $null=Invoke-Client -ClientArgs @('--uninstall-remote-printer')
+    if(-not (Get-Printer -Name 'RustDesk Printer') -or -not (Get-PrinterDriver -Name 'RustDesk v4 Printer Driver')){throw 'Uninstalling the independent queue affected the existing printer'}
+    $null=Invoke-Client -ClientArgs @('--install-remote-printer')
+    if(-not (Get-Printer -Name 'GeodomDesk Printer') -or -not (Get-Printer -Name 'RustDesk Printer')){throw 'Printer coexistence failed'}
+    Write-Output 'Native printer installation and shared-driver coexistence verified.'
+  } finally {
+    if($fixtureCreated){Remove-Printer -Name 'RustDesk Printer';Remove-PrinterPort -Name 'RustDesk Printer'}
+  }
   $hostConfig=Join-Path $env:windir 'ServiceProfiles\LocalService\AppData\Roaming\GeodomDesk\config\GeodomDesk.toml'
   $defaultId=''
   for($i=0;$i -lt 15;$i++) {

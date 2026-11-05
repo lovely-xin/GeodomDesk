@@ -3,7 +3,7 @@
       Align(
         alignment: Alignment.centerLeft,
         child: Text(
-          _translateImportText('Import matching-server device records from %upstream%.'),
+          _translateImportText('Import matching-server devices and saved connection passwords from %upstream%.'),
           style: Theme.of(context).textTheme.bodySmall,
         ),
       ).marginOnly(left: _kContentHMargin, right: _kContentHMargin, bottom: 10),
@@ -26,7 +26,7 @@
       final confirmed = await gFFI.dialogManager.show<bool>((setState, close, context) {
         return CustomAlertDialog(
           title: Text(_translateImportText('Import %upstream%')),
-          content: Text(translate('Only device records with the same ID-server public key will be imported. Existing records, settings and passwords are preserved.')),
+          content: Text(translate('Import matching-server devices and saved connection passwords. Existing passwords, host credentials and account sign-ins are preserved.')),
           actions: [
             dialogButton('Cancel', onPressed: () => close(false), isOutline: true),
             dialogButton('Import', onPressed: () => close(true)),
@@ -44,7 +44,9 @@
             '${translate('Added')} ${result['added']}, '
             '${translate('Existing')} ${result['existing']}, '
             '${translate('Skipped')} ${result['skipped']}, '
-            '${translate('Favorites')} +${result['favorites_added']}';
+            '${translate('Favorites')} +${result['favorites_added']}, '
+            '${translate('Saved passwords')} +${result['passwords_added']}, '
+            '${translate('Passwords not imported')} ${result['passwords_skipped']}';
       });
     } catch (_) {
       if (mounted) {

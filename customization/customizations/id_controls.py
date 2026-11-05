@@ -104,10 +104,10 @@ pub fn main_change_id(new_id: String) {""")
            "class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {\n  bool _restoringDefaultId = false;")
     change(name, """          return _Button('Change ID', changeIdDialog,
               enabled: !locked && model.connectStatus > 0);""", """          final enabled = !locked && model.connectStatus > 0 && !_restoringDefaultId;
-          return Wrap(runSpacing: 8, children: [
+          return Align(alignment: Alignment.centerLeft, child: Wrap(runSpacing: 8, children: [
             _Button('Change ID', changeIdDialog, enabled: enabled, compact: true),
             _Button('Restore', _restoreDefaultId, enabled: enabled, compact: true),
-          ]);""")
+          ]));""")
     change(name, "    {bool enabled = true, String? tip, ButtonStyle? style}) {",
            "    {bool enabled = true, String? tip, ButtonStyle? style, bool compact = false}) {")
     change(name, """  return Row(children: [

@@ -52,7 +52,7 @@ function Start-ImportFixture {
 Start-ImportFixture
 if(-not (Test-Path -LiteralPath $matched) -or (Test-Path -LiteralPath $unmatched)){throw 'First-run import did not enforce the ID-server public key'}
 $peer=Get-Content -LiteralPath $matched -Raw
-if($peer -notmatch 'password\s*=\s*\[\s*\]' -or $peer -notmatch 'Matching server'){throw 'Imported record contains credentials or lost its alias'}
+if($peer -notmatch 'password\s*=\s*\[\s*48,\s*48,' -or $peer -notmatch 'Matching server'){throw 'Saved connection password was not imported into encrypted storage or its alias was lost'}
 $settings=Get-Content -LiteralPath $local -Raw
 if($settings -notmatch '111333555' -or $settings -match '111333556'){throw 'Favorites were not filtered with device records'}
 # Later source changes must not silently import again on an ordinary restart.
@@ -69,12 +69,18 @@ try {
   if(-not $process.HasExited){Stop-Process -Id $process.Id -Force}
   Stop-ImportClients
 }
-Write-Output 'First-run same-server import, credential exclusion, favorites and one-time initialization verified.'
+Write-Output 'First-run same-server import, encrypted connection passwords, favorites and one-time initialization verified.'
 # A pending migration resumes even after some device files were already written.
 Set-Content -LiteralPath $matched -Encoding utf8 -Value ((Get-Content -LiteralPath $matched -Raw).Replace('Matching server','Retained alias'))
+$retained=Get-Content -LiteralPath $matched -Raw
+Set-Content -LiteralPath (Join-Path $source 'peers\111333558.toml') -Encoding utf8 -Value "password = [4,5,6]`n[info]`nplatform = 'Windows'`n"
+$emptyPassword=Join-Path $target 'peers\111333558.toml'
+Set-Content -LiteralPath $emptyPassword -Encoding utf8 -Value "password = []`n[info]`nplatform = 'Windows'`n[options]`nalias = 'Preserved metadata'`n"
 Set-Content -LiteralPath $local -Encoding utf8 -Value ((Get-Content -LiteralPath $local -Raw) -replace '(geodomdesk-initial-import\s*=\s*)["\x27]Y["\x27]','$1"pending"')
 if((Get-Content -LiteralPath $local -Raw) -notmatch 'geodomdesk-initial-import\s*=\s*["\x27]pending["\x27]'){throw 'Interrupted migration fixture was not staged'}
 Start-ImportFixture
 if(-not (Test-Path -LiteralPath (Join-Path $target 'peers\111333557.toml'))){throw 'Interrupted migration did not resume'}
-if((Get-Content -LiteralPath $matched -Raw) -notmatch 'Retained alias'){throw 'Resumed migration overwrote an existing record'}
+if((Get-Content -LiteralPath $matched -Raw) -cne $retained){throw 'Resumed migration overwrote an existing record or password'}
+$filled=Get-Content -LiteralPath $emptyPassword -Raw
+if($filled -notmatch 'password\s*=\s*\[\s*48,\s*48,' -or $filled -notmatch 'Preserved metadata'){throw 'Existing empty password was not filled while preserving metadata'}
 Write-Output 'Interrupted first-run import resumes without overwriting existing user data.'

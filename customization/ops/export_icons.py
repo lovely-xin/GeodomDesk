@@ -17,14 +17,17 @@ def export(master):
     left, top, right, bottom = bounds
     bleed = 3
     image = image.crop((left - bleed, top - bleed, right + bleed, bottom + bleed))
-    scale = 450 / max(image.size)
-    image = image.resize(
-        tuple(round(edge * scale) for edge in image.size), Image.Resampling.LANCZOS
-    )
-    canvas = Image.new("RGBA", (512, 512))
-    canvas.alpha_composite(image, ((512 - image.width) // 2, (512 - image.height) // 2))
-    canvas.save(ROOT / "assets/geodomdesk.png")
-    canvas.save(
+    def render(content_size):
+        scale = content_size / max(image.size)
+        resized = image.resize(
+            tuple(round(edge * scale) for edge in image.size), Image.Resampling.LANCZOS
+        )
+        canvas = Image.new("RGBA", (512, 512))
+        canvas.alpha_composite(resized, ((512 - resized.width) // 2, (512 - resized.height) // 2))
+        return canvas
+
+    render(450).save(ROOT / "assets/geodomdesk.png")
+    render(500).save(
         ROOT / "assets/geodomdesk.ico",
         sizes=[(size, size) for size in [16, 24, 32, 48, 64, 128, 256]],
     )

@@ -1,0 +1,14 @@
+{
+  "assets": [
+    {
+      "file_name": "rustdesk_printer_driver_v4-1.4.zip",
+      "url": "https://github.com/rustdesk/hbb_common/releases/download/driver/rustdesk_printer_driver_v4-1.4.zip",
+      "sha256": "c4cf4d3b48c4d9079b243edc43bb1db03b076282bc259c9f49883e9db20fa8b5"
+    },
+    {
+      "file_name": "printer_driver_adapter.zip",
+      "url": "https://github.com/rustdesk/hbb_common/releases/download/driver/printer_driver_adapter.zip",
+      "sha256": "e90e5d52c8807b4c6293c78a52479338715e0bf396b1b34802777b8c452e6781"
+    }
+  ]
+}

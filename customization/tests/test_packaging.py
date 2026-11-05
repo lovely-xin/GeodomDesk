@@ -1,14 +1,44 @@
 """Run native packaging tools against inert fixtures; never installs a client."""
 
 import hashlib
+import json
 import os
 import shutil
 import subprocess
 import tempfile
 import unittest
+import zipfile
+from unittest import mock
 from pathlib import Path
 
 import repack_deb
+
+
+class PrinterBundleTests(unittest.TestCase):
+    def test_required_components_are_verified_and_bad_archives_fail(self):
+        import prepare_printer
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "config").mkdir()
+            cache = root / "cache"
+            cache.mkdir()
+            assets = []
+            for name, member in [
+                ("rustdesk_printer_driver_v4-1.4.zip", "rustdesk_printer_driver_v4-1.4/RustDeskPrinterDriver.inf"),
+                ("printer_driver_adapter.zip", "printer_driver_adapter.dll"),
+            ]:
+                path = cache / name
+                with zipfile.ZipFile(path, "w") as archive:
+                    archive.writestr(member, b"inert printer fixture")
+                assets.append({"file_name": name, "url": "https://invalid.example/", "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+            (root / "config/printer-assets.json").write_text(json.dumps({"assets": assets}))
+            with mock.patch.object(prepare_printer, "ROOT", root):
+                prepare_printer.prepare(root / "bundle", cache)
+                self.assertTrue((root / "bundle/printer_driver_adapter.dll").is_file())
+                self.assertTrue((root / "bundle/drivers/RustDeskPrinterDriver/RustDeskPrinterDriver.inf").is_file())
+                (cache / assets[0]["file_name"]).write_bytes(b"corrupt")
+                with self.assertRaisesRegex(ValueError, "checksum mismatch"):
+                    prepare_printer.prepare(root / "bundle", cache)
 
 
 @unittest.skipUnless(

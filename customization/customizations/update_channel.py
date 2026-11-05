@@ -228,3 +228,13 @@ pub async fn do_check_software_update() -> hbb_common::ResultType<()> {
         "if (!isWeb && !bind.isCustomClient())",
         "if (!isWeb)",
     )
+    change(
+        "flutter/lib/mobile/pages/connection_page.dart",
+        "if (!bind.isCustomClient() && !isIOS)",
+        "if (!isIOS)",
+    )
+    change(
+        "flutter/lib/mobile/pages/settings_page.dart",
+        "if (!bind.isCustomClient()) {",
+        "if (appName == 'GeodomDesk') {",
+    )

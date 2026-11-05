@@ -33,6 +33,7 @@ def customization_hash(root=None):
         root / name
         for name in [
             "config/client-channel.json",
+            "config/printer-assets.json",
             "config/android-icons.yaml",
             "reference/source-lock.json",
             "requirements.txt",
