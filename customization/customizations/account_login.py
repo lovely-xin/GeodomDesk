@@ -69,6 +69,8 @@ def apply(changes):
         if (isDesktop) {
           rustDeskWinManager.call(WindowType.Main, kWindowRefreshCurrentUser, '');
         }
+        // Tunnel listeners read the current token for each new local connection.
+        if (parent.target?.connType == ConnType.portForward) return;
         // A new connection reads the newly stored account token. Do not use a retry timer.
         reconnect(dialogManager, sessionId, false);
       } else if (parent.target?.closed == false) {
@@ -95,3 +97,41 @@ def apply(changes):
     }
   }""",
     )
+
+    name = "src/port_forward.rs"
+    change(
+        name,
+        "    key: &str,\n    token: &str,\n    lc: Arc<RwLock<LoginConfigHandler>>,",
+        "    key: &str,\n    lc: Arc<RwLock<LoginConfigHandler>>,",
+    )
+    change(
+        name,
+        '                log::info!("new connection from {:?}", addr);',
+        '                log::info!("new connection from {:?}", addr);\n'
+        '                let token = hbb_common::config::LocalConfig::get_option("access_token");',
+    )
+    change(
+        name,
+        "forward, addr, key, token, is_rdp, &remote_host, remote_port).await",
+        "forward, addr, key, &token, is_rdp, &remote_host, remote_port).await",
+    )
+    change(
+        name,
+        "&mut forward, key, token, is_rdp, &mut close_port_forward, &remote_host, remote_port).await",
+        "&mut forward, key, &token, is_rdp, &mut close_port_forward, &remote_host, remote_port).await",
+    )
+    name = "src/ui_session_interface.rs"
+    change(
+        name,
+        'start_one_port_forward(handler, 0, "".to_owned(), port, receiver, &key, &token).await;',
+        'start_one_port_forward(handler, 0, "".to_owned(), port, receiver, &key).await;',
+    )
+    change(name, "                        let token = token.clone();\n", "")
+    change(name, "                                &key,\n                                &token,\n", "                                &key,\n")
+    change(name, "                &key,\n                &token,\n", "                &key,\n")
+    change(
+        name,
+        "    key: &str,\n    token: &str,\n) {\n    if let Err(err) = crate::port_forward::listen(",
+        "    key: &str,\n) {\n    if let Err(err) = crate::port_forward::listen(",
+    )
+    change(name, "        key,\n        token,\n        handler.lc.clone(),", "        key,\n        handler.lc.clone(),")

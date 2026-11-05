@@ -1,7 +1,11 @@
 //! Account authentication failures must wait for an explicit user login.
 pub(crate) fn requires_login(message: &str) -> bool {
+    let message = message.trim();
+    let message = message
+        .strip_prefix("Failed to connect via relay server: ")
+        .unwrap_or(message);
     matches!(
-        message.trim(),
+        message,
         "Please log in before starting a remote connection" | "Invalid account or password"
     )
 }
@@ -17,6 +21,9 @@ mod tests {
         ));
         assert!(requires_login("Invalid account or password"));
         assert!(requires_login("  Invalid account or password\n"));
+        assert!(requires_login(
+            "Failed to connect via relay server: Please log in before starting a remote connection"
+        ));
     }
 
     #[test]
@@ -26,6 +33,7 @@ mod tests {
             "Password Required",
             "Connection reset",
             "Timeout",
+            "Failed to connect via relay server: Timeout",
             "Account verification is temporarily unavailable",
             "Too many login attempts; try again later",
         ] {
