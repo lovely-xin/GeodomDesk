@@ -24,7 +24,7 @@ def verify(source=None, update_lock=False):
         work = Path(tmp)
         if source is None:
             source = work / "client"
-            for name in json.loads((ROOT / "source-lock.json").read_text()):
+            for name in json.loads((ROOT / "reference/source-lock.json").read_text()):
                 path = source / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes((ROOT / "reference" / name).read_bytes())
@@ -245,7 +245,7 @@ mod geodomdesk_contract_tests {
         if not cargo:
             candidate = Path("/home/xp/.cargo/bin/cargo")
             cargo = str(candidate) if candidate.is_file() else "cargo"
-        lock_path = ROOT / "client-tests/Cargo.lock"
+        lock_path = ROOT / "tests/rust/Cargo.lock"
         if lock_path.exists():
             shutil.copyfile(lock_path, crate / "Cargo.lock")
         env = {**os.environ, "CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS": "fallback"}

@@ -30,7 +30,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def prepare(source, version, build_number=1):
     source = source.resolve()
     release_id = make_release_id(version, build_number)
-    cfg = json.loads((ROOT / "client-channel.json").read_text(encoding="utf-8"))
+    cfg = json.loads((ROOT / "config/client-channel.json").read_text(encoding="utf-8"))
     baseline = upstream.load_baseline(ROOT)
     changes = SourceEdits({name: data.decode("utf-8") for name, data in baseline.items()})
     identity.apply(changes)

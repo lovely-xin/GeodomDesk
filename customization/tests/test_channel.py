@@ -21,7 +21,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 import channel
 import prepare_client
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]
 
 
 @unittest.skipUnless(os.name == "posix", "Publisher runs on Linux")
@@ -153,7 +153,7 @@ class ChannelTests(unittest.TestCase):
     def test_preparation_and_upstream_drift(self):
         with tempfile.TemporaryDirectory(dir=ROOT, prefix="test-source-") as tmp:
             source = Path(tmp)
-            lock = json.loads((ROOT / "source-lock.json").read_text())
+            lock = json.loads((ROOT / "reference/source-lock.json").read_text())
             for name in lock:
                 path = source / name
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -301,7 +301,7 @@ class ChannelTests(unittest.TestCase):
 
         baseline = upstream.load_baseline(ROOT)
         changes = SourceEdits({name: data.decode("utf-8") for name, data in baseline.items()})
-        cfg = json.loads((ROOT / "client-channel.json").read_text(encoding="utf-8"))
+        cfg = json.loads((ROOT / "config/client-channel.json").read_text(encoding="utf-8"))
         identity.apply(changes)
         account_login.apply(changes)
         update_channel.apply(changes, cfg)

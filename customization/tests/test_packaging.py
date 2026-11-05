@@ -122,7 +122,7 @@ class PackagingTests(unittest.TestCase):
             "src/geodomdesk_auth.rs",
             "src/geodomdesk_identity.rs",
             "libs/hbb_common/src/geodomdesk_id_policy.rs",
-            "geodomdesk/reference/Cargo.toml",
+            "customization/reference/Cargo.toml",
             "src/geodomdesk_import.rs",
             "src/geodomdesk_import/data.rs",
             "libs/hbb_common/src/geodomdesk_clone_guard.rs",

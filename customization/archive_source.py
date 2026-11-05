@@ -47,7 +47,7 @@ def archive(source, customization, output):
             if path.is_file() and path.suffix not in (".pyc", ".log"):
                 tar.add(
                     path,
-                    arcname=str(Path("geodomdesk-client/geodomdesk") / relative),
+                    arcname=str(Path("geodomdesk-client/customization") / relative),
                     recursive=False,
                 )
     print("Corresponding source archived to " + str(output))

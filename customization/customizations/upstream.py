@@ -9,7 +9,7 @@ from pathlib import Path
 
 def load_baseline(root):
     baseline = {}
-    for name, digest in json.loads((root / "source-lock.json").read_text(encoding="utf-8")).items():
+    for name, digest in json.loads((root / "reference/source-lock.json").read_text(encoding="utf-8")).items():
         data = (root / "reference" / name).read_bytes().replace(b"\r\n", b"\n")
         if hashlib.sha256(data).hexdigest() != digest:
             raise ValueError("Customization baseline is damaged: " + name)

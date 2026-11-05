@@ -9,7 +9,7 @@ on:
         default: ''
   push:
     branches: [main]
-    paths: ['geodomdesk/**', '.github/workflows/build.yml', '!geodomdesk/**/*.md', '!geodomdesk/assets/DESIGN.txt']
+    paths: ['customization/**', '.github/workflows/build.yml', '!customization/**/*.md', '!customization/assets/DESIGN.txt']
   schedule:
     - cron: '15 */6 * * *'
 
@@ -56,14 +56,14 @@ jobs:
         if: inputs.reuse_desktop_run != ''
         run: |
           python3 -c 'import json,pathlib; assert json.loads(pathlib.Path("reused-windows/geodomdesk-build-config.json").read_text()) == json.loads(pathlib.Path("reused-ubuntu/geodomdesk-build-config.json").read_text())'
-          python3 -m pip install -r geodomdesk/requirements.txt
+          python3 -m pip install -r customization/requirements.txt
       - name: Follow the latest official stable source
         id: plan
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GEODOMDESK_REUSE_DESKTOP_RUN: ${{ inputs.reuse_desktop_run }}
           GEODOMDESK_REUSE_CONFIG: reused-windows/geodomdesk-build-config.json
-        run: python3 geodomdesk/plan_upstream.py
+        run: python3 customization/plan_upstream.py
 
   bridge:
     needs: plan
@@ -102,11 +102,11 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y clang cmake libclang-dev libgtk-3-dev ninja-build pkg-config nasm
-          python3 -m pip install -r ../geodomdesk/requirements.txt
+          python3 -m pip install -r ../customization/requirements.txt
       - name: Prepare and validate source
         run: |
-          python3 ../geodomdesk/prepare_client.py --source . --version "$VERSION" --build-number "$BUILD_NUMBER"
-          CARGO_TARGET_DIR="$PWD/target/geodomdesk-verification" python3 ../geodomdesk/verify_rust.py --source .
+          python3 ../customization/prepare_client.py --source . --version "$VERSION" --build-number "$BUILD_NUMBER"
+          CARGO_TARGET_DIR="$PWD/target/geodomdesk-verification" python3 ../customization/verify_rust.py --source .
       - name: Generate Flutter bridge
         run: |
           cargo install cargo-expand --version 1.0.95 --locked
@@ -120,7 +120,7 @@ jobs:
           cache: true
       - name: Validate the customized UI before native compilation
         run: |
-          python3 ../geodomdesk/patch_flutter_sdk.py
+          python3 ../customization/patch_flutter_sdk.py
           python3 -c 'import build; build.ffi_bindgen_function_refactor()'
           sed -i 's/extended_text: 13.0.0/extended_text: 14.0.0/g' flutter/pubspec.yaml
           cd flutter
@@ -190,17 +190,17 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install cmake==4.3.0
-          python -m pip install -r ../geodomdesk/requirements.txt
+          python -m pip install -r ../customization/requirements.txt
           $scripts = python -c "import sysconfig; print(sysconfig.get_path('scripts'))"
           $scripts | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - name: Prepare independent client identity
-        run: python ../geodomdesk/prepare_client.py --source . --version $env:VERSION --build-number $env:BUILD_NUMBER
+        run: python ../customization/prepare_client.py --source . --version $env:VERSION --build-number $env:BUILD_NUMBER
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: geodomdesk-bridge
           path: client
       - name: Patch the pinned Flutter SDK
-        run: python ../geodomdesk/patch_flutter_sdk.py
+        run: python ../customization/patch_flutter_sdk.py
       - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         id: native-cache
         with:
@@ -259,7 +259,7 @@ jobs:
           if-no-files-found: error
           path: windows-artifact/*
       - name: Verify native Windows installation and fixed connection settings
-        run: ../geodomdesk/test-windows-native.ps1 -Package ../windows-artifact/GeodomDesk.exe -BuildConfig geodomdesk-build-config.json
+        run: ../customization/tests/test-windows-native.ps1 -Package ../windows-artifact/GeodomDesk.exe -BuildConfig geodomdesk-build-config.json
 
   ubuntu:
     needs: [plan, bridge]
@@ -300,16 +300,16 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y build-essential clang cmake curl git libayatana-appindicator3-dev libasound2-dev libclang-dev libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgtk-3-dev libpulse-dev libva-dev libxcb-randr0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxdo-dev libxfixes-dev libxtst-dev libxrandr-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev wayland-protocols libdbus-1-dev libpam0g-dev nasm ninja-build pkg-config unzip xz-utils libssl-dev autoconf automake libtool
-          python3 -m pip install cmake==4.3.0 -r ../geodomdesk/requirements.txt
+          python3 -m pip install cmake==4.3.0 -r ../customization/requirements.txt
           python3 -c "import sysconfig; print(sysconfig.get_path('scripts'))" >> "$GITHUB_PATH"
       - name: Prepare independent client identity
-        run: python3 ../geodomdesk/prepare_client.py --source . --version "$VERSION" --build-number "$BUILD_NUMBER"
+        run: python3 ../customization/prepare_client.py --source . --version "$VERSION" --build-number "$BUILD_NUMBER"
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: geodomdesk-bridge
           path: client
       - name: Patch the pinned Flutter SDK
-        run: python3 ../geodomdesk/patch_flutter_sdk.py
+        run: python3 ../customization/patch_flutter_sdk.py
       - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         id: native-cache
         with:
@@ -329,7 +329,7 @@ jobs:
           export DEB_ARCH=amd64
           python3 ./build.py --flutter --hwcodec --unix-file-copy-paste
           mkdir -p ../ubuntu-artifact
-          python3 ../geodomdesk/repack_deb.py --input "rustdesk-$VERSION.deb" --output ../ubuntu-artifact/geodomdesk.deb --version "$VERSION" --build-number "$BUILD_NUMBER"
+          python3 ../customization/repack_deb.py --input "rustdesk-$VERSION.deb" --output ../ubuntu-artifact/geodomdesk.deb --version "$VERSION" --build-number "$BUILD_NUMBER"
           cp geodomdesk-build-config.json ../ubuntu-artifact/
       - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
         if: always() && steps.native-cache.outputs.cache-hit != 'true'
@@ -338,7 +338,7 @@ jobs:
           key: ${{ steps.native-cache.outputs.cache-primary-key }}
       - name: Archive corresponding source including modified submodules
         run: |
-          python3 ../geodomdesk/archive_source.py --source . --customization ../geodomdesk --output ../ubuntu-artifact/geodomdesk-source.tar.gz
+          python3 ../customization/archive_source.py --source . --customization ../geodomdesk --output ../ubuntu-artifact/geodomdesk-source.tar.gz
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: geodomdesk-ubuntu
@@ -395,7 +395,7 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y build-essential clang cmake curl gcc-multilib g++-multilib libclang-dev nasm ninja-build pkg-config autoconf automake libtool
-          python3 -m pip install cmake==4.3.0 -r ../geodomdesk/requirements.txt
+          python3 -m pip install cmake==4.3.0 -r ../customization/requirements.txt
           python3 -c "import sysconfig; print(sysconfig.get_path('scripts'))" >> "$GITHUB_PATH"
           echo "ANDROID_NDK_HOME=${{ steps.ndk.outputs.ndk-path }}" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_ROOT=${{ steps.ndk.outputs.ndk-path }}" >> "$GITHUB_ENV"
@@ -403,8 +403,8 @@ jobs:
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platforms;android-36' 'build-tools;36.0.0'
       - name: Prepare independent Android client
         run: |
-          python3 ../geodomdesk/prepare_client.py --source . --version "$VERSION" --build-number "$BUILD_NUMBER"
-          python3 ../geodomdesk/patch_flutter_sdk.py
+          python3 ../customization/prepare_client.py --source . --version "$VERSION" --build-number "$BUILD_NUMBER"
+          python3 ../customization/patch_flutter_sdk.py
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: geodomdesk-bridge
@@ -449,17 +449,17 @@ jobs:
         env:
           GEODOMDESK_ANDROID_KEYSTORE: ${{ secrets.GEODOMDESK_ANDROID_KEYSTORE }}
           GEODOMDESK_ANDROID_KEY_PASSWORD: ${{ secrets.GEODOMDESK_ANDROID_KEY_PASSWORD }}
-        run: python3 ../geodomdesk/android_release.py prepare --source . --file "$RUNNER_TEMP/geodomdesk-signing.p12"
+        run: python3 ../customization/android_release.py prepare --source . --file "$RUNNER_TEMP/geodomdesk-signing.p12"
       - name: Build and verify signed Android APK
         run: |
           sed -i 's/org.gradle.jvmargs=-Xmx1024M/org.gradle.jvmargs=-Xmx2g/' flutter/android/gradle.properties
           cd flutter
           flutter pub get
-          dart run flutter_launcher_icons -f ../../geodomdesk/android-icons.yaml
+          dart run flutter_launcher_icons -f ../../customization/config/android-icons.yaml
           # One ABI needs no split; Flutter otherwise adds an ABI offset to versionCode.
           flutter build apk --release --target-platform android-arm64 --build-name "$VERSION" --build-number "$BUILD_NUMBER"
           cd ..
-          python3 ../geodomdesk/android_release.py verify --source . --file flutter/build/app/outputs/flutter-apk/app-release.apk
+          python3 ../customization/android_release.py verify --source . --file flutter/build/app/outputs/flutter-apk/app-release.apk
           mkdir -p ../android-artifact
           cp flutter/build/app/outputs/flutter-apk/app-release.apk ../android-artifact/geodomdesk.apk
           cp geodomdesk-build-config.json ../android-artifact/
@@ -475,7 +475,7 @@ jobs:
         run: |
           python3 -c 'import os,pathlib; pathlib.Path(os.environ["RUNNER_TEMP"], "geodomdesk-signing.p12").unlink(missing_ok=True); pathlib.Path("flutter/android/key.properties").unlink(missing_ok=True)'
       - name: Archive corresponding source with generated Android resources
-        run: python3 ../geodomdesk/archive_source.py --source . --customization ../geodomdesk --output ../android-artifact/geodomdesk-source.tar.gz
+        run: python3 ../customization/archive_source.py --source . --customization ../geodomdesk --output ../android-artifact/geodomdesk-source.tar.gz
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: geodomdesk-android
@@ -497,7 +497,7 @@ jobs:
           github-token: ${{ github.token }}
       - name: Revalidate the unchanged native Windows build
         shell: pwsh
-        run: ./geodomdesk/test-windows-native.ps1 -Package ./reused-windows/GeodomDesk.exe -BuildConfig ./reused-windows/geodomdesk-build-config.json
+        run: ./customization/tests/test-windows-native.ps1 -Package ./reused-windows/GeodomDesk.exe -BuildConfig ./reused-windows/geodomdesk-build-config.json
 
   release:
     needs: [plan, windows, ubuntu, android, reused_windows]
@@ -530,8 +530,8 @@ jobs:
       - name: Validate all builds and write release descriptor
         run: |
           python3 -c 'import json,pathlib; configs=[json.loads(pathlib.Path(p,"geodomdesk-build-config.json").read_text()) for p in ["windows","ubuntu","android"]]; assert configs[0] == configs[1] == configs[2]'
-          python3 -m pip install -r geodomdesk/requirements.txt
-          python3 geodomdesk/release_bundle.py --version "$VERSION" --repository "$GITHUB_REPOSITORY" --windows windows/GeodomDesk.exe --ubuntu ubuntu/geodomdesk.deb --android android/geodomdesk.apk --source-archive android/geodomdesk-source.tar.gz --build-config windows/geodomdesk-build-config.json --output release
+          python3 -m pip install -r customization/requirements.txt
+          python3 customization/release_bundle.py --version "$VERSION" --repository "$GITHUB_REPOSITORY" --windows windows/GeodomDesk.exe --ubuntu ubuntu/geodomdesk.deb --android android/geodomdesk.apk --source-archive android/geodomdesk-source.tar.gz --build-config windows/geodomdesk-build-config.json --output release
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: geodomdesk-release

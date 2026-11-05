@@ -18,6 +18,8 @@ def customization_hash(root=None):
     paths.extend(root.glob("*.ps1"))
     for directory, pattern in [
         ("customizations", "*.py"),
+        ("tests", "*.py"),
+        ("tests", "*.ps1"),
         ("client", "*"),
         ("assets", "*.png"),
         ("assets", "*.ico"),
@@ -30,11 +32,11 @@ def customization_hash(root=None):
     paths.extend(
         root / name
         for name in [
-            "client-channel.json",
-            "android-icons.yaml",
-            "source-lock.json",
+            "config/client-channel.json",
+            "config/android-icons.yaml",
+            "reference/source-lock.json",
             "requirements.txt",
-            "client-tests/Cargo.lock",
+            "tests/rust/Cargo.lock",
         ]
         if (root / name).is_file()
     )

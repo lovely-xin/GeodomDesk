@@ -39,7 +39,7 @@ def desktop_recipe(workflow):
 
 def prepare_hash(customization, version, build_number, temporary):
     source = temporary / "client"
-    lock = json.loads((customization / "source-lock.json").read_text())
+    lock = json.loads((customization / "reference/source-lock.json").read_text())
     for name in lock:
         target = source / name
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -89,7 +89,7 @@ def validate(run_id, config_file, version, upstream, get):
     root = Path(__file__).resolve().parent
     subprocess.run(["git", "fetch", "--depth=1", "origin", run["head_sha"]], check=True)
     archive = subprocess.check_output(
-        ["git", "archive", run["head_sha"], "geodomdesk", ".github/workflows/build.yml"]
+        ["git", "archive", run["head_sha"], "customization", ".github/workflows/build.yml"]
     )
     with tempfile.TemporaryDirectory(prefix="geodomdesk-reuse-check-") as tmp:
         temporary = Path(tmp)
@@ -108,7 +108,7 @@ def validate(run_id, config_file, version, upstream, get):
         if desktop_recipe(previous_recipe) != desktop_recipe(current_recipe):
             raise ValueError("The desktop build recipe or toolchain changed; rebuild all platforms")
         before, previous_config = prepare_hash(
-            previous / "geodomdesk", version, config["build_number"], temporary / "before"
+            previous / "customization", version, config["build_number"], temporary / "before"
         )
         after, current_config = prepare_hash(
             root, version, config["build_number"], temporary / "after"

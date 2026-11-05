@@ -27,7 +27,7 @@ GitHub Actions 原生构建 Windows、Ubuntu、Android，不使用 Docker。每 
 
 客户端扩展、身份隔离、登录处理、更新通道和上游合并分别维护，避免把定制散落在临时源码中。
 
-- [代码结构与维护说明](geodomdesk/README.md)
+- [代码结构与维护说明](customization/README.md)
 - [使用说明](USER_GUIDE.md)
 - [许可协议](LICENSE)
 

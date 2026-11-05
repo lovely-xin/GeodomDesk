@@ -20,14 +20,14 @@ GeodomDesk 基于官方 RustDesk 稳定版，支持 Windows x64、Ubuntu amd64�
 | `customizations/upstream.py` | 基线校验与三方合并 |
 | `customizations/build.py` | 组合定制、版本记录和统一写入 |
 | `client/` | 编译进客户端的独立 Rust 模块 |
-| `reference/`、`source-lock.json` | 已审查的官方基线与 SHA-256 |
+| `reference/`、`reference/source-lock.json` | 已审查的官方基线与 SHA-256 |
 | `plan_upstream.py` | 官方版本检查与构建计划 |
 | `repack_deb.py` | Ubuntu 软件包和服务隔离 |
 | `archive_source.py`、`release_bundle.py` | 对应源码及发布清单 |
 | `channel.py` | 版本、产物与签名契约 |
 | `publisher.py` | 原生安装文件校验、签名和发布 |
 
-正式构建工作流位于仓库 `.github/workflows/build.yml`。新增定制应归入对应模块，不直接编辑临时 checkout；变更基线时同步审查 `source-lock.json`。
+正式构建工作流位于仓库 `.github/workflows/build.yml`。新增定制应归入对应模块，不直接编辑临时 checkout；变更基线时同步审查 `reference/source-lock.json`。
 
 ## 执行链路
 
@@ -41,7 +41,7 @@ GeodomDesk 基于官方 RustDesk 稳定版，支持 Windows x64、Ubuntu amd64�
 | 下载入口 | `publisher.py` 的 `portal_update` → 导航页下载区域 | 只替换标记区域，保留现有布局；旧生产任务必须停用 |
 | 客户端更新 | `client/geodomdesk_update.rs` → 官方 updater | 限定独立通道；下载、签名、摘要与提升权限继续使用官方流程 |
 
-连接参数的编译来源只有 `client-channel.json`；云端 `config.example.json` 只描述发布任务、签名密钥位置和输出目录。客户端不读取云端发布配置，发布端不生成访问密码或客户端配置脚本。
+连接参数的编译来源只有 `config/client-channel.json`；云端 `config/publisher.example.json` 只描述发布任务、签名密钥位置和输出目录。客户端不读取云端发布配置，发布端不生成访问密码或客户端配置脚本。
 
 账号登录由 `account_login.py` 和 `client/geodomdesk_auth.rs` 适配官方客户端界面：识别服务端登录错误、取消重试、打开已有登录窗口；不在此项目实现或修改服务端的账号验证。Ubuntu 克隆恢复与用户资料导入分别由独立模块处理，不进入发布程序。
 
@@ -83,7 +83,7 @@ python3 prepare_client.py --source /path/to/source --version 1.5.1 --build-numbe
 
 产物包含 Windows 原生 EXE、Ubuntu DEB、Android ARM64 APK、对应源码、更新清单及签名。公开连接参数在编译时写入固定配置；界面和配置文件均不能覆盖这些连接参数；API 可留空，不预置永久密码，不覆盖已有密码与验证模式。
 
-连接参数只在 `client-channel.json` 维护，由 `customizations/server_config.py` 写入官方配置优先级；未新增运行时配置文件或轮询。桌面与移动设置页隐藏服务器入口，公共编辑窗口同时拦截扫码等内部调用；外部配置加载和文件名注入入口不读取参数。设备 ID、访问密码和个人记录继续使用独立的正常配置。
+连接参数只在 `config/client-channel.json` 维护，由 `customizations/server_config.py` 写入官方配置优先级；未新增运行时配置文件或轮询。桌面与移动设置页隐藏服务器入口，公共编辑窗口同时拦截扫码等内部调用；外部配置加载和文件名注入入口不读取参数。设备 ID、访问密码和个人记录继续使用独立的正常配置。
 
 Windows 原生 EXE 自带安装入口，更新使用同一程序的 `--update`。Ubuntu 提供更新提示与下载，由管理员安装 DEB，不支持静默自动安装。云端只校验、复制已构建的文件并生成签名更新清单，不重新封装或注入配置。
 
@@ -100,11 +100,11 @@ APK 显示版本跟随官方，版本代码使用递增的内部构建序号。�
 ## 验证
 
 ```sh
-python3 -m unittest test_channel test_packaging test_plan test_android -v
+python3 -m unittest discover -s tests -v
 python3 verify_rust.py
 ```
 
-Windows 在临时 CI 环境另运行 `test-windows-native.ps1`，核对实际安装与固定连接参数。
+Windows 在临时 CI 环境另运行 `tests/test-windows-native.ps1`，核对实际安装与固定连接参数。
 
 `customizations/id_controls.py` 维护默认 ID 及原生恢复入口；`customizations/settings_cleanup.py` 维护设置项可见性和用户链接，保留网络兼容、权限与打印功能。用户说明位于 `USER_GUIDE.md`。
 
