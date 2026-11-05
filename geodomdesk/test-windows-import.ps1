@@ -54,3 +54,10 @@ try {
   if(-not $process.HasExited){Stop-Process -Id $process.Id -Force}
 }
 Write-Output 'First-run same-server import, credential exclusion, favorites and one-time initialization verified.'
+# A pending migration resumes even after some device files were already written.
+Set-Content -LiteralPath $matched -Encoding utf8 -Value ((Get-Content -LiteralPath $matched -Raw).Replace('Matching server','Retained alias'))
+Set-Content -LiteralPath $local -Encoding utf8 -Value ((Get-Content -LiteralPath $local -Raw) -replace '(geodomdesk-initial-import\s*=\s*)"Y"','$1"pending"')
+Start-ImportFixture
+if(-not (Test-Path -LiteralPath (Join-Path $target 'peers\111333557.toml'))){throw 'Interrupted migration did not resume'}
+if((Get-Content -LiteralPath $matched -Raw) -notmatch 'Retained alias'){throw 'Resumed migration overwrote an existing record'}
+Write-Output 'Interrupted first-run import resumes without overwriting existing user data.'

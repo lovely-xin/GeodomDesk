@@ -8,6 +8,7 @@ use serde_derive::Serialize;
 use std::{collections::HashSet, fs};
 
 mod data;
+const INITIAL_IMPORT: &str = "geodomdesk-initial-import";
 
 #[derive(Default, Serialize)]
 pub(crate) struct ImportReport {
@@ -70,30 +71,47 @@ pub(crate) fn import() -> ResultType<ImportReport> {
         }
     }
     LocalConfig::set_fav(favorites);
+    if LocalConfig::get_option(INITIAL_IMPORT) == "pending" {
+        LocalConfig::set_option(INITIAL_IMPORT.to_owned(), "Y".to_owned());
+    }
     Ok(report)
 }
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 pub(crate) fn import_on_first_run() {
-    const MARKER: &str = "geodomdesk-initial-import";
     static FIRST_RUN: std::sync::Once = std::sync::Once::new();
     FIRST_RUN.call_once(|| {
-        if !LocalConfig::get_option(MARKER).is_empty() {
+        let state = LocalConfig::get_option(INITIAL_IMPORT);
+        if !state.is_empty() && state != "pending" {
             return;
         }
         // Upgrades with existing user data retain their explicit import choice.
-        let has_peers = fs::read_dir(Config::path("peers"))
-            .map(|entries| {
-                entries
-                    .filter_map(Result::ok)
-                    .any(|entry| entry.path().extension().and_then(|s| s.to_str()) == Some("toml"))
-            })
-            .unwrap_or(false);
-        if !has_peers && LocalConfig::get_fav().is_empty() {
-            if let Err(error) = import() {
-                hbb_common::log::debug!("Initial device import skipped: {error}");
+        if state.is_empty() {
+            let has_peers = fs::read_dir(Config::path("peers"))
+                .map(|entries| {
+                    entries.filter_map(Result::ok).any(|entry| {
+                        entry.path().extension().and_then(|s| s.to_str()) == Some("toml")
+                    })
+                })
+                .unwrap_or(false);
+            if has_peers || !LocalConfig::get_fav().is_empty() {
+                LocalConfig::set_option(INITIAL_IMPORT.to_owned(), "Y".to_owned());
+                return;
             }
         }
-        LocalConfig::set_option(MARKER.to_owned(), "Y".to_owned());
+        let source_exists = ProjectDirs::from("", "", "RustDesk")
+            .map(|project| project.config_dir().is_dir())
+            .unwrap_or(false);
+        if source_exists {
+            // Persist before the first device write so a stopped migration can resume.
+            LocalConfig::set_option(INITIAL_IMPORT.to_owned(), "pending".to_owned());
+            if let Err(error) = import() {
+                hbb_common::log::debug!("Initial device import deferred: {error}");
+                return;
+            }
+        } else if state == "pending" {
+            return;
+        }
+        LocalConfig::set_option(INITIAL_IMPORT.to_owned(), "Y".to_owned());
     });
 }
