@@ -1,6 +1,9 @@
+use std::collections::HashSet;
+
 use portable_atomic::{AtomicBool, AtomicU64};
 
 use arc_swap::ArcSwapOption;
+use tokio::task::JoinSet;
 use util::sync::Mutex as SyncMutex;
 
 use super::agent_transport::*;
@@ -18,6 +21,134 @@ pub(crate) struct UfragPwd {
     pub(crate) local_pwd: String,
     pub(crate) remote_ufrag: String,
     pub(crate) remote_pwd: String,
+}
+
+const MAX_PARALLEL_RELAY_CHECKS: usize = 4;
+const MAX_CHECKS_PER_ALLOCATION_PER_ROUND: usize = 4;
+
+#[derive(Default)]
+struct RelayChecks {
+    tasks: JoinSet<SocketAddr>,
+    allocations: HashSet<SocketAddr>,
+}
+
+impl RelayChecks {
+    fn reap(&mut self) {
+        while let Some(result) = self.tasks.try_join_next() {
+            match result {
+                Ok(addr) => {
+                    self.allocations.remove(&addr);
+                }
+                Err(error) => {
+                    log::warn!("ICE relay check task failed: {error}");
+                    *self = Self::default();
+                    return;
+                }
+            }
+        }
+    }
+
+    fn schedule(
+        &mut self,
+        agent: &Arc<AgentInternal>,
+        pairs: Vec<Arc<CandidatePair>>,
+        addr: SocketAddr,
+    ) {
+        self.allocations.insert(addr);
+        let agent = Arc::clone(agent);
+        self.tasks.spawn(async move {
+            for pair in pairs {
+                if agent.agent_conn.get_selected_pair().is_some() {
+                    break;
+                }
+                if agent.begin_candidate_check(&pair) {
+                    agent.ping_candidate(&pair.local, &pair.remote).await;
+                }
+            }
+            addr
+        });
+    }
+}
+
+#[cfg(test)]
+mod check_tests {
+    use super::*;
+    use crate::candidate::candidate_host::CandidateHostConfig;
+    use crate::candidate::candidate_relay::CandidateRelayConfig;
+    use tokio::net::UdpSocket;
+
+    #[tokio::test]
+    async fn busy_relay_allocation_does_not_hold_up_direct_or_other_relays() -> Result<()> {
+        let config = AgentConfig::default();
+        let (mut agent, _receivers) = AgentInternal::new(&config);
+        config.init_with_defaults(&mut agent);
+        let agent = Arc::new(agent);
+        let local_udp = Arc::new(UdpSocket::bind("127.0.0.1:0").await?);
+        let peer_udp = UdpSocket::bind("127.0.0.1:0").await?;
+        let host = |addr: SocketAddr, conn| -> Result<Arc<dyn Candidate + Send + Sync>> {
+            Ok(Arc::new(
+                CandidateHostConfig {
+                    base_config: CandidateBaseConfig {
+                        network: "udp".into(),
+                        address: addr.ip().to_string(),
+                        port: addr.port(),
+                        conn,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }
+                .new_candidate_host()?,
+            ))
+        };
+        let relay = |port| -> Result<Arc<dyn Candidate + Send + Sync>> {
+            Ok(Arc::new(
+                CandidateRelayConfig {
+                    base_config: CandidateBaseConfig {
+                        network: "udp".into(),
+                        address: "127.0.0.1".into(),
+                        port,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }
+                .new_candidate_relay()?,
+            ))
+        };
+        let direct = host(local_udp.local_addr()?, Some(local_udp))?;
+        let remote = host(peer_udp.local_addr()?, None)?;
+        let busy = relay(40001)?;
+        let other = relay(40002)?;
+        agent.add_pair(busy.clone(), remote.clone()).await;
+        agent.add_pair(other.clone(), remote.clone()).await;
+        agent.add_pair(direct, remote.clone()).await;
+        {
+            let mut checks = agent.relay_checks.lock().await;
+            checks.allocations.insert(busy.addr());
+            checks.tasks.spawn(std::future::pending::<SocketAddr>());
+        }
+
+        agent.ping_all_candidates().await;
+        let mut packet = [0; 512];
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), peer_udp.recv(&mut packet))
+                .await
+                .unwrap()?
+                > 0
+        );
+        let busy = agent.find_pair(&busy, &remote).await.unwrap();
+        let other = agent.find_pair(&other, &remote).await.unwrap();
+        assert_eq!(busy.binding_request_count.load(Ordering::Relaxed), 0);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while other.binding_request_count.load(Ordering::Relaxed) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        agent.close().await?;
+        assert!(agent.relay_checks.lock().await.tasks.is_empty());
+        Ok(())
+    }
 }
 
 pub struct AgentInternal {
@@ -60,6 +191,7 @@ pub struct AgentInternal {
 
     // LRU of outbound Binding request Transaction IDs
     pub(crate) pending_binding_requests: Mutex<Vec<BindingRequest>>,
+    relay_checks: Mutex<RelayChecks>,
 
     pub(crate) agent_conn: Arc<AgentConn>,
 
@@ -154,6 +286,7 @@ impl AgentInternal {
 
             // LRU of outbound Binding request Transaction IDs
             pending_binding_requests: Mutex::new(vec![]),
+            relay_checks: Mutex::default(),
 
             // AgentConn
             agent_conn: Arc::new(AgentConn::new()),
@@ -205,7 +338,7 @@ impl AgentInternal {
     }
 
     async fn contact(
-        &self,
+        self: &Arc<Self>,
         last_connection_state: &mut ConnectionState,
         checking_duration: &mut Instant,
     ) {
@@ -233,7 +366,9 @@ impl AgentInternal {
             }
         }
 
-        self.contact_candidates().await;
+        if self.contact_candidates().await {
+            self.ping_all_candidates().await;
+        }
 
         *last_connection_state = self.connection_state.load(Ordering::SeqCst).into();
     }
@@ -348,6 +483,7 @@ impl AgentInternal {
             );
             p.nominated.store(true, Ordering::SeqCst);
             self.agent_conn.selected_pair.store(Some(p));
+            *self.relay_checks.lock().await = RelayChecks::default();
 
             self.update_connection_state(ConnectionState::Connected)
                 .await;
@@ -370,64 +506,96 @@ impl AgentInternal {
         }
     }
 
-    pub(crate) async fn ping_all_candidates(&self) {
+    async fn ping_all_candidates(self: &Arc<Self>) {
         log::trace!("[{}]: pinging all candidates", self.get_name(),);
 
-        let mut pairs: Vec<(
-            Arc<dyn Candidate + Send + Sync>,
-            Arc<dyn Candidate + Send + Sync>,
-        )> = vec![];
+        let mut direct = Vec::new();
+        let mut relay_checks = self.relay_checks.lock().await;
+        if self.agent_conn.get_selected_pair().is_some() {
+            return;
+        }
+        relay_checks.reap();
+        let mut by_allocation = HashMap::<SocketAddr, Vec<(&Arc<CandidatePair>, u16)>>::new();
 
         {
-            let mut checklist = self.agent_conn.checklist.lock().await;
-            if checklist.is_empty() {
-                log::warn!(
-                    "[{}]: pingAllCandidates called with no candidate pairs. Connection is not possible yet.",
-                    self.get_name(),
-                );
-            }
-            for p in &mut *checklist {
+            let checklist = self.agent_conn.checklist.lock().await;
+            for p in &*checklist {
                 let p_state = p.state.load(Ordering::SeqCst);
-                if p_state == CandidatePairState::Waiting as u8 {
-                    if p.state
-                        .compare_exchange(
-                            p_state,
-                            CandidatePairState::InProgress as u8,
-                            Ordering::SeqCst,
-                            Ordering::SeqCst,
-                        )
-                        .is_err()
-                    {
-                        continue;
-                    }
-                } else if p_state != CandidatePairState::InProgress as u8 {
+                if p_state != CandidatePairState::Waiting as u8
+                    && p_state != CandidatePairState::InProgress as u8
+                {
                     continue;
                 }
-
-                if p.binding_request_count.load(Ordering::SeqCst) > self.max_binding_requests {
-                    log::trace!(
-                        "[{}]: max requests reached for pair {}, marking it as failed",
-                        self.get_name(),
-                        p
-                    );
-                    let _ = p.state.compare_exchange(
-                        CandidatePairState::InProgress as u8,
-                        CandidatePairState::Failed as u8,
-                        Ordering::SeqCst,
-                        Ordering::SeqCst,
-                    );
-                } else {
-                    p.binding_request_count.fetch_add(1, Ordering::SeqCst);
-                    let local = p.local.clone();
-                    let remote = p.remote.clone();
-                    pairs.push((local, remote));
+                if p.local.candidate_type() != CandidateType::Relay {
+                    if self.begin_candidate_check(p) {
+                        direct.push(Arc::clone(p));
+                    }
+                    continue;
+                }
+                let addr = p.local.addr();
+                if relay_checks.allocations.contains(&addr) {
+                    continue;
+                }
+                let count = p.binding_request_count.load(Ordering::Relaxed);
+                if count > self.max_binding_requests {
+                    self.begin_candidate_check(p);
+                    continue;
+                }
+                // Rotate among pairs sharing an allocation while keeping each batch bounded.
+                let batch = by_allocation.entry(addr).or_default();
+                let insert = batch.partition_point(|(_, attempts)| *attempts <= count);
+                if insert < MAX_CHECKS_PER_ALLOCATION_PER_ROUND {
+                    if batch.len() == MAX_CHECKS_PER_ALLOCATION_PER_ROUND {
+                        batch.pop();
+                    }
+                    batch.insert(insert, (p, count));
                 }
             }
+            let available =
+                MAX_PARALLEL_RELAY_CHECKS.saturating_sub(relay_checks.allocations.len());
+            let mut next: Vec<_> = by_allocation.into_iter().collect();
+            next.sort_unstable_by_key(|(_, pairs)| pairs.first().map(|(_, count)| *count));
+            for (addr, pairs) in next.into_iter().take(available) {
+                let batch = pairs
+                    .into_iter()
+                    .map(|(pair, _)| Arc::clone(pair))
+                    .collect();
+                relay_checks.schedule(self, batch, addr);
+            }
         }
+        drop(relay_checks);
 
-        for (local, remote) in pairs {
-            self.ping_candidate(&local, &remote).await;
+        for pair in direct {
+            if self.agent_conn.get_selected_pair().is_some() {
+                break;
+            }
+            self.ping_candidate(&pair.local, &pair.remote).await;
         }
+    }
+
+    fn begin_candidate_check(&self, pair: &CandidatePair) -> bool {
+        let state = pair.state.load(Ordering::SeqCst);
+        if state != CandidatePairState::Waiting as u8
+            && state != CandidatePairState::InProgress as u8
+        {
+            return false;
+        }
+        let failed = pair.binding_request_count.load(Ordering::Relaxed) > self.max_binding_requests;
+        let next = if failed {
+            CandidatePairState::Failed
+        } else {
+            CandidatePairState::InProgress
+        };
+        if pair
+            .state
+            .compare_exchange(state, next as u8, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+            || failed
+        {
+            return false;
+        }
+        pair.binding_request_count.fetch_add(1, Ordering::Relaxed);
+        true
     }
 
     pub(crate) async fn add_pair(
@@ -676,6 +844,7 @@ impl AgentInternal {
     ///
     /// This is used for restarts, failures and on close.
     pub(crate) async fn delete_all_candidates(&self) {
+        *self.relay_checks.lock().await = RelayChecks::default();
         {
             let mut local_candidates = self.local_candidates.lock().await;
             for cs in local_candidates.values_mut() {

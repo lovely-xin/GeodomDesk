@@ -22,6 +22,26 @@ use crate::priority::PriorityAttr;
 use crate::use_candidate::UseCandidateAttr;
 
 #[tokio::test]
+async fn relay_only_does_not_wait_for_a_direct_path() -> Result<()> {
+    let relay = Agent::new(AgentConfig {
+        candidate_types: vec![CandidateType::Relay],
+        urls: vec![Url::parse_url("turn:127.0.0.1:3478")?],
+        ..Default::default()
+    })
+    .await?;
+    let mixed = Agent::new(AgentConfig::default()).await?;
+    assert_eq!(relay.internal.relay_acceptance_min_wait, Duration::ZERO);
+    assert_eq!(relay.internal.prflx_acceptance_min_wait, Duration::ZERO);
+    assert_eq!(
+        mixed.internal.relay_acceptance_min_wait,
+        DEFAULT_RELAY_ACCEPTANCE_MIN_WAIT
+    );
+    relay.close().await?;
+    mixed.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_pair_search() -> Result<()> {
     let config = AgentConfig::default();
     let a = Agent::new(config).await?;

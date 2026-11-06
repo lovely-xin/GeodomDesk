@@ -20,7 +20,7 @@ use crate::use_candidate::*;
 #[async_trait]
 trait ControllingSelector {
     async fn start(&self);
-    async fn contact_candidates(&self);
+    async fn contact_candidates(&self) -> bool;
     async fn ping_candidate(
         &self,
         local: &Arc<dyn Candidate + Send + Sync>,
@@ -44,7 +44,7 @@ trait ControllingSelector {
 #[async_trait]
 trait ControlledSelector {
     async fn start(&self);
-    async fn contact_candidates(&self);
+    async fn contact_candidates(&self) -> bool;
     async fn ping_candidate(
         &self,
         local: &Arc<dyn Candidate + Send + Sync>,
@@ -167,11 +167,11 @@ impl AgentInternal {
         }
     }
 
-    pub(crate) async fn contact_candidates(&self) {
+    pub(crate) async fn contact_candidates(&self) -> bool {
         if self.is_controlling.load(Ordering::SeqCst) {
-            ControllingSelector::contact_candidates(self).await;
+            ControllingSelector::contact_candidates(self).await
         } else {
-            ControlledSelector::contact_candidates(self).await;
+            ControlledSelector::contact_candidates(self).await
         }
     }
 
@@ -225,7 +225,7 @@ impl ControllingSelector for AgentInternal {
         *self.start_time.lock() = Instant::now();
     }
 
-    async fn contact_candidates(&self) {
+    async fn contact_candidates(&self) -> bool {
         // A lite selector should not contact candidates
         if self.lite.load(Ordering::SeqCst) {
             // This only happens if both peers are lite. See RFC 8445 S6.1.1 and S6.2
@@ -244,33 +244,29 @@ impl ControllingSelector for AgentInternal {
             }
         } else if nominated_pair_is_some {
             self.nominate_pair().await;
-        } else {
-            let has_nominated_pair =
-                if let Some(p) = self.agent_conn.get_best_valid_candidate_pair().await {
-                    self.is_nominatable(&p.local) && self.is_nominatable(&p.remote)
-                } else {
-                    false
-                };
-
-            if has_nominated_pair {
-                if let Some(p) = self.agent_conn.get_best_valid_candidate_pair().await {
-                    log::trace!(
-                        "Nominatable pair found, nominating ({}, {})",
-                        p.local,
-                        p.remote
-                    );
-                    p.nominated.store(true, Ordering::SeqCst);
-                    {
-                        let mut nominated_pair = self.nominated_pair.lock().await;
-                        *nominated_pair = Some(p);
-                    }
+        } else if let Some(p) = self
+            .agent_conn
+            .get_best_valid_candidate_pair()
+            .await
+            .filter(|p| self.is_nominatable(&p.local) && self.is_nominatable(&p.remote))
+        {
+            log::trace!(
+                "Nominatable pair found, nominating ({}, {})",
+                p.local,
+                p.remote
+            );
+            p.nominated.store(true, Ordering::SeqCst);
+            {
+                let mut nominated_pair = self.nominated_pair.lock().await;
+                if !p.turn_permission_rejected() && nominated_pair.is_none() {
+                    *nominated_pair = Some(p);
                 }
-
-                self.nominate_pair().await;
-            } else {
-                self.ping_all_candidates().await;
             }
+            self.nominate_pair().await;
+        } else {
+            return true;
         }
+        false
     }
 
     async fn ping_candidate(
@@ -419,7 +415,7 @@ impl ControllingSelector for AgentInternal {
 impl ControlledSelector for AgentInternal {
     async fn start(&self) {}
 
-    async fn contact_candidates(&self) {
+    async fn contact_candidates(&self) -> bool {
         // A lite selector should not contact candidates
         if self.lite.load(Ordering::SeqCst) {
             self.validate_selected_pair().await;
@@ -429,8 +425,9 @@ impl ControlledSelector for AgentInternal {
                 self.check_keepalive().await;
             }
         } else {
-            self.ping_all_candidates().await;
+            return true;
         }
+        false
     }
 
     async fn ping_candidate(

@@ -166,29 +166,22 @@ impl AgentConfig {
             a.max_binding_requests = DEFAULT_MAX_BINDING_REQUESTS;
         }
 
-        if let Some(host_acceptance_min_wait) = self.host_acceptance_min_wait {
-            a.host_acceptance_min_wait = host_acceptance_min_wait;
-        } else {
-            a.host_acceptance_min_wait = DEFAULT_HOST_ACCEPTANCE_MIN_WAIT;
-        }
-
-        if let Some(srflx_acceptance_min_wait) = self.srflx_acceptance_min_wait {
-            a.srflx_acceptance_min_wait = srflx_acceptance_min_wait;
-        } else {
-            a.srflx_acceptance_min_wait = DEFAULT_SRFLX_ACCEPTANCE_MIN_WAIT;
-        }
-
-        if let Some(prflx_acceptance_min_wait) = self.prflx_acceptance_min_wait {
-            a.prflx_acceptance_min_wait = prflx_acceptance_min_wait;
-        } else {
-            a.prflx_acceptance_min_wait = DEFAULT_PRFLX_ACCEPTANCE_MIN_WAIT;
-        }
-
-        if let Some(relay_acceptance_min_wait) = self.relay_acceptance_min_wait {
-            a.relay_acceptance_min_wait = relay_acceptance_min_wait;
-        } else {
-            a.relay_acceptance_min_wait = DEFAULT_RELAY_ACCEPTANCE_MIN_WAIT;
-        }
+        // Every pair uses TURN under a relay-only policy, regardless of the remote
+        // candidate type. There is no direct path to give a head start.
+        let relay_only = self.candidate_types == [CandidateType::Relay];
+        let default_wait = |normal| if relay_only { Duration::ZERO } else { normal };
+        a.host_acceptance_min_wait = self
+            .host_acceptance_min_wait
+            .unwrap_or_else(|| default_wait(DEFAULT_HOST_ACCEPTANCE_MIN_WAIT));
+        a.srflx_acceptance_min_wait = self
+            .srflx_acceptance_min_wait
+            .unwrap_or_else(|| default_wait(DEFAULT_SRFLX_ACCEPTANCE_MIN_WAIT));
+        a.prflx_acceptance_min_wait = self
+            .prflx_acceptance_min_wait
+            .unwrap_or_else(|| default_wait(DEFAULT_PRFLX_ACCEPTANCE_MIN_WAIT));
+        a.relay_acceptance_min_wait = self
+            .relay_acceptance_min_wait
+            .unwrap_or_else(|| default_wait(DEFAULT_RELAY_ACCEPTANCE_MIN_WAIT));
 
         if let Some(disconnected_timeout) = self.disconnected_timeout {
             a.disconnected_timeout = disconnected_timeout;
