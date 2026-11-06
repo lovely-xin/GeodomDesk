@@ -1,7 +1,10 @@
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tokio::net::UdpSocket;
-use tokio::time::Duration;
+use tokio::sync::Notify;
+use tokio::time::{timeout, Duration};
+use util::conn::conn_pipe::pipe;
 use util::vnet::net::*;
 
 use super::*;
@@ -9,6 +12,160 @@ use crate::auth::*;
 use crate::relay::relay_static::*;
 use crate::server::config::*;
 use crate::server::*;
+
+struct StalledSend {
+    socket: UdpSocket,
+    send_count: AtomicUsize,
+    stall_on: usize,
+    entered: Notify,
+    released: Notify,
+}
+
+impl StalledSend {
+    async fn new(stall_on: usize) -> Result<Arc<Self>> {
+        Ok(Arc::new(Self {
+            socket: UdpSocket::bind("127.0.0.1:0").await?,
+            send_count: AtomicUsize::new(0),
+            stall_on,
+            entered: Notify::new(),
+            released: Notify::new(),
+        }))
+    }
+}
+
+struct NotifyOnDrop<'a>(&'a Notify);
+
+impl Drop for NotifyOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.notify_one();
+    }
+}
+
+#[async_trait]
+impl Conn for StalledSend {
+    async fn connect(&self, addr: SocketAddr) -> util::Result<()> {
+        Conn::connect(&self.socket, addr).await
+    }
+    async fn recv(&self, buf: &mut [u8]) -> util::Result<usize> {
+        Conn::recv(&self.socket, buf).await
+    }
+    async fn recv_from(&self, buf: &mut [u8]) -> util::Result<(usize, SocketAddr)> {
+        Conn::recv_from(&self.socket, buf).await
+    }
+    async fn send(&self, buf: &[u8]) -> util::Result<usize> {
+        Conn::send(&self.socket, buf).await
+    }
+    async fn send_to(&self, buf: &[u8], _: SocketAddr) -> util::Result<usize> {
+        if self.send_count.fetch_add(1, Ordering::Relaxed) == self.stall_on {
+            let _release = NotifyOnDrop(&self.released);
+            self.entered.notify_one();
+            return std::future::pending().await;
+        }
+        Ok(buf.len())
+    }
+    fn local_addr(&self) -> util::Result<SocketAddr> {
+        Conn::local_addr(&self.socket)
+    }
+    fn remote_addr(&self) -> Option<SocketAddr> {
+        Conn::remote_addr(&self.socket)
+    }
+    async fn close(&self) -> util::Result<()> {
+        Conn::close(&self.socket).await
+    }
+    fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
+        self
+    }
+}
+
+async fn transaction_client(conn: Arc<dyn Conn + Send + Sync>) -> Result<ClientInternal> {
+    ClientInternal::new(ClientConfig {
+        stun_serv_addr: String::new(),
+        turn_serv_addr: String::new(),
+        username: String::new(),
+        password: String::new(),
+        realm: String::new(),
+        software: String::new(),
+        rto_in_ms: 15,
+        conn,
+        vnet: None,
+    })
+    .await
+}
+
+fn test_binding_request() -> Result<Message> {
+    let mut request = Message::new();
+    request.build(&[Box::new(BINDING_REQUEST), Box::new(TransactionId::new())])?;
+    Ok(request)
+}
+
+#[tokio::test]
+async fn transaction_is_removed_when_first_send_fails() -> Result<()> {
+    let (conn, _peer) = pipe();
+    let mut client = transaction_client(Arc::new(conn)).await?;
+    let request = test_binding_request()?;
+    assert!(client
+        .perform_transaction(&request, "127.0.0.1:9", false)
+        .await
+        .is_err());
+    assert_eq!(client.tr_map.lock().size(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn transaction_is_removed_when_first_send_is_cancelled() -> Result<()> {
+    let conn = StalledSend::new(0).await?;
+    let mut client = transaction_client(conn.clone()).await?;
+    let request = test_binding_request()?;
+    {
+        let send = client.perform_transaction(&request, "127.0.0.1:9", false);
+        tokio::pin!(send);
+        tokio::select! {
+            _ = &mut send => panic!("the first send should still be stalled"),
+            result = timeout(Duration::from_secs(1), conn.entered.notified()) => result.unwrap(),
+        }
+    }
+    assert_eq!(client.tr_map.lock().size(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn blocked_retransmission_does_not_prevent_processing_responses() -> Result<()> {
+    let conn = StalledSend::new(1).await?;
+    let mut client = transaction_client(conn.clone()).await?;
+    let destination: SocketAddr = "127.0.0.1:9".parse().unwrap();
+    let first = test_binding_request()?;
+    client
+        .perform_transaction(&first, &destination.to_string(), true)
+        .await?;
+    timeout(Duration::from_secs(1), conn.entered.notified())
+        .await
+        .unwrap();
+
+    let second = test_binding_request()?;
+    client
+        .perform_transaction(&second, &destination.to_string(), true)
+        .await?;
+    for id in [second.transaction_id, first.transaction_id] {
+        let mut response = Message::new();
+        response.build(&[Box::new(BINDING_SUCCESS), Box::new(id)])?;
+        timeout(
+            Duration::from_secs(1),
+            ClientInternal::handle_stun_message(
+                &client.tr_map,
+                &client.read_ch_tx,
+                &response.raw,
+                destination,
+            ),
+        )
+        .await
+        .unwrap()?;
+    }
+    assert_eq!(client.tr_map.lock().size(), 0);
+    timeout(Duration::from_secs(1), conn.released.notified())
+        .await
+        .unwrap();
+    Ok(())
+}
 
 async fn create_listening_test_client(rto_in_ms: u16) -> Result<Client> {
     let conn = UdpSocket::bind("0.0.0.0:0").await?;
@@ -62,7 +219,7 @@ async fn test_client_with_stun_send_binding_request() -> Result<()> {
     log::debug!("mapped-addr: {}", resp);
     {
         let ci = c.client_internal.lock().await;
-        let tm = ci.tr_map.lock().await;
+        let tm = ci.tr_map.lock();
         assert_eq!(0, tm.size(), "should be no transaction left");
     }
 

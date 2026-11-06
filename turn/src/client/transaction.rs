@@ -6,8 +6,9 @@ use std::sync::Arc;
 
 use portable_atomic::AtomicU16;
 use stun::message::*;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
 use tokio::time::Duration;
+use util::sync::Mutex;
 use util::Conn;
 
 use crate::error::*;
@@ -21,31 +22,18 @@ async fn on_rtx_timeout(
     tr_key: &str,
     n_rtx: u16,
 ) -> bool {
-    let mut tm = tr_map.lock().await;
-    let (tr_raw, tr_to) = match tm.find(tr_key) {
-        Some(tr) => (tr.raw.clone(), tr.to.clone()),
-        None => return true, // already gone
-    };
-
     if n_rtx == MAX_RTX_COUNT {
-        // all retransmisstions failed
-        if let Some(tr) = tm.delete(tr_key) {
-            if !tr
-                .write_result(TransactionResult {
-                    err: Some(Error::Other(format!(
-                        "{:?} {}",
-                        Error::ErrAllRetransmissionsFailed,
-                        tr_key
-                    ))),
-                    ..Default::default()
-                })
-                .await
-            {
-                log::debug!("no listener for transaction");
-            }
-        }
+        finish_failed(tr_map, tr_key).await;
         return true;
     }
+
+    let payload = tr_map
+        .lock()
+        .find(tr_key)
+        .map(|tr| (tr.raw.clone(), tr.to.clone()));
+    let Some((tr_raw, tr_to)) = payload else {
+        return true;
+    };
 
     log::trace!(
         "retransmitting transaction {} to {} (n_rtx={})",
@@ -54,31 +42,33 @@ async fn on_rtx_timeout(
         n_rtx
     );
 
-    let dst = match SocketAddr::from_str(&tr_to) {
-        Ok(dst) => dst,
-        Err(_) => return false,
+    let sent = match SocketAddr::from_str(&tr_to) {
+        Ok(dst) => conn.send_to(&tr_raw, dst).await.is_ok(),
+        Err(_) => false,
     };
-
-    if conn.send_to(&tr_raw, dst).await.is_err() {
-        if let Some(tr) = tm.delete(tr_key) {
-            if !tr
-                .write_result(TransactionResult {
-                    err: Some(Error::Other(format!(
-                        "{:?} {}",
-                        Error::ErrAllRetransmissionsFailed,
-                        tr_key
-                    ))),
-                    ..Default::default()
-                })
-                .await
-            {
-                log::debug!("no listener for transaction");
-            }
-        }
-        return true;
+    if !sent {
+        finish_failed(tr_map, tr_key).await;
     }
+    !sent
+}
 
-    false
+async fn finish_failed(tr_map: &Mutex<TransactionMap>, tr_key: &str) {
+    let transaction = tr_map.lock().delete(tr_key);
+    if let Some(tr) = transaction {
+        if !tr
+            .write_result(TransactionResult {
+                err: Some(Error::Other(format!(
+                    "{:?} {}",
+                    Error::ErrAllRetransmissionsFailed,
+                    tr_key
+                ))),
+                ..Default::default()
+            })
+            .await
+        {
+            log::debug!("no listener for transaction");
+        }
+    }
 }
 
 /// `TransactionResult` is a bag of result values of a transaction.
@@ -162,7 +152,7 @@ impl Transaction {
     }
 
     /// Starts the transaction timer.
-    pub async fn start_rtx_timer(
+    pub fn start_rtx_timer(
         &mut self,
         conn: Arc<dyn Conn + Send + Sync>,
         tr_map: Arc<Mutex<TransactionMap>>,
@@ -172,28 +162,24 @@ impl Transaction {
         let (n_rtx, interval, key) = (self.n_rtx.clone(), self.interval.clone(), self.key.clone());
 
         tokio::spawn(async move {
-            let mut done = false;
-            while !done {
-                let timer = tokio::time::sleep(Duration::from_millis(
-                    interval.load(Ordering::SeqCst) as u64,
-                ));
-                tokio::pin!(timer);
-
-                tokio::select! {
-                    _ = timer.as_mut() => {
-                        let rtx = n_rtx.fetch_add(1, Ordering::SeqCst);
-
-                        let mut val = interval.load(Ordering::SeqCst);
-                        val *= 2;
-                        if val > MAX_RTX_INTERVAL_IN_MS {
-                            val = MAX_RTX_INTERVAL_IN_MS;
-                        }
-                        interval.store(val, Ordering::SeqCst);
-
-                        done = on_rtx_timeout(&conn, &tr_map, &key, rtx + 1).await;
+            let retransmit = async {
+                loop {
+                    let wait = interval.load(Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(wait.into())).await;
+                    let rtx = n_rtx.fetch_add(1, Ordering::SeqCst) + 1;
+                    interval.store(
+                        wait.saturating_mul(2).min(MAX_RTX_INTERVAL_IN_MS),
+                        Ordering::SeqCst,
+                    );
+                    if on_rtx_timeout(&conn, &tr_map, &key, rtx).await {
+                        return;
                     }
-                    _ = timer_ch_rx.recv() => done = true,
                 }
+            };
+            tokio::select! {
+                biased;
+                _ = timer_ch_rx.recv() => {}
+                _ = retransmit => {}
             }
         });
     }

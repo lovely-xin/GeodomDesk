@@ -30,6 +30,7 @@ use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 use transaction::*;
 use util::conn::*;
+use util::sync::Mutex as SyncMutex;
 use util::vnet::net::*;
 
 use crate::error::*;
@@ -77,11 +78,24 @@ struct ClientInternal {
     realm: Realm,
     integrity: MessageIntegrity,
     software: Software,
-    tr_map: Arc<Mutex<TransactionMap>>,
+    tr_map: Arc<SyncMutex<TransactionMap>>,
     binding_mgr: Arc<Mutex<BindingManager>>,
     rto_in_ms: u16,
     read_ch_tx: Arc<Mutex<Option<mpsc::Sender<InboundData>>>>,
     close_notify: CancellationToken,
+}
+
+struct PendingTransaction<'a> {
+    transactions: &'a SyncMutex<TransactionMap>,
+    key: Option<&'a str>,
+}
+
+impl Drop for PendingTransaction<'_> {
+    fn drop(&mut self) {
+        if let Some(key) = self.key {
+            self.transactions.lock().delete(key);
+        }
+    }
 }
 
 #[async_trait]
@@ -114,6 +128,7 @@ impl RelayConnObserver for ClientInternal {
         to: &str,
         ignore_result: bool,
     ) -> Result<TransactionResult> {
+        let destination = SocketAddr::from_str(to)?;
         let tr_key = BASE64_STANDARD.encode(msg.transaction_id.0);
 
         let mut tr = Transaction::new(TransactionConfig {
@@ -126,33 +141,31 @@ impl RelayConnObserver for ClientInternal {
         let result_ch_rx = tr.get_result_channel();
 
         log::trace!("start {} transaction {} to {}", msg.typ, tr_key, tr.to);
-        {
-            let mut tm = self.tr_map.lock().await;
-            tm.insert(tr_key.clone(), tr);
-        }
+        self.tr_map.lock().insert(tr_key.clone(), tr);
+        let mut pending = PendingTransaction {
+            transactions: &self.tr_map,
+            key: Some(&tr_key),
+        };
 
-        self.conn
-            .send_to(&msg.raw, SocketAddr::from_str(to)?)
-            .await?;
+        self.conn.send_to(&msg.raw, destination).await?;
 
-        let conn2 = Arc::clone(&self.conn);
-        let tr_map2 = Arc::clone(&self.tr_map);
-        {
-            let mut tm = self.tr_map.lock().await;
-            if let Some(tr) = tm.get(&tr_key) {
-                tr.start_rtx_timer(conn2, tr_map2).await;
-            }
+        if let Some(tr) = self.tr_map.lock().get(&tr_key) {
+            tr.start_rtx_timer(Arc::clone(&self.conn), Arc::clone(&self.tr_map));
         }
 
         // If dontWait is true, get the transaction going and return immediately
         if ignore_result {
+            pending.key = None;
             return Ok(TransactionResult::default());
         }
 
         // wait_for_result waits for the transaction result
         if let Some(mut result_ch_rx) = result_ch_rx {
             match result_ch_rx.recv().await {
-                Some(tr) => Ok(tr),
+                Some(tr) => {
+                    pending.key = None;
+                    Ok(tr)
+                }
                 None => Err(Error::ErrTransactionClosed),
             }
         } else {
@@ -205,7 +218,7 @@ impl ClientInternal {
             password: config.password,
             realm: Realm::new(ATTR_REALM, config.realm),
             software: Software::new(ATTR_SOFTWARE, config.software),
-            tr_map: Arc::new(Mutex::new(TransactionMap::new())),
+            tr_map: Arc::new(SyncMutex::new(TransactionMap::new())),
             binding_mgr: Arc::new(Mutex::new(BindingManager::new())),
             rto_in_ms: if config.rto_in_ms != 0 {
                 config.rto_in_ms
@@ -296,7 +309,7 @@ impl ClientInternal {
         data: &[u8],
         from: SocketAddr,
         stun_serv_str: &str,
-        tr_map: &Arc<Mutex<TransactionMap>>,
+        tr_map: &Arc<SyncMutex<TransactionMap>>,
         binding_mgr: &Arc<Mutex<BindingManager>>,
     ) -> Result<()> {
         // +-------------------+-------------------------------+
@@ -332,7 +345,7 @@ impl ClientInternal {
     }
 
     async fn handle_stun_message(
-        tr_map: &Arc<Mutex<TransactionMap>>,
+        tr_map: &Arc<SyncMutex<TransactionMap>>,
         read_ch_tx: &Arc<Mutex<Option<mpsc::Sender<InboundData>>>>,
         data: &[u8],
         mut from: SocketAddr,
@@ -373,14 +386,8 @@ impl ClientInternal {
 
         let tr_key = BASE64_STANDARD.encode(msg.transaction_id.0);
 
-        let mut tm = tr_map.lock().await;
-        if tm.find(&tr_key).is_none() {
-            // silently discard
-            log::debug!("no transaction for {}", msg);
-            return Ok(());
-        }
-
-        if let Some(mut tr) = tm.delete(&tr_key) {
+        let transaction = tr_map.lock().delete(&tr_key);
+        if let Some(mut tr) = transaction {
             // End the transaction
             tr.stop_rtx_timer();
 
@@ -395,6 +402,8 @@ impl ClientInternal {
             {
                 log::debug!("no listener for msg.raw {:?}", data);
             }
+        } else {
+            log::debug!("no transaction for {}", msg);
         }
 
         Ok(())
@@ -458,10 +467,7 @@ impl ClientInternal {
             let mut read_ch_tx = self.read_ch_tx.lock().await;
             read_ch_tx.take();
         }
-        {
-            let mut tm = self.tr_map.lock().await;
-            tm.close_and_delete_all();
-        }
+        self.tr_map.lock().close_and_delete_all();
     }
 
     /// Sends a new STUN request to the given transport address.
