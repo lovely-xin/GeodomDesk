@@ -1,11 +1,15 @@
 """Keep native UDP punching independent of TCP NAT and WebRTC signaling."""
 
+from pathlib import Path
+
 
 def apply(changes):
     apply_udp_probe(changes)
     keep_legacy_udp_punch(changes)
     prefer_direct_routes(changes)
     apply_mediator(changes)
+    source = Path(__file__).resolve().parents[1] / "client/client/transport_race.rs"
+    changes["src/client/transport_race.rs"] = source.read_text(encoding="utf-8")
 
 
 def apply_udp_probe(changes):
@@ -265,40 +269,14 @@ def prefer_direct_routes(changes):
                                             Ok(()) => ipv6.0 = Some(s),
                                             Err(err) => log::debug!("IPv6 peer socket setup failed: {err}"),
                                         }""")
-    changes.replace(path, """/// Race WebRTC against the other transports, preferring P2P: `select_ok` would always pick the
-/// relay, whose TCP connect beats ICE + DTLS + SCTP by an order of magnitude. An `is_p2p` result
-/// wins outright; a relayed one — from either side, since `webrtc_fut` is a whole punch attempt
-/// that can also end in a relay — is held for `window_ms` to give the other side a chance.""", """/// Prefer a direct result while any direct attempt can still finish. Keep a successful relay
-/// as a fallback for at most `window_ms`, and use it sooner when all remaining attempts fail.""")
-    changes.replace(path, """                    // `webrtc_fut` is a whole punch attempt, not just the WebRTC connect, so it
-                    // can end in a relay of its own. Committing that immediately would preempt a
-                    // direct punch still in flight on the other branch — the exact inversion this
-                    // function exists to prevent — so hold it on the same terms as any relay.""", """                    // A whole punch attempt can itself end in a relay. Hold it while another
-                    // branch can still deliver a direct connection.""")
-    changes.replace(path, '                            None if others_fut.is_none() => bail!("WebRTC failed: {}", e),',
-                    '                            None if others_fut.is_none() => return Err(e),')
-    changes.replace(path, '                                log::warn!("WebRTC leg also failed: {}", we);',
-                    '                                log::warn!("Preferred connection attempt also failed: {}", we);')
-    changes.replace(path, '    async fn unfinished_ipv6_still_beats_held_relay() {', '''    async fn native_udp_still_beats_a_faster_relay_without_webrtc() {
-        let got = race_transports_prefer_webrtc(
-            ok_after(90, "udp"),
-            vec![ok_after(5, "relay")],
-            400,
-            |transport| *transport == "udp",
-        )
-        .await
-        .unwrap();
-        assert_eq!(got, "udp");
-    }
-
-    #[tokio::test]
-    async fn unfinished_ipv6_still_beats_held_relay() {''')
-    text = changes[path].replace("race_transports_prefer_webrtc", "race_transports_prefer_direct")
-    start = text.index("async fn race_transports_prefer_direct")
+    text = changes[path]
+    start = text.index("/// Race WebRTC against the other transports")
     end = text.index("// A peer decides how many ICE candidates", start)
-    changes[path] = text[:start] + text[start:end].replace("webrtc_fut", "preferred_fut").replace(
-        "webrtc_err", "preferred_err"
-    ) + text[end:]
+    changes.replace(path, text[start:end], """mod transport_race;
+use transport_race::race_transports_prefer_direct;
+
+""")
+    changes[path] = changes[path].replace("race_transports_prefer_webrtc", "race_transports_prefer_direct")
 
 
 def apply_mediator(changes):
