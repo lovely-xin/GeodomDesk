@@ -40,8 +40,8 @@ try {
   function Read-Option([string]$Name) {return Invoke-Client -ClientArgs @('--option',$Name)}
   $appRoot=Split-Path -Parent $installed
   $cli=Join-Path $appRoot 'geodomdesk-cli.exe'
-  $helpText=& $cli --help
-  if($LASTEXITCODE -ne 0 -or $helpText -notmatch 'geodomdesk-cli exec'){throw 'Installed terminal CLI did not start'}
+  $helpText=(& $cli --help | Out-String)
+  if($LASTEXITCODE -ne 0 -or $helpText -notmatch 'geodomdesk-cli exec' -or $helpText -notmatch '--admin-user'){throw 'Installed terminal CLI did not return the expected help'}
   $remoteConfigOption='allow-remote-config-modification'
   if((Read-Option $remoteConfigOption) -cne 'Y'){throw 'Remote configuration permission is not enabled by default'}
   $null=Invoke-Client -ClientArgs @('--option',$remoteConfigOption,'N')
