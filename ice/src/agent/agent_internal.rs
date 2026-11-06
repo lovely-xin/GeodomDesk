@@ -336,6 +336,16 @@ impl AgentInternal {
         );
 
         if let Some(p) = p {
+            if p.turn_permission_rejected() {
+                return;
+            }
+            log::info!(
+                "ICE selected candidate pair: {} {:?} -> {} {:?}",
+                p.local.network_type(),
+                p.local.candidate_type(),
+                p.remote.network_type(),
+                p.remote.candidate_type()
+            );
             p.nominated.store(true, Ordering::SeqCst);
             self.agent_conn.selected_pair.store(Some(p));
 
@@ -379,8 +389,17 @@ impl AgentInternal {
             for p in &mut *checklist {
                 let p_state = p.state.load(Ordering::SeqCst);
                 if p_state == CandidatePairState::Waiting as u8 {
-                    p.state
-                        .store(CandidatePairState::InProgress as u8, Ordering::SeqCst);
+                    if p.state
+                        .compare_exchange(
+                            p_state,
+                            CandidatePairState::InProgress as u8,
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                        )
+                        .is_err()
+                    {
+                        continue;
+                    }
                 } else if p_state != CandidatePairState::InProgress as u8 {
                     continue;
                 }
@@ -391,8 +410,12 @@ impl AgentInternal {
                         self.get_name(),
                         p
                     );
-                    p.state
-                        .store(CandidatePairState::Failed as u8, Ordering::SeqCst);
+                    let _ = p.state.compare_exchange(
+                        CandidatePairState::InProgress as u8,
+                        CandidatePairState::Failed as u8,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    );
                 } else {
                     p.binding_request_count.fetch_add(1, Ordering::SeqCst);
                     let local = p.local.clone();
@@ -731,7 +754,38 @@ impl AgentInternal {
             });
         }
 
-        self.send_stun(m, local, remote).await;
+        if self.send_stun(m, local, remote).await.is_err() {
+            self.pending_binding_requests
+                .lock()
+                .await
+                .retain(|request| request.transaction_id != m.transaction_id);
+        }
+    }
+
+    async fn reject_relay_pair(
+        &self,
+        local: &Arc<dyn Candidate + Send + Sync>,
+        remote: &Arc<dyn Candidate + Send + Sync>,
+    ) {
+        let Some(pair) = self.find_pair(local, remote).await else {
+            return;
+        };
+        if self
+            .agent_conn
+            .get_selected_pair()
+            .is_some_and(|selected| Arc::ptr_eq(&pair, &selected))
+            || !pair.reject_turn_permission()
+        {
+            return;
+        }
+        let mut nominated = self.nominated_pair.lock().await;
+        if nominated
+            .as_ref()
+            .is_some_and(|pending| Arc::ptr_eq(pending, &pair))
+        {
+            *nominated = None;
+        }
+        log::debug!("ICE dropped relay candidate pair after TURN refused its peer");
     }
 
     pub(crate) async fn send_binding_success(
@@ -768,7 +822,7 @@ impl AgentInternal {
                 err
             );
         } else {
-            self.send_stun(&out, local, remote).await;
+            let _ = self.send_stun(&out, local, remote).await;
         }
     }
 
@@ -1013,14 +1067,21 @@ impl AgentInternal {
         msg: &Message,
         local: &Arc<dyn Candidate + Send + Sync>,
         remote: &Arc<dyn Candidate + Send + Sync>,
-    ) {
-        if let Err(err) = local.write_to(&msg.raw, &**remote).await {
+    ) -> Result<()> {
+        let result = local.write_to(&msg.raw, &**remote).await;
+        if let Err(err) = &result {
+            if local.candidate_type() == CandidateType::Relay
+                && matches!(err, Error::Util(util::Error::ErrHasNoPermission))
+            {
+                self.reject_relay_pair(local, remote).await;
+            }
             log::trace!(
                 "[{}]: failed to send STUN message: {}",
                 self.get_name(),
                 err
             );
         }
+        result.map(|_| ())
     }
 
     /// Runs the candidate using the provided connection.

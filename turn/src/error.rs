@@ -67,6 +67,8 @@ pub enum Error {
     ErrPeerAddressFamilyMismatch,
     #[error("fake error")]
     ErrFakeErr,
+    #[error("TURN peer forbidden (403)")]
+    ErrPeerForbidden,
     #[error("try again")]
     ErrTryAgain,
     #[error("use of closed network connection")]

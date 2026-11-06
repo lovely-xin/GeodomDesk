@@ -159,6 +159,7 @@ impl<T: RelayConnObserver + Send + Sync> Conn for RelayConn<T> {
         let mut relay_conn = self.relay_conn.lock().await;
         match relay_conn.send_to(p, addr).await {
             Ok(n) => Ok(n),
+            Err(Error::ErrPeerForbidden) => Err(util::Error::ErrHasNoPermission),
             Err(err) => Err(io::Error::new(io::ErrorKind::Other, err.to_string()).into()),
         }
     }
@@ -198,7 +199,7 @@ impl<T: RelayConnObserver + Send + Sync> RelayConnInternal<T> {
         RelayConnInternal {
             obs,
             relayed_addr: config.relayed_addr,
-            perm_map: PermissionMap::new(),
+            perm_map: PermissionMap::default(),
             binding_mgr: config.binding_mgr,
             integrity: config.integrity,
             nonce: config.nonce,
@@ -212,25 +213,7 @@ impl<T: RelayConnObserver + Send + Sync> RelayConnInternal<T> {
     /// see SetDeadline and SetWriteDeadline.
     /// On packet-oriented connections, write timeouts are rare.
     async fn send_to(&mut self, p: &[u8], addr: SocketAddr) -> Result<usize, Error> {
-        // check if we have a permission for the destination IP addr
-        let perm = if let Some(perm) = self.perm_map.find(&addr) {
-            Arc::clone(perm)
-        } else {
-            let perm = Arc::new(Permission::default());
-            self.perm_map.insert(&addr, Arc::clone(&perm));
-            perm
-        };
-
-        let mut result = Ok(());
-        for _ in 0..MAX_RETRY_ATTEMPTS {
-            result = self.create_perm(&perm, addr).await;
-            if let Err(err) = &result {
-                if Error::ErrTryAgain != *err {
-                    break;
-                }
-            }
-        }
-        result?;
+        self.ensure_permission(addr).await?;
 
         let number = {
             let (bind_st, bind_at, bind_number, bind_addr) = {
@@ -358,23 +341,20 @@ impl<T: RelayConnObserver + Send + Sync> RelayConnInternal<T> {
         self.send_channel_data(p, number).await
     }
 
-    /// This func-block would block, per destination IP (, or perm), until
-    /// the perm state becomes "requested". Purpose of this is to guarantee
-    /// the order of packets (within the same perm).
-    /// Note that CreatePermission transaction may not be complete before
-    /// all the data transmission. This is done assuming that the request
-    /// will be mostly likely successful and we can tolerate some loss of
-    /// UDP packet (or reorder), inorder to minimize the latency in most cases.
-    async fn create_perm(&mut self, perm: &Arc<Permission>, addr: SocketAddr) -> Result<(), Error> {
-        if perm.state() == PermState::Idle {
-            // punch a hole! (this would block a bit..)
-            if let Err(err) = self.create_permissions(&[addr]).await {
-                self.perm_map.delete(&addr);
-                return Err(err);
-            }
-            perm.set_state(PermState::Permitted);
+    async fn ensure_permission(&mut self, addr: SocketAddr) -> Result<(), Error> {
+        let ip = addr.ip();
+        match self.perm_map.state(ip) {
+            Some(PermissionState::Permitted) => return Ok(()),
+            Some(PermissionState::Rejected) => return Err(Error::ErrPeerForbidden),
+            None => {}
         }
-        Ok(())
+        let result = self.request_permissions(&[addr]).await;
+        match result {
+            Ok(()) => self.perm_map.permit(ip),
+            Err(Error::ErrPeerForbidden) => self.perm_map.reject(ip),
+            Err(_) => {}
+        }
+        result
     }
 
     async fn send_channel_data(&self, data: &[u8], ch_num: u16) -> Result<usize, Error> {
@@ -432,6 +412,8 @@ impl<T: RelayConnObserver + Send + Sync> RelayConnInternal<T> {
             } else if code.code == CODE_STALE_NONCE {
                 self.set_nonce_from_msg(&res);
                 return Err(Error::ErrTryAgain);
+            } else if code.code == CODE_FORBIDDEN {
+                return Err(Error::ErrPeerForbidden);
             } else {
                 return Err(Error::Other(format!("{} (error {})", res.typ, code)));
             }
@@ -523,15 +505,37 @@ impl<T: RelayConnObserver + Send + Sync> RelayConnInternal<T> {
             return Ok(());
         }
 
-        if let Err(err) = self.create_permissions(&addrs).await {
-            if Error::ErrTryAgain != err {
-                log::error!("fail to refresh permissions: {}", err);
+        match self.request_permissions(&addrs).await {
+            Err(Error::ErrPeerForbidden) if addrs.len() == 1 => {
+                self.perm_map.reject(addrs[0].ip());
             }
-            return Err(err);
+            Err(Error::ErrPeerForbidden) => {
+                // The response doesn't identify the rejected IP in a batch.
+                let mut result = Ok(());
+                for addr in addrs {
+                    match self.request_permissions(&[addr]).await {
+                        Err(Error::ErrPeerForbidden) => self.perm_map.reject(addr.ip()),
+                        Err(err) => result = Err(err),
+                        Ok(()) => {}
+                    }
+                }
+                result?;
+            }
+            result => result?,
         }
 
         log::debug!("refresh permissions successful");
         Ok(())
+    }
+
+    async fn request_permissions(&mut self, addrs: &[SocketAddr]) -> Result<(), Error> {
+        for _ in 1..MAX_RETRY_ATTEMPTS {
+            let result = self.create_permissions(addrs).await;
+            if result != Err(Error::ErrTryAgain) {
+                return result;
+            }
+        }
+        self.create_permissions(addrs).await
     }
 
     async fn bind(
@@ -605,17 +609,8 @@ impl<T: RelayConnObserver + Send + Sync> PeriodicTimerTimeoutHandler for RelayCo
                 }
             }
             TimerIdRefresh::Perms => {
-                let mut result = Ok(());
-                for _ in 0..MAX_RETRY_ATTEMPTS {
-                    result = self.refresh_permissions().await;
-                    if let Err(err) = &result {
-                        if Error::ErrTryAgain != *err {
-                            break;
-                        }
-                    }
-                }
-                if result.is_err() {
-                    log::warn!("refresh permissions failed");
+                if let Err(err) = self.refresh_permissions().await {
+                    log::warn!("refresh permissions failed: {}", err);
                 }
             }
         }

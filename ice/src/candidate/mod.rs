@@ -194,12 +194,15 @@ pub enum CandidatePairState {
     Succeeded = 4,
 }
 
+// Internal terminal state. Statistics still expose the standard ICE "failed" value.
+const TURN_FORBIDDEN: u8 = 5;
+
 impl From<u8> for CandidatePairState {
     fn from(v: u8) -> Self {
         match v {
             1 => Self::Waiting,
             2 => Self::InProgress,
-            3 => Self::Failed,
+            3 | TURN_FORBIDDEN => Self::Failed,
             4 => Self::Succeeded,
             _ => Self::Unspecified,
         }
@@ -235,6 +238,24 @@ pub struct CandidatePair {
     pub(crate) state: AtomicU8, // convert it to CandidatePairState,
     pub(crate) nominated: AtomicBool,
     pub(crate) nominate_on_binding_success: AtomicBool,
+}
+
+impl CandidatePair {
+    pub(crate) fn reject_turn_permission(&self) -> bool {
+        self.state.swap(TURN_FORBIDDEN, Ordering::SeqCst) != TURN_FORBIDDEN
+    }
+
+    pub(crate) fn turn_permission_rejected(&self) -> bool {
+        self.state.load(Ordering::SeqCst) == TURN_FORBIDDEN
+    }
+
+    pub(crate) fn mark_succeeded(&self) -> bool {
+        self.state
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |state| {
+                (state != TURN_FORBIDDEN).then_some(CandidatePairState::Succeeded as u8)
+            })
+            .is_ok()
+    }
 }
 
 impl Default for CandidatePair {

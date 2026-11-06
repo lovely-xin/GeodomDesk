@@ -3,6 +3,22 @@ use std::time::UNIX_EPOCH;
 use super::*;
 
 #[test]
+fn test_turn_permission_rejection_is_terminal_for_one_pair() {
+    let rejected = CandidatePair::default();
+    let alternate = CandidatePair::default();
+
+    assert!(rejected.reject_turn_permission());
+    assert!(!rejected.reject_turn_permission());
+    assert!(!rejected.mark_succeeded());
+    assert!(rejected.turn_permission_rejected());
+    assert_eq!(
+        CandidatePairState::from(rejected.state.load(Ordering::SeqCst)),
+        CandidatePairState::Failed
+    );
+    assert!(alternate.mark_succeeded());
+}
+
+#[test]
 fn test_candidate_priority() -> Result<()> {
     let tests = vec![
         (

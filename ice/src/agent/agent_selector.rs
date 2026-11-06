@@ -328,8 +328,9 @@ impl ControllingSelector for AgentInternal {
             let selected_pair_is_none = self.agent_conn.get_selected_pair().is_none();
 
             if let Some(p) = self.find_pair(local, remote).await {
-                p.state
-                    .store(CandidatePairState::Succeeded as u8, Ordering::SeqCst);
+                if !p.mark_succeeded() {
+                    return;
+                }
                 log::trace!(
                     "Found valid candidate pair: {}, p.state: {}, isUseCandidate: {}, {}",
                     p,
@@ -359,10 +360,17 @@ impl ControllingSelector for AgentInternal {
         local: &Arc<dyn Candidate + Send + Sync>,
         remote: &Arc<dyn Candidate + Send + Sync>,
     ) {
+        let pair = self.find_pair(local, remote).await;
+        if pair
+            .as_ref()
+            .is_some_and(|pair| pair.turn_permission_rejected())
+        {
+            return;
+        }
         self.send_binding_success(m, local, remote).await;
         log::trace!("controllingSelector: sendBindingSuccess");
 
-        if let Some(p) = self.find_pair(local, remote).await {
+        if let Some(p) = pair {
             let nominated_pair_is_none = {
                 let nominated_pair = self.nominated_pair.lock().await;
                 nominated_pair.is_none()
@@ -485,8 +493,9 @@ impl ControlledSelector for AgentInternal {
             );
 
             if let Some(p) = self.find_pair(local, remote).await {
-                p.state
-                    .store(CandidatePairState::Succeeded as u8, Ordering::SeqCst);
+                if !p.mark_succeeded() {
+                    return;
+                }
                 log::trace!("Found valid candidate pair: {}", p);
 
                 if p.nominate_on_binding_success.load(Ordering::SeqCst)
@@ -518,6 +527,9 @@ impl ControlledSelector for AgentInternal {
         }
 
         if let Some(p) = self.find_pair(local, remote).await {
+            if p.turn_permission_rejected() {
+                return;
+            }
             let use_candidate = m.contains(ATTR_USE_CANDIDATE);
             if use_candidate {
                 // https://tools.ietf.org/html/rfc8445#section-7.3.1.5
@@ -544,7 +556,9 @@ impl ControlledSelector for AgentInternal {
             }
 
             self.send_binding_success(m, local, remote).await;
-            self.ping_candidate(local, remote).await;
+            if !p.turn_permission_rejected() {
+                self.ping_candidate(local, remote).await;
+            }
         }
     }
 }

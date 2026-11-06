@@ -115,7 +115,9 @@ impl AgentConn {
 
         let checklist = self.checklist.lock().await;
         for p in &*checklist {
-            if p.state.load(Ordering::SeqCst) == CandidatePairState::Failed as u8 {
+            if CandidatePairState::from(p.state.load(Ordering::SeqCst))
+                == CandidatePairState::Failed
+            {
                 continue;
             }
 

@@ -1,73 +1,48 @@
 use std::collections::HashMap;
-use std::net::SocketAddr;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::net::{IpAddr, SocketAddr};
 
-use portable_atomic::AtomicU8;
+const MAX_REJECTED_PEERS: usize = 128;
 
-#[derive(Default, Copy, Clone, PartialEq, Debug)]
-pub(crate) enum PermState {
-    #[default]
-    Idle = 0,
-    Permitted = 1,
+#[derive(Clone, Copy)]
+pub(crate) enum PermissionState {
+    Permitted,
+    Rejected,
 }
 
-impl From<u8> for PermState {
-    fn from(v: u8) -> Self {
-        match v {
-            0 => PermState::Idle,
-            _ => PermState::Permitted,
-        }
-    }
-}
-
-#[derive(Default)]
-pub(crate) struct Permission {
-    st: AtomicU8, //PermState,
-}
-
-impl Permission {
-    pub(crate) fn set_state(&self, state: PermState) {
-        self.st.store(state as u8, Ordering::SeqCst);
-    }
-
-    pub(crate) fn state(&self) -> PermState {
-        self.st.load(Ordering::SeqCst).into()
-    }
-}
-
-/// Thread-safe Permission map.
+/// Permissions belong to a TURN allocation and are keyed by peer IP, independently of port.
 #[derive(Default)]
 pub(crate) struct PermissionMap {
-    perm_map: HashMap<String, Arc<Permission>>,
+    states: HashMap<IpAddr, PermissionState>,
+    rejected_peers: usize,
 }
 
 impl PermissionMap {
-    pub(crate) fn new() -> PermissionMap {
-        PermissionMap {
-            perm_map: HashMap::new(),
+    pub(crate) fn state(&self, peer: IpAddr) -> Option<PermissionState> {
+        self.states.get(&peer).copied()
+    }
+
+    pub(crate) fn permit(&mut self, peer: IpAddr) {
+        self.states.insert(peer, PermissionState::Permitted);
+    }
+
+    pub(crate) fn reject(&mut self, peer: IpAddr) {
+        if matches!(self.state(peer), Some(PermissionState::Rejected)) {
+            return;
         }
-    }
-
-    pub(crate) fn insert(&mut self, addr: &SocketAddr, p: Arc<Permission>) {
-        self.perm_map.insert(addr.ip().to_string(), p);
-    }
-
-    pub(crate) fn find(&self, addr: &SocketAddr) -> Option<&Arc<Permission>> {
-        self.perm_map.get(&addr.ip().to_string())
-    }
-
-    pub(crate) fn delete(&mut self, addr: &SocketAddr) {
-        self.perm_map.remove(&addr.ip().to_string());
+        if self.rejected_peers == MAX_REJECTED_PEERS {
+            self.states.remove(&peer);
+            return;
+        }
+        self.states.insert(peer, PermissionState::Rejected);
+        self.rejected_peers += 1;
     }
 
     pub(crate) fn addrs(&self) -> Vec<SocketAddr> {
-        let mut a = vec![];
-        for k in self.perm_map.keys() {
-            if let Ok(ip) = k.parse() {
-                a.push(SocketAddr::new(ip, 0));
-            }
-        }
-        a
+        self.states
+            .iter()
+            .filter_map(|(&ip, state)| {
+                matches!(state, PermissionState::Permitted).then_some(SocketAddr::new(ip, 0))
+            })
+            .collect()
     }
 }
