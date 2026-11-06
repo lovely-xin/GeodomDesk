@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """Archive tracked working-tree source, including patched submodules, for a release."""
 import argparse
+import json
 import subprocess
 import tarfile
 from pathlib import Path
-
-from customizations.terminal_exec import SOURCES as TERMINAL_SOURCES
-
 
 def archive(source, customization, output):
     source = source.resolve()
@@ -14,7 +12,15 @@ def archive(source, customization, output):
         ["git", "ls-files", "-z", "--recurse-submodules"], cwd=source
     ).split(b"\0")
     paths = {Path(name.decode()) for name in names if name}
-    paths.update(Path("src") / name for name in TERMINAL_SOURCES)
+    build_config = Path("geodomdesk-build-config.json")
+    generated = json.loads((source / build_config).read_text(encoding="utf-8"))[
+        "generated_source_files"
+    ]
+    for name in map(Path, generated):
+        path = source / name
+        if name.is_absolute() or not path.resolve().is_relative_to(source) or not path.is_file():
+            raise ValueError("Missing or invalid generated source: " + str(name))
+        paths.add(name)
     paths.update(
         Path(name)
         for name in [
@@ -22,16 +28,7 @@ def archive(source, customization, output):
             "src/bridge_generated.io.rs",
             "flutter/lib/generated_bridge.dart",
             "flutter/lib/generated_bridge.freezed.dart",
-            "src/geodomdesk_update.rs",
-            "src/geodomdesk_auth.rs",
-            "src/geodomdesk_import.rs",
-            "src/geodomdesk_import/data.rs",
-            "src/geodomdesk_identity.rs",
-            "libs/hbb_common/src/geodomdesk_id_policy.rs",
-            "libs/hbb_common/src/geodomdesk_clone_guard.rs",
-            "flutter/assets/geodom-logo.png",
-            "flutter/windows/runner/geodomdesk_window_icons.h",
-            "geodomdesk-build-config.json",
+            build_config,
         ]
     )
     output.parent.mkdir(parents=True, exist_ok=True)

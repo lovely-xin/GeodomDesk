@@ -155,6 +155,17 @@ class PackagingTests(unittest.TestCase):
         logo = source / "flutter/assets/geodom-logo.png"
         logo.parent.mkdir(parents=True)
         logo.write_bytes(b"fixture-logo")
+        transport = source / "src/client/transport_race.rs"
+        transport.parent.mkdir(parents=True)
+        transport.write_text("// route selection\n")
+        generated = [
+            path.relative_to(source).as_posix()
+            for path in source.rglob("*")
+            if path.is_file() and ".git" not in path.parts and path.name != "Cargo.toml"
+        ]
+        (source / "geodomdesk-build-config.json").write_text(
+            json.dumps({"generated_source_files": generated})
+        )
         custom = self.root / "custom"
         (custom / "reference").mkdir(parents=True)
         (custom / "reference/Cargo.toml").write_text("reviewed baseline")
@@ -172,9 +183,13 @@ class PackagingTests(unittest.TestCase):
             "src/geodomdesk_import/data.rs",
             "libs/hbb_common/src/geodomdesk_clone_guard.rs",
             "flutter/assets/geodom-logo.png",
+            "src/client/transport_race.rs",
             *terminal_sources,
         ]:
             self.assertIn("geodomdesk-client/" + name, names)
+        transport.unlink()
+        with self.assertRaisesRegex(ValueError, "Missing or invalid generated source"):
+            archive_source.archive(source, custom, output)
 
 
 if __name__ == "__main__":

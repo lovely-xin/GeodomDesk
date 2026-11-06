@@ -1,5 +1,6 @@
 """Keep native UDP punching independent of TCP NAT and WebRTC signaling."""
 
+import re
 from pathlib import Path
 
 
@@ -7,10 +8,16 @@ def apply(changes):
     apply_udp_probe(changes)
     keep_legacy_udp_punch(changes)
     prefer_direct_routes(changes)
-    recover_handshake(changes)
+    recognize_handshake_eof(changes)
+    reuse_relay_standby(changes)
+    move_relay_transport(changes)
+    share_relay_deadline(changes)
+    prepare_punch_fallback(changes)
+    require_valid_signed_identity(changes)
     apply_mediator(changes)
-    source = Path(__file__).resolve().parents[1] / "client/client/transport_race.rs"
-    changes["src/client/transport_race.rs"] = source.read_text(encoding="utf-8")
+    root = Path(__file__).resolve().parents[1] / "client/client"
+    for name in ("relay.rs", "transport_race.rs"):
+        changes["src/client/" + name] = (root / name).read_text(encoding="utf-8")
 
 
 def apply_udp_probe(changes):
@@ -281,27 +288,292 @@ use transport_race::race_transports_prefer_direct;
     changes[path] = changes[path].replace("race_transports_prefer_webrtc", "race_transports_prefer_direct")
 
 
-def recover_handshake(changes):
+def recognize_handshake_eof(changes):
     path = "src/client.rs"
-    text = changes[path]
-    start = text.index('            Err(e) if typ == "WebRTC" && !relay_server.is_empty() => {')
-    end = text.index("                match Self::request_relay(", start)
-    changes.replace(path, text[start:end], """            Err(e) if !relay_server.is_empty()
-                && transport_race::can_retry_handshake(typ, direct, &e) =>
-            {
-                log::warn!("{typ} secure handshake failed ({e}), falling back to relay");
-                drop(webrtc_guard.take());
-                drop(conn);
-""")
-    changes.replace(path, '''                        bail!(
-                            "WebRTC secure failed ({}); relay fallback also failed: {}",
-                            e,
-                            relay_e
-                        );''', '''                        return Err(transport_race::fallback_failure(typ, e, relay_e));''')
     changes.replace(path, '                bail!("Reset by the peer");',
                     '                return Err(std::io::Error::new(\n'
                     '                    std::io::ErrorKind::UnexpectedEof, "Reset by the peer",\n'
                     '                ).into());')
+
+
+def reuse_relay_standby(changes):
+    path = "src/client.rs"
+    text = changes[path]
+    start = text.index("                        let race_result = if let Some(webrtc)")
+    end = text.index("                        if let Some(stop) = webrtc_bridge_stop", start)
+    current = text[start:end]
+    races = current.replace(
+        "race_transports_prefer_direct(",
+        "transport_race::race_transports_with_standby(",
+    ).replace(
+        "select_ok(connect_futures).await.map(|r| r.0)",
+        "select_ok(connect_futures).await.map(|r| (r.0, None))",
+    )
+    changes.replace(path, current, races)
+    changes.replace(
+        path,
+        "                        let (mut conn, kcp, mut typ, mut direct) = race_result?;",
+        "                        let ((mut conn, mut kcp, mut typ, mut direct), standby) = race_result?;",
+    )
+    text = changes[path]
+    start = text.index('                            Err(e) if typ == "WebRTC" => {')
+    end = text.index("                            Err(e) => return Err(e),", start)
+    changes.replace(path, text[start:end], """                            Err(e) if transport_race::can_retry_handshake(typ, direct, &e) => {
+                                log::warn!("{typ} secure handshake failed ({e}), falling back to relay");
+                                if typ == "WebRTC" {
+                                    drop(webrtc_guard.take());
+                                }
+                                drop(conn);
+                                if let Some(((standby_conn, standby_kcp, standby_typ, _), pk)) =
+                                    Self::secure_relay_standby(&peer, &signed_id_pk, &key, standby).await
+                                {
+                                    conn = standby_conn;
+                                    kcp = standby_kcp;
+                                    typ = standby_typ;
+                                    direct = false;
+                                    pk
+                                } else {
+                                    drop(webrtc_guard.take());
+                                    let mut relay_conn = Self::request_relay(
+                                        &peer, relay_server_rr, &rendezvous_server,
+                                        !signed_id_pk.is_empty(), &key, &token, conn_type,
+                                        &interface.get_switch_code(), None,
+                                    ).await.map_err(|relay_e| transport_race::fallback_failure(typ, e, relay_e))?;
+                                    let pk = Self::secure_connection(
+                                        &peer, signed_id_pk, &key, &mut relay_conn,
+                                    ).await?;
+                                    conn = relay_conn;
+                                    kcp = None;
+                                    typ = if use_ws() { "WebSocket" } else { "Relay" };
+                                    direct = false;
+                                    pk
+                                }
+                            }
+""")
+
+
+def move_relay_transport(changes):
+    path = "src/client.rs"
+    text = changes[path]
+    start = text.index("    /// Request a relay connection to the server.")
+    end = text.index("    #[inline]\n    #[cfg(feature = \"flutter\")]", start)
+    changes.replace(path, text[start:end], "")
+    changes.replace(path, "mod transport_race;", "mod relay;\nmod transport_race;")
+
+
+def share_relay_deadline(changes):
+    path = "src/client.rs"
+    changes.replace(
+        path,
+        "use transport_race::race_transports_prefer_direct;",
+        "#[cfg(test)]\nuse transport_race::race_transports_prefer_direct;",
+    )
+    changes.replace(
+        path,
+        "        match Self::_start(peer, key, token, conn_type, interface.clone()).await {",
+        "        let relay_deadline = transport_race::ConnectionDeadline::new(Self::relay_fallback_delay_ms());\n"
+        "        match relay_deadline\n"
+        "            .run(Self::_start(peer, key, token, conn_type, interface.clone(), &relay_deadline))\n"
+        "            .await\n"
+        "        {",
+    )
+    changes.replace(
+        path,
+        "    async fn _start(\n        peer: &str,\n        key: &str,\n        token: &str,\n        conn_type: ConnType,\n        interface: impl Interface,",
+        "    async fn _start(\n        peer: &str,\n        key: &str,\n        token: &str,\n        conn_type: ConnType,\n        interface: impl Interface,\n"
+        "        relay_deadline: &transport_race::ConnectionDeadline,",
+    )
+    source, count = re.subn(
+        r"            contained,\n        \)",
+        "            contained,\n            relay_deadline,\n        )",
+        changes[path],
+    )
+    if count != 2:
+        raise ValueError("Rendezvous attempt signatures changed")
+    changes[path] = source
+    changes.replace(
+        path,
+        "        contained: bool,\n    ) -> ResultType<(",
+        "        contained: bool,\n        relay_deadline: &transport_race::ConnectionDeadline,\n    ) -> ResultType<(",
+    )
+    changes.replace(
+        path,
+        "                &punch_type,\n            )",
+        "                &punch_type,\n                relay_deadline,\n            )",
+    )
+    changes.replace(
+        path,
+        "        punch_type: &str,\n    ) -> ResultType<(",
+        "        punch_type: &str,\n        relay_deadline: &transport_race::ConnectionDeadline,\n    ) -> ResultType<(",
+    )
+    pattern = (
+        r"(race_transports_prefer_direct|transport_race::race_transports_with_standby)"
+        r"\(\n([^\n]+\n[^\n]+\n)\s*Self::relay_fallback_delay_ms\(\),\n"
+    )
+
+    def race(match):
+        method = "race" if match[1] == "race_transports_prefer_direct" else "race_with_standby"
+        return "relay_deadline." + method + "(\n" + match[2]
+
+    source, count = re.subn(pattern, race, changes[path])
+    if count != 4:
+        raise ValueError("Transport race call sites changed")
+    changes[path] = source
+
+
+def prepare_punch_fallback(changes):
+    path = "src/client.rs"
+    text = changes[path]
+    start = text.index("        let direct_result = match (webrtc_fut, direct_futures.is_empty())")
+    end = text.index('        if typ == "WebRTC" {\n            // WebRTC through a TURN server', start)
+    changes.replace(path, text[start:end], """        use relay::DirectFailure;
+        let force_relay = interface.is_force_relay();
+        let try_direct = async {
+            let result = match (webrtc_fut, direct_futures.is_empty()) {
+                (Some(webrtc_fut), false) => relay_deadline
+                    .race(webrtc_fut, direct_futures, |r| r.3)
+                    .await,
+                (Some(webrtc_fut), true) => webrtc_fut.await,
+                (None, false) => select_ok(direct_futures).await.map(|c| c.0),
+                (None, true) => Err(anyhow!("No direct transport available")),
+            };
+            let (mut conn, kcp, typ, direct) = result.map_err(DirectFailure::Transport)?;
+            if force_relay && typ != "WebRTC" {
+                return Err(DirectFailure::Transport(anyhow!("Relay required")));
+            }
+            let pk = Self::secure_connection(peer_id, signed_id_pk.clone(), key, &mut conn)
+                .await
+                .map_err(|error| DirectFailure::Handshake(error, typ, direct))?;
+            Ok((conn, direct, pk, kcp, typ))
+        };
+        let switch_code = interface.get_switch_code();
+        let try_direct = async {
+            if relay_server.is_empty() {
+                try_direct.await
+            } else {
+                relay_deadline.before_relay_reserve(try_direct).await
+                    .unwrap_or_else(|error| Err(DirectFailure::Transport(error.into())))
+            }
+        };
+        tokio::pin!(try_direct);
+        let (result, prepared_broker) = if relay_server.is_empty() {
+            (Some(try_direct.as_mut().await), None)
+        } else {
+            let decision = async {
+                // A role switch or an independent TCP punch keeps its original signaling order.
+                if switch_code.is_empty() && !tcp_punch_allowed() {
+                    relay_deadline.wait_for_direct(try_direct.as_mut()).await
+                } else {
+                    Some(try_direct.as_mut().await)
+                }
+            };
+            Self::prepare_relay_broker_during(
+                decision, rendezvous_server, key, !token.is_empty() || !switch_code.is_empty(),
+            ).await
+        };
+        let connect_relay = |prepared_broker| async {
+            let mut conn = Self::request_relay(
+                peer_id, relay_server.to_owned(), rendezvous_server,
+                !signed_id_pk.is_empty(), key, token, conn_type, &switch_code, prepared_broker,
+            ).await?;
+            let pk = Self::secure_connection(peer_id, signed_id_pk.clone(), key, &mut conn).await?;
+            Ok((conn, false, pk, None, "Relay"))
+        };
+        let (conn, mut direct, pk, kcp, typ) = match result {
+            Some(Ok(result)) => result,
+            None => relay_deadline.race_authorized(
+                try_direct.as_mut().map(|result| result.map_err(DirectFailure::into_error)).boxed(),
+                connect_relay(prepared_broker).boxed(),
+                |result| result.1,
+            ).await?,
+            Some(Err(error)) => {
+                let handshake = match error {
+                    DirectFailure::Handshake(error, typ, direct) => {
+                        if relay_server.is_empty()
+                            || !transport_race::can_retry_handshake(typ, direct, &error)
+                        {
+                            interface.update_direct(Some(direct));
+                            return Err(error);
+                        }
+                        log::warn!("{typ} secure handshake failed ({error}), falling back to relay");
+                        Some((typ, error))
+                    }
+                    DirectFailure::Transport(error) => {
+                        if relay_server.is_empty() {
+                            return Err(error.context("Failed to make direct connection to remote desktop"));
+                        }
+                        log::debug!("Direct transport unavailable: {error}");
+                        None
+                    }
+                };
+                drop(webrtc_guard.take());
+                interface.update_direct(Some(false));
+                match (connect_relay(prepared_broker).await, handshake) {
+                    (Ok(result), _) => result,
+                    (Err(error), Some((typ, handshake))) =>
+                        return Err(transport_race::fallback_failure(typ, handshake, error)),
+                    (Err(error), None) if crate::geodomdesk_auth::requires_login(&error.to_string()) =>
+                        return Err(error),
+                    (Err(error), None) => return Err(error.context("Failed to connect via relay server")),
+                }
+            }
+        };
+        if let Some(stop) = webrtc_bridge_stop {
+            let _ = stop.send(());
+        }
+        log::info!(
+            "{:?} used to establish {typ} connection with {} punch",
+            start.elapsed(), punch_type
+        );
+""")
+
+
+def require_valid_signed_identity(changes):
+    path = "src/client.rs"
+    text = changes[path]
+    start = text.index("        // A WebRTC channel is peer-authenticated", text.index("    async fn secure_connection("))
+    end = text.index("                conn.send(&Message::new()).await?;", start)
+    current = text[start:end]
+    replacement = """        let is_webrtc = conn.is_webrtc();
+        let require_valid_proof = is_webrtc || !key.is_empty();
+        let sign_pk = if signed_id_pk.is_empty() {
+            None
+        } else {
+            let verified = rs_pk.and_then(|root| decode_id_pk(&signed_id_pk, &root).ok())
+                .filter(|(id, _)| id == peer_id)
+                .map(|(_, pk)| sign::PublicKey(pk));
+            if verified.is_none() {
+                if !key.is_empty() {
+                    bail!("Invalid signed peer identity from rendezvous server");
+                }
+                log::error!("Handshake failed: invalid public key from rendezvous server");
+            }
+            verified
+        };
+        let (sign_pk, option_pk) = match sign_pk {
+            Some(pk) => {
+                let option_pk = Some(pk.0.to_vec());
+                (pk, option_pk)
+            }
+            None => {
+                // The official keyless handshake allows a missing signature.
+"""
+    changes.replace(path, current, replacement)
+    changes.replace(path, "                return Ok(option_pk);\n            }\n        };\n        match timeout(READ_TIMEOUT", "                return Ok(None);\n            }\n        };\n        match timeout(READ_TIMEOUT")
+    for reason in (
+        "WebRTC handshake id mismatch (possible MITM)",
+        "WebRTC peer identity could not be verified (refusing unbound channel)",
+        "WebRTC handshake received an unexpected message type",
+        "WebRTC handshake received a malformed message",
+    ):
+        pattern = rf'if is_webrtc \{{\n(\s*)bail!\("{re.escape(reason)}"\);'
+        text, count = re.subn(
+            pattern, lambda match: "if require_valid_proof {\n" + match[1]
+            + 'bail!("' + reason.replace("WebRTC ", "") + '");', changes[path],
+        )
+        if count != 1:
+            raise ValueError("Peer handshake branch changed: " + reason)
+        changes[path] = text
 
 
 def apply_mediator(changes):

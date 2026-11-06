@@ -110,6 +110,7 @@ def prepare(source, version, build_number=1):
                 "build_number": build_number,
                 "release_id": release_id,
                 "upstream_commit": upstream_commit,
+                "generated_source_files": sorted(merged.keys() - baseline.keys()),
             },
             indent=2,
         ).encode()
