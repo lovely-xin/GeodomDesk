@@ -5,6 +5,8 @@ import subprocess
 import tarfile
 from pathlib import Path
 
+from customizations.terminal_exec import SOURCES as TERMINAL_SOURCES
+
 
 def archive(source, customization, output):
     source = source.resolve()
@@ -12,6 +14,7 @@ def archive(source, customization, output):
         ["git", "ls-files", "-z", "--recurse-submodules"], cwd=source
     ).split(b"\0")
     paths = {Path(name.decode()) for name in names if name}
+    paths.update(Path("src") / name for name in TERMINAL_SOURCES)
     paths.update(
         Path(name)
         for name in [

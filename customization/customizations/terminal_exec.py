@@ -5,6 +5,15 @@ import tempfile
 from pathlib import Path
 
 
+SOURCES = (
+    "bin/geodomdesk-cli.rs",
+    "terminal_exec.rs",
+    "terminal_exec/cli.rs",
+    "terminal_exec/exec_bootstrap.ps1",
+    "terminal_exec/windows.rs",
+)
+
+
 def apply(changes, root):
     patch = Path(__file__).with_suffix(".patch")
     paths = [
@@ -22,11 +31,5 @@ def apply(changes, root):
         for name in paths:
             changes[name] = (staging / name).read_text(encoding="utf-8")
 
-    for name in (
-        "bin/geodomdesk-cli.rs",
-        "terminal_exec.rs",
-        "terminal_exec/cli.rs",
-        "terminal_exec/exec_bootstrap.ps1",
-        "terminal_exec/windows.rs",
-    ):
+    for name in SOURCES:
         changes["src/" + name] = (root / "client" / name).read_text(encoding="utf-8")

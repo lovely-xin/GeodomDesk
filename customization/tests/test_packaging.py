@@ -133,6 +133,17 @@ class PackagingTests(unittest.TestCase):
         (source / "src/geodomdesk_import").mkdir()
         (source / "src/geodomdesk_import.rs").write_text("mod data;\n")
         (source / "src/geodomdesk_import/data.rs").write_text("// import parser\n")
+        terminal_sources = [
+            "src/bin/geodomdesk-cli.rs",
+            "src/terminal_exec.rs",
+            "src/terminal_exec/cli.rs",
+            "src/terminal_exec/exec_bootstrap.ps1",
+            "src/terminal_exec/windows.rs",
+        ]
+        for name in terminal_sources:
+            path = source / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("terminal fixture\n")
         binding = source / "libs/hbb_common/src/geodomdesk_clone_guard.rs"
         binding.parent.mkdir(parents=True)
         binding.write_text("// clone guard\n")
@@ -157,6 +168,7 @@ class PackagingTests(unittest.TestCase):
             "src/geodomdesk_import/data.rs",
             "libs/hbb_common/src/geodomdesk_clone_guard.rs",
             "flutter/assets/geodom-logo.png",
+            *terminal_sources,
         ]:
             self.assertIn("geodomdesk-client/" + name, names)
 

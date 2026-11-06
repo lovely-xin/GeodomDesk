@@ -354,7 +354,7 @@ jobs:
           key: ${{ steps.native-cache.outputs.cache-primary-key }}
       - name: Archive corresponding source including modified submodules
         run: |
-          python3 ../customization/archive_source.py --source . --customization ../geodomdesk --output ../ubuntu-artifact/geodomdesk-source.tar.gz
+          python3 ../customization/archive_source.py --source . --customization ../customization --output ../ubuntu-artifact/geodomdesk-source.tar.gz
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: geodomdesk-ubuntu
@@ -491,7 +491,7 @@ jobs:
         run: |
           python3 -c 'import os,pathlib; pathlib.Path(os.environ["RUNNER_TEMP"], "geodomdesk-signing.p12").unlink(missing_ok=True); pathlib.Path("flutter/android/key.properties").unlink(missing_ok=True)'
       - name: Archive corresponding source with generated Android resources
-        run: python3 ../customization/archive_source.py --source . --customization ../geodomdesk --output ../android-artifact/geodomdesk-source.tar.gz
+        run: python3 ../customization/archive_source.py --source . --customization ../customization --output ../android-artifact/geodomdesk-source.tar.gz
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: geodomdesk-android
