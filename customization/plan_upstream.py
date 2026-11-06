@@ -18,6 +18,7 @@ def customization_hash(root=None):
     paths.extend(root.glob("*.ps1"))
     for directory, pattern in [
         ("customizations", "*.py"),
+        ("customizations", "*.patch"),
         ("tests", "*.py"),
         ("tests", "*.ps1"),
         ("client", "*"),
@@ -27,7 +28,7 @@ def customization_hash(root=None):
         paths.extend(
             p
             for p in (root / directory).rglob(pattern)
-            if p.is_file() and (directory != "client" or p.suffix in (".rs", ".in", ".h"))
+            if p.is_file() and (directory != "client" or p.suffix in (".rs", ".in", ".h", ".ps1"))
         )
     paths.extend(
         root / name

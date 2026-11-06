@@ -53,9 +53,13 @@ try {
   $null=Invoke-Client -ClientArgs @('--install-remote-printer')
   if(-not (Get-Printer -Name 'GeodomDesk Printer' -ErrorAction SilentlyContinue)){throw 'Native printer installation did not create the GeodomDesk queue'}
   $fixtureCreated=$false
+  $fixturePortCreated=$false
   try {
     if(-not (Get-Printer -Name 'RustDesk Printer' -ErrorAction SilentlyContinue)) {
-      if(-not (Get-PrinterPort -Name 'RustDesk Printer' -ErrorAction SilentlyContinue)){Add-PrinterPort -Name 'RustDesk Printer'}
+      if(-not (Get-PrinterPort -Name 'RustDesk Printer' -ErrorAction SilentlyContinue)){
+        Add-PrinterPort -Name 'RustDesk Printer'
+        $fixturePortCreated=$true
+      }
       Add-Printer -Name 'RustDesk Printer' -DriverName 'RustDesk v4 Printer Driver' -PortName 'RustDesk Printer'
       $fixtureCreated=$true
     }
@@ -65,7 +69,11 @@ try {
     if(-not (Get-Printer -Name 'GeodomDesk Printer') -or -not (Get-Printer -Name 'RustDesk Printer')){throw 'Printer coexistence failed'}
     Write-Output 'Native printer installation and shared-driver coexistence verified.'
   } finally {
-    if($fixtureCreated){Remove-Printer -Name 'RustDesk Printer';Remove-PrinterPort -Name 'RustDesk Printer'}
+    if($fixtureCreated){Remove-Printer -Name 'RustDesk Printer'}
+    if($fixturePortCreated -and (Get-PrinterPort -Name 'RustDesk Printer' -ErrorAction SilentlyContinue)){
+      # The spooler can remove the unused test port when it removes the queue.
+      Remove-PrinterPort -Name 'RustDesk Printer' -ErrorAction Continue
+    }
   }
   $hostConfig=Join-Path $env:windir 'ServiceProfiles\LocalService\AppData\Roaming\GeodomDesk\config\GeodomDesk.toml'
   $defaultId=''
