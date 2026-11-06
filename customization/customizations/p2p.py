@@ -7,6 +7,7 @@ def apply(changes):
     apply_udp_probe(changes)
     keep_legacy_udp_punch(changes)
     prefer_direct_routes(changes)
+    recover_handshake(changes)
     apply_mediator(changes)
     source = Path(__file__).resolve().parents[1] / "client/client/transport_race.rs"
     changes["src/client/transport_race.rs"] = source.read_text(encoding="utf-8")
@@ -276,7 +277,31 @@ def prefer_direct_routes(changes):
 use transport_race::race_transports_prefer_direct;
 
 """)
+    changes.replace(path, "futures::future::{select_ok, BoxFuture, FutureExt}", "futures::future::{select_ok, FutureExt}")
     changes[path] = changes[path].replace("race_transports_prefer_webrtc", "race_transports_prefer_direct")
+
+
+def recover_handshake(changes):
+    path = "src/client.rs"
+    text = changes[path]
+    start = text.index('            Err(e) if typ == "WebRTC" && !relay_server.is_empty() => {')
+    end = text.index("                match Self::request_relay(", start)
+    changes.replace(path, text[start:end], """            Err(e) if !relay_server.is_empty()
+                && transport_race::can_retry_handshake(typ, direct, &e) =>
+            {
+                log::warn!("{typ} secure handshake failed ({e}), falling back to relay");
+                drop(webrtc_guard.take());
+                drop(conn);
+""")
+    changes.replace(path, '''                        bail!(
+                            "WebRTC secure failed ({}); relay fallback also failed: {}",
+                            e,
+                            relay_e
+                        );''', '''                        return Err(transport_race::fallback_failure(typ, e, relay_e));''')
+    changes.replace(path, '                bail!("Reset by the peer");',
+                    '                return Err(std::io::Error::new(\n'
+                    '                    std::io::ErrorKind::UnexpectedEof, "Reset by the peer",\n'
+                    '                ).into());')
 
 
 def apply_mediator(changes):
