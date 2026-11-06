@@ -233,6 +233,13 @@ jobs:
           if ($version -ne $env:VERSION) { throw "Wrong compiled client version: $version" }
           $info = [Diagnostics.FileVersionInfo]::GetVersionInfo((Resolve-Path $exe))
           if ($info.ProductName -ne 'GeodomDesk') { throw 'The runner is not GeodomDesk' }
+      - name: Build the Windows terminal CLI
+        run: |
+          $features = python ./build.py --print-features --flutter --hwcodec --vram
+          if ($LASTEXITCODE -ne 0) { throw 'Could not determine native features' }
+          cargo build --locked --release --features $features --bin geodomdesk-cli
+          if ($LASTEXITCODE -ne 0) { throw 'Terminal CLI build failed' }
+          Copy-Item ./target/release/geodomdesk-cli.exe ./flutter/build/windows/x64/runner/Release/
       - name: Build the independent privacy helper
         shell: pwsh
         run: |
@@ -330,8 +337,12 @@ jobs:
           "$VCPKG_ROOT/vcpkg" install --triplet x64-linux --x-install-root="$VCPKG_ROOT/installed"
           export DEB_ARCH=amd64
           python3 ./build.py --flutter --hwcodec --unix-file-copy-paste
+          features=$(python3 ./build.py --print-features --flutter --hwcodec --unix-file-copy-paste)
+          cargo build --locked --release --features "$features" --bin geodomdesk-cli
           mkdir -p ../ubuntu-artifact
-          python3 ../customization/repack_deb.py --input "rustdesk-$VERSION.deb" --output ../ubuntu-artifact/geodomdesk.deb --version "$VERSION" --build-number "$BUILD_NUMBER"
+          python3 ../customization/repack_deb.py --input "rustdesk-$VERSION.deb" --output ../ubuntu-artifact/geodomdesk.deb --version "$VERSION" --build-number "$BUILD_NUMBER" --cli target/release/geodomdesk-cli
+          dpkg-deb -x ../ubuntu-artifact/geodomdesk.deb "$RUNNER_TEMP/geodomdesk-package"
+          "$RUNNER_TEMP/geodomdesk-package/usr/bin/geodomdesk-cli" --help | grep -F 'geodomdesk-cli exec'
           cp geodomdesk-build-config.json ../ubuntu-artifact/
       - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
         if: always() && steps.native-cache.outputs.cache-hit != 'true'

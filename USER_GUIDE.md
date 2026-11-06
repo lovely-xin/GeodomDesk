@@ -8,6 +8,17 @@ GeodomDesk 基于 RustDesk 定制。连接服务和更新通道由安装包固�
 
 服务端要求登录时，使用自己的账号密码登录。登录状态由客户端管理；不要把会话令牌当作远程访问密码，也不要向其他人提供令牌。
 
+## 命令行远程终端
+
+在发起端登录 GeodomDesk，并在目标设备开启终端权限。Windows 安装目录和 Ubuntu 安装包都提供 `geodomdesk-cli`，两端需使用支持此功能的版本。
+
+```text
+geodomdesk-cli exec --id DEVICE_ID --shell bash --script check.sh
+geodomdesk-cli.exe exec --id DEVICE_ID --shell powershell --script check.ps1
+```
+
+根据目标系统选用 `bash`、`powershell` 或 `pwsh`。使用 `--script -` 可从标准输入读取脚本，`--relay` 可指定中继。工具分别输出标准输出和错误输出，并返回远端退出码。设备密码优先使用已保存的连接密码。
+
 ## 导入设备记录
 
 Windows、Ubuntu 的新配置首次启动时，自动导入同一用户 RustDesk 中服务器公钥匹配的设备记录、收藏、备注及已保存的连接密码。设置 → 常规 → 数据迁移也可手动导入。

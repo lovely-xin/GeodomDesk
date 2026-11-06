@@ -30,8 +30,16 @@ def apply(changes, config):
         + '        ("ice-servers".to_owned(), '
         + json.dumps(",".join(config["ice_servers"]))
         + ".to_owned()),\n"
-        + """        #[cfg(target_os = "windows")]
+        + """        ("allow-remote-config-modification".to_owned(), "Y".to_owned()),
+        #[cfg(target_os = "windows")]
         ("allow-auto-update".to_owned(), "Y".to_owned())
+    ]));""",
+    )
+    changes.replace(
+        "libs/hbb_common/src/config.rs",
+        "pub static ref DEFAULT_LOCAL_SETTINGS: RwLock<HashMap<String, String>> = Default::default();",
+        """pub static ref DEFAULT_LOCAL_SETTINGS: RwLock<HashMap<String, String>> = RwLock::new(HashMap::from([
+        ("enable-udp-punch".to_owned(), "Y".to_owned()),
     ]));""",
     )
     changes.replace(

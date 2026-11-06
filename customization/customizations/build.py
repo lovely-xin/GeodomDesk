@@ -19,6 +19,7 @@ from . import (
     printer,
     server_config,
     settings_cleanup,
+    terminal_exec,
     update_channel,
     upstream,
     user_data,
@@ -47,6 +48,7 @@ def prepare(source, version, build_number=1):
     update_channel.apply(changes, cfg)
     user_data.apply(changes, ROOT)
     settings_cleanup.apply(changes)
+    terminal_exec.apply(changes, ROOT)
     changes["src/geodomdesk_update.rs"] = (ROOT / "client/geodomdesk_update.rs").read_text(
         encoding="utf-8"
     )

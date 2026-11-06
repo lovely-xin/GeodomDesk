@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 
 
-def repack(payload, output, version, build_number=0):
+def repack(payload, output, version, build_number=0, cli=None):
     from channel import version_tuple
 
     version_tuple(version)
@@ -80,6 +80,10 @@ systemctl daemon-reload || true
         exe = root / "usr/bin/geodomdesk"
         exe.parent.mkdir(parents=True, exist_ok=True)
         exe.symlink_to("/usr/share/geodomdesk/geodomdesk")
+        if cli is not None:
+            cli_path = exe.with_name("geodomdesk-cli")
+            shutil.copyfile(cli, cli_path)
+            cli_path.chmod(0o755)
         service = root / "usr/lib/systemd/system/geodomdesk.service"
         service.parent.mkdir(parents=True, exist_ok=True)
         service.write_bytes(
@@ -135,5 +139,6 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--version", required=True)
     parser.add_argument("--build-number", type=int, default=0)
+    parser.add_argument("--cli", type=Path)
     args = parser.parse_args()
-    repack(args.input.resolve(), args.output.resolve(), args.version, args.build_number)
+    repack(args.input.resolve(), args.output.resolve(), args.version, args.build_number, args.cli)

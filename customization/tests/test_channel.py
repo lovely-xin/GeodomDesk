@@ -192,6 +192,14 @@ class ChannelTests(unittest.TestCase):
                 path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
             with contextlib.redirect_stdout(io.StringIO()):
                 prepare_client.prepare(source, "1.5.2")
+            config = (source / "libs/hbb_common/src/config.rs").read_text(encoding="utf-8")
+            for default_map, option in (
+                ("DEFAULT_SETTINGS", '"allow-remote-config-modification"'),
+                ("DEFAULT_LOCAL_SETTINGS", '"enable-udp-punch"'),
+            ):
+                default_settings = config.split(f"pub static ref {default_map}:", 1)[1].split("]));", 1)[0]
+                self.assertIn(f'({option}.to_owned(), "Y".to_owned())', default_settings)
+            self.assertNotIn('"enable-webrtc"', default_settings)
             self.assertIn('("Restore default ID", "Bestehende Übersetzung")', german.read_text(encoding="utf-8"))
             self.assertIn('("Data and permissions", "")', german.read_text(encoding="utf-8"))
             ffi = (source / "src/flutter_ffi.rs").read_text(encoding="utf-8")
@@ -315,13 +323,39 @@ class ChannelTests(unittest.TestCase):
         identity.apply(changes)
         account_login.apply(changes)
         update_channel.apply(changes, cfg)
-        self.assertFalse(any(name.endswith(".proto") for name in changes))
+        for name in changes:
+            if name.endswith(".proto"):
+                self.assertEqual(changes[name].encode("utf-8"), baseline[name])
         # These two local listener changes must not rewrite shared server port constants.
         for name, old, new in [
             ("src/lan.rs", "(RENDEZVOUS_PORT + 3) as _", "21129"),
             ("src/rendezvous_mediator.rs", "port = RENDEZVOUS_PORT + 2;", "port = 21128;"),
         ]:
             self.assertEqual(changes[name], baseline[name].decode("utf-8").replace(old, new, 1))
+
+    def test_terminal_exec_extends_only_the_peer_message_protocol(self):
+        from customizations import upstream, terminal_exec
+
+        baseline = upstream.load_baseline(ROOT)
+        changes = {name: data.decode("utf-8") for name, data in baseline.items()}
+        terminal_exec.apply(changes, ROOT)
+        protocol = "libs/base/protos/message.proto"
+        self.assertEqual(
+            [name for name in changes if name.endswith(".proto") and changes[name].encode() != baseline.get(name)],
+            [protocol],
+        )
+        original = baseline[protocol].decode()
+        extended = changes[protocol]
+        for field in (
+            "  bool terminal_exec = 4;\n",
+            "    TerminalExecRequest exec = 5;\n",
+            "    TerminalExecResult exec_result = 5;\n",
+        ):
+            self.assertEqual(extended.count(field), 1)
+            extended = extended.replace(field, "")
+        start = extended.index("enum ExecShell {")
+        end = extended.index("message TerminalAction {", start)
+        self.assertEqual(extended[:start] + extended[end:], original)
 
 
 @unittest.skipUnless(os.name == "posix", "Linux publisher and packaging tests")
