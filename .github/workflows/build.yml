@@ -240,6 +240,9 @@ jobs:
           cargo build --locked --release --features $features --bin geodomdesk-cli
           if ($LASTEXITCODE -ne 0) { throw 'Terminal CLI build failed' }
           Copy-Item ./target/release/geodomdesk-cli.exe ./flutter/build/windows/x64/runner/Release/
+          $env:GEODOMDESK_TEST_CLIENT = (Resolve-Path ./flutter/build/windows/x64/runner/Release/GeodomDesk.exe).Path
+          cargo test --locked --release --features $features --lib terminal_exec::windows::tests::native_powershell_helper_round_trip -- --ignored --exact
+          if ($LASTEXITCODE -ne 0) { throw 'Native PowerShell execution failed' }
       - name: Build the independent privacy helper
         shell: pwsh
         run: |

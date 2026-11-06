@@ -1,14 +1,24 @@
 use super::{validate, MAX_OUTPUT, MAX_SCRIPT};
 use crate::server::terminal_helper::{
-    create_named_pipe_server, launch_exec_helper_with_token, open_pipe, wait_for_pipe_connection,
-    HelperProcessGuard, OwnedHandle, UserToken, PIPE_CONNECTION_TIMEOUT_MS,
+    create_named_pipe_server, launch_exec_helper_with_token, open_pipe, HelperProcessGuard,
+    OwnedHandle, UserToken, PIPE_CONNECTION_TIMEOUT_MS,
 };
 use base::message_proto::{ExecShell, TerminalExecRequest, TerminalExecResult};
-use hbb_common::{anyhow::Context, bail, protobuf::Message as _, ResultType};
+use hbb_common::{
+    anyhow::Context,
+    bail,
+    protobuf::Message as _,
+    tokio::{
+        self,
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::windows::named_pipe::NamedPipeServer,
+    },
+    ResultType,
+};
 use std::{
     io::{Read, Write},
     os::windows::{io::AsRawHandle, process::CommandExt},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::atomic::{AtomicBool, Ordering},
     thread,
@@ -72,6 +82,15 @@ pub(super) fn execute(
     user: Option<UserToken>,
     cancelled: &AtomicBool,
 ) -> ResultType<TerminalExecResult> {
+    execute_with_helper(request, user, cancelled, &std::env::current_exe()?)
+}
+
+fn execute_with_helper(
+    request: TerminalExecRequest,
+    user: Option<UserToken>,
+    cancelled: &AtomicBool,
+    executable: &Path,
+) -> ResultType<TerminalExecResult> {
     if request.shell.enum_value() == Ok(ExecShell::BASH) {
         bail!("This Windows device supports PowerShell execution");
     }
@@ -89,6 +108,9 @@ pub(super) fn execute(
     let output_name = format!(r"\\.\pipe\geodomdesk_exec_out_{pipe_id}");
     let input = OwnedHandle::new(create_named_pipe_server(&input_name, false, token)?);
     let output = OwnedHandle::new(create_named_pipe_server(&output_name, true, token)?);
+    // These handles are opened with FILE_FLAG_OVERLAPPED.
+    let mut input = unsafe { NamedPipeServer::from_raw_handle(input.into_raw().0)? };
+    let output = unsafe { NamedPipeServer::from_raw_handle(output.into_raw().0)? };
     let job = kill_on_close_job()?;
     let process;
     let local_child;
@@ -99,7 +121,7 @@ pub(super) fn execute(
         process = OwnedHandle::new(guard.disarm());
         process.as_raw()
     } else {
-        let mut child = Command::new(std::env::current_exe()?)
+        let mut child = Command::new(executable)
             .args(["--terminal-exec-helper", &input_name, &output_name])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -116,10 +138,33 @@ pub(super) fn execute(
         HANDLE(local_child.as_raw_handle())
     };
     // The helper cannot start the script until it receives the request.
-    let input = wait_for_pipe_connection(input, &input_name, PIPE_CONNECTION_TIMEOUT_MS)?;
-    let output = wait_for_pipe_connection(output, &output_name, PIPE_CONNECTION_TIMEOUT_MS)?;
-    write_packet(input, &request.write_to_bytes()?)?;
-    let reader = thread::spawn(move || packet(output, 2 * MAX_OUTPUT + 4096));
+    let runtime = tokio::runtime::Handle::current();
+    let request_bytes = request.write_to_bytes()?;
+    let mut output = runtime.block_on(async move {
+        tokio::time::timeout(
+            Duration::from_millis(PIPE_CONNECTION_TIMEOUT_MS.into()),
+            async {
+                tokio::try_join!(input.connect(), output.connect())?;
+                input.write_u32_le(request_bytes.len() as u32).await?;
+                input.write_all(&request_bytes).await
+            },
+        )
+        .await
+        .context("PowerShell helper did not accept the command")??;
+        Ok::<_, hbb_common::anyhow::Error>(output)
+    })?;
+    let reader = runtime.spawn(async move {
+        let size = output
+            .read_u32_le()
+            .await
+            .context("PowerShell helper returned no result")? as usize;
+        if size > 2 * MAX_OUTPUT + 4096 {
+            bail!("Terminal execution packet too large");
+        }
+        let mut response = vec![0; size];
+        output.read_exact(&mut response).await?;
+        Ok(TerminalExecResult::parse_from_bytes(&response)?)
+    });
     let deadline = Instant::now() + Duration::from_secs(request.timeout_seconds.into());
     let wait = loop {
         if cancelled.load(Ordering::Relaxed) {
@@ -141,13 +186,11 @@ pub(super) fn execute(
         }
     };
     drop(job);
-    let response = reader
-        .join()
-        .map_err(|_| hbb_common::anyhow::anyhow!("Output reader stopped"))?;
-    wait?;
-    Ok(TerminalExecResult::parse_from_bytes(
-        &response.context("PowerShell helper returned no result")?,
-    )?)
+    if let Err(error) = wait {
+        reader.abort();
+        return Err(error);
+    }
+    runtime.block_on(reader)?
 }
 
 fn shell_path(shell: ExecShell) -> ResultType<PathBuf> {
@@ -262,4 +305,46 @@ pub(crate) fn run_helper(args: &[String]) -> ResultType<()> {
         ..Default::default()
     });
     write_packet(output, &result.write_to_bytes()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires the built Windows desktop runner and both PowerShell versions"]
+    async fn native_powershell_helper_round_trip() {
+        let executable = std::env::var_os("GEODOMDESK_TEST_CLIENT")
+            .map(PathBuf::from)
+            .expect("Set GEODOMDESK_TEST_CLIENT to the Windows runner");
+        tokio::task::spawn_blocking(move || {
+            let cancelled = AtomicBool::new(false);
+            let execute = |shell: ExecShell, script: &str, timeout_seconds| {
+                let request = TerminalExecRequest {
+                    shell: shell.into(),
+                    script: script.as_bytes().to_vec().into(),
+                    timeout_seconds,
+                    ..Default::default()
+                };
+                execute_with_helper(request, None, &cancelled, &executable)
+            };
+            for shell in [ExecShell::WINDOWS_POWERSHELL, ExecShell::POWERSHELL_CORE] {
+                let result = execute(
+                    shell,
+                    "[Console]::Write('输出'); [Console]::Error.Write('错误'); exit 7",
+                    10,
+                )
+                .unwrap();
+                assert!(result.error.is_empty(), "{}", result.error);
+                assert_eq!(&result.stdout[..], "输出".as_bytes());
+                assert_eq!(&result.stderr[..], "错误".as_bytes());
+                assert_eq!(result.exit_code, 7);
+            }
+            let error =
+                execute(ExecShell::WINDOWS_POWERSHELL, "Start-Sleep -Seconds 30", 2).unwrap_err();
+            assert!(error.to_string().contains("timed out"), "{error}");
+        })
+        .await
+        .unwrap();
+    }
 }

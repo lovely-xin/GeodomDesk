@@ -42,7 +42,6 @@ try {
   $cli=Join-Path $appRoot 'geodomdesk-cli.exe'
   $helpText=& $cli --help
   if($LASTEXITCODE -ne 0 -or $helpText -notmatch 'geodomdesk-cli exec'){throw 'Installed terminal CLI did not start'}
-  & (Join-Path $PSScriptRoot 'test-windows-terminal.ps1') -Client $installed
   $remoteConfigOption='allow-remote-config-modification'
   if((Read-Option $remoteConfigOption) -cne 'Y'){throw 'Remote configuration permission is not enabled by default'}
   $null=Invoke-Client -ClientArgs @('--option',$remoteConfigOption,'N')
