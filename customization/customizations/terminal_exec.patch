@@ -96,7 +96,7 @@ diff --git a/src/client.rs b/src/client.rs
 +    if transport == "WebRTC" {
 +        return true;
 +    }
-+    if transport != "TCP" || !direct {
++    if !direct || !matches!(transport, "TCP" | "UDP" | "IPv6") {
 +        return false;
 +    }
 +    use std::io::ErrorKind;
@@ -152,7 +152,7 @@ diff --git a/src/client.rs b/src/client.rs
              }
          }
          Ok(option_pk)
-@@ -5914,3 +5936,42 @@
+@@ -5914,3 +5936,44 @@
          assert!(!seen.decrypted && !decrypted);
      }
  }
@@ -185,9 +185,11 @@ diff --git a/src/client.rs b/src/client.rs
 +    }
 +
 +    #[test]
-+    fn only_direct_tcp_transport_failures_use_this_fallback() {
++    fn direct_transport_failures_can_use_relay() {
 +        let reset = std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "Reset by the peer").into();
-+        assert!(should_retry_secure_connection_through_relay("TCP", true, &reset));
++        for transport in ["TCP", "UDP", "IPv6"] {
++            assert!(should_retry_secure_connection_through_relay(transport, true, &reset));
++        }
 +        assert!(!should_retry_secure_connection_through_relay("TCP", false, &reset));
 +        assert!(!should_retry_secure_connection_through_relay("Relay", false, &reset));
 +        let invalid = anyhow!("Peer identity verification failed");
