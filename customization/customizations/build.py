@@ -12,6 +12,7 @@ from . import (
     android,
     branding,
     clone_guard,
+    dependencies,
     identity,
     id_controls,
     localization,
@@ -20,7 +21,6 @@ from . import (
     server_config,
     settings_cleanup,
     terminal_exec,
-    turn,
     update_channel,
     upstream,
     user_data,
@@ -92,7 +92,7 @@ def prepare(source, version, build_number=1):
         "const BUILD_NUMBER: u64 = 1;",
         "const BUILD_NUMBER: u64 = " + str(build_number) + ";",
     ).encode()
-    turn.apply(merged)
+    dependencies.apply(merged, cfg["webrtc_commit"])
     upstream_commit = cfg["upstream_commit"]
     if (source / ".git").exists():
         upstream_commit = subprocess.check_output(

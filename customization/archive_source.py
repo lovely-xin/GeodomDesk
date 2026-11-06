@@ -6,7 +6,6 @@ import tarfile
 from pathlib import Path
 
 from customizations.terminal_exec import SOURCES as TERMINAL_SOURCES
-from customizations.turn import VENDOR as TURN_SOURCE
 
 
 def archive(source, customization, output):
@@ -16,12 +15,6 @@ def archive(source, customization, output):
     ).split(b"\0")
     paths = {Path(name.decode()) for name in names if name}
     paths.update(Path("src") / name for name in TERMINAL_SOURCES)
-    turn = source / TURN_SOURCE
-    paths.update(
-        path.relative_to(source)
-        for path in turn.rglob("*")
-        if path.is_file() and "target" not in path.relative_to(turn).parts and path.name != "Cargo.lock"
-    )
     paths.update(
         Path(name)
         for name in [

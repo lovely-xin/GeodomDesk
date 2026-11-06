@@ -6,21 +6,6 @@ def apply(changes):
     keep_legacy_udp_punch(changes)
     prefer_direct_routes(changes)
     apply_mediator(changes)
-    log_webrtc_route(changes)
-
-
-def log_webrtc_route(changes):
-    path = "src/rendezvous_mediator.rs"
-    changes.replace(path, "            // The channel is open: from here the session is a connection like any other, and the",
-                    """            log::info!(
-                "WebRTC data channel ready via {}",
-                match stream.is_relayed().await {
-                    Some(true) => "TURN",
-                    Some(false) => "direct ICE",
-                    None => "unreported ICE route",
-                }
-            );
-            // The channel is open: from here the session is a connection like any other, and the""")
 
 
 def apply_udp_probe(changes):

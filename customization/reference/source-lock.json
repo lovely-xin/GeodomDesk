@@ -1,4 +1,5 @@
 {
+  "libs/hbb_common/Cargo.toml": "b0adebdea944369de82743cb2baf03150213a6c3e62d1adeefe0eb21ca2d1971",
   "libs/hbb_common/src/config.rs": "09d30bfcc603bb3a97595638b995a0d71c88bb09b31945b5cdeec7ff6af9c96b",
   "src/lib.rs": "d59fd5541ce10ca82fd8358caecdfd2ebde4d91968e1e18557465c1ce638d535",
   "src/common.rs": "7bf0cbe1ad1964d70b7c8d0160f47ad6e928710122a222afbe8f6659058a7324",

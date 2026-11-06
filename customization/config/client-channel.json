@@ -5,6 +5,7 @@
   "key_id": "geodomdesk-2026-01",
   "public_key": "fd1H8jN3QtH2s+YlF6MLXcm91ZnmGi2czprn5B7H8H0=",
   "upstream_commit": "23e5bb471a040d62f0a6ad52591fb30784265b73",
+  "webrtc_commit": "a3ff8d9196d1dab6b88b6b2c4a16ccad2961497c",
   "android_package_id": "cn.geodom.geodomdesk",
   "native_config": true,
   "ice_servers": [
