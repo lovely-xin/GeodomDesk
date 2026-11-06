@@ -136,8 +136,12 @@ class PackagingTests(unittest.TestCase):
         terminal_sources = [
             "src/bin/geodomdesk-cli.rs",
             "src/terminal_exec.rs",
+            "src/terminal_exec/auth.rs",
             "src/terminal_exec/cli.rs",
             "src/terminal_exec/exec_bootstrap.ps1",
+            "src/terminal_exec/legacy.rs",
+            "src/terminal_exec/legacy_bootstrap.ps1",
+            "src/terminal_exec/legacy_bootstrap.sh",
             "src/terminal_exec/windows.rs",
         ]
         for name in terminal_sources:

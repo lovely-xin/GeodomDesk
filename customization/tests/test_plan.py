@@ -89,7 +89,11 @@ class PlanTests(unittest.TestCase):
             (root / "client/module.rs").write_text("// changed implementation\n")
             self.assertNotEqual(before, plan_upstream.customization_hash(root))
             (root / "customizations").mkdir()
-            for name in ("client/exec_bootstrap.ps1", "customizations/terminal_exec.patch"):
+            for name in (
+                "client/exec_bootstrap.ps1",
+                "client/legacy_bootstrap.sh",
+                "customizations/terminal_exec.patch",
+            ):
                 path = root / name
                 path.write_text("initial\n")
                 before = plan_upstream.customization_hash(root)

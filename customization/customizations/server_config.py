@@ -39,6 +39,7 @@ def apply(changes, config):
         "libs/hbb_common/src/config.rs",
         "pub static ref DEFAULT_LOCAL_SETTINGS: RwLock<HashMap<String, String>> = Default::default();",
         """pub static ref DEFAULT_LOCAL_SETTINGS: RwLock<HashMap<String, String>> = RwLock::new(HashMap::from([
+        ("enable-tcp-punch".to_owned(), "N".to_owned()),
         ("enable-udp-punch".to_owned(), "Y".to_owned()),
     ]));""",
     )

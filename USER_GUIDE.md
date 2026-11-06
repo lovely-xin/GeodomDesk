@@ -10,14 +10,24 @@ GeodomDesk 基于 RustDesk 定制。连接服务和更新通道由安装包固�
 
 ## 命令行远程终端
 
-在发起端登录 GeodomDesk，并在目标设备开启终端权限。Windows 安装目录和 Ubuntu 安装包都提供 `geodomdesk-cli`，两端需使用支持此功能的版本。
+Windows 安装目录和 Ubuntu 安装包都提供 `geodomdesk-cli`。在目标设备开启终端权限后，用设备 ID 执行脚本。
 
 ```text
 geodomdesk-cli exec --id DEVICE_ID --shell bash --script check.sh
 geodomdesk-cli.exe exec --id DEVICE_ID --shell powershell --script check.ps1
+geodomdesk-cli.exe exec --id DEVICE_ID --shell pwsh --script check.ps1 --admin-user "DOMAIN\Administrator" --ask-device-password
 ```
 
-根据目标系统选用 `bash`、`powershell` 或 `pwsh`。使用 `--script -` 可从标准输入读取脚本，`--relay` 可指定中继。工具分别输出标准输出和错误输出，并返回远端退出码。设备密码优先使用已保存的连接密码。
+根据目标系统选用 Bash、Windows PowerShell 或 PowerShell 7。`--script -` 从标准输入读取脚本，`--relay` 指定中继，`--timeout` 设置远端执行时限（默认 30 秒）。`exec --help` 显示完整参数。新协议分别返回标准输出和错误输出，进程返回远端退出码。
+
+- GeodomDesk 账号默认沿用发起端的登录状态。无界面时可用 `--account-user` 登录，令牌仅供本次调用使用。账号若需要二次验证，请先在客户端完成登录。
+- 设备密码默认沿用已保存的连接密码。可用 `--ask-device-password` 无回显输入，或者设置 `GEODOMDESK_DEVICE_PASSWORD`。目标设备要求二次验证时，使用 `GEODOMDESK_DEVICE_CODE` 提供当次验证码。
+- Windows 管理员终端使用 `--admin-user` 指定目标机的本地或域管理员账号。目标机需安装客户端并运行后台服务，同时通过设备密码和 Windows 管理员验证。密码可在终端无回显输入。
+- 自动化可使用 `--non-interactive`，由运行环境注入 `GEODOMDESK_ACCOUNT_PASSWORD` 和 `GEODOMDESK_ADMIN_PASSWORD` 等对应凭据。脚本从标准输入读取时，凭据仍通过终端或环境变量提供。
+
+遇到只支持旧终端协议的 Windows 或 Linux 设备，CLI 会在认证后使用独立的加密终端会话执行命令。这种模式会将远端的标准输出和错误输出合并返回，并报告命令退出码。
+
+新配置默认关闭 TCP 打洞。需要时可在设置中手动开启。TCP 中继仍可使用。
 
 ## 导入设备记录
 

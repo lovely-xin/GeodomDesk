@@ -1,5 +1,7 @@
 //! One-shot commands on an authenticated terminal connection.
+mod auth;
 mod cli;
+mod legacy;
 #[cfg(windows)]
 mod windows;
 

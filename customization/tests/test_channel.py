@@ -200,6 +200,7 @@ class ChannelTests(unittest.TestCase):
                 default_settings = config.split(f"pub static ref {default_map}:", 1)[1].split("]));", 1)[0]
                 self.assertIn(f'({option}.to_owned(), "Y".to_owned())', default_settings)
             self.assertNotIn('"enable-webrtc"', default_settings)
+            self.assertIn('("enable-tcp-punch".to_owned(), "N".to_owned())', default_settings)
             self.assertIn('("Restore default ID", "Bestehende Übersetzung")', german.read_text(encoding="utf-8"))
             self.assertIn('("Data and permissions", "")', german.read_text(encoding="utf-8"))
             ffi = (source / "src/flutter_ffi.rs").read_text(encoding="utf-8")

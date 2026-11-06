@@ -1,16 +1,16 @@
-use super::{validate, MAX_SCRIPT};
+use super::{auth, legacy, validate, MAX_SCRIPT};
 use crate::{
     client::{self, Client, Data, Interface, LoginConfigHandler},
     trusted_devices::client::Session,
 };
 use base::message_proto::{
-    login_response, message, terminal_response, ExecShell, Hash, Message, PeerInfo, TerminalAction,
-    TerminalExecRequest, TerminalExecResult, TestDelay, WindowsSession,
+    login_response, message, terminal_response, Auth2FA, ExecShell, Hash, Message, PeerInfo,
+    TerminalAction, TerminalExecRequest, TerminalExecResult, TerminalResponse, TestDelay,
+    WindowsSession,
 };
 use hbb_common::{
     anyhow::{anyhow, Context},
     bail,
-    config::LocalConfig,
     protobuf::Message as _,
     rendezvous_proto::ConnType,
     tokio, ResultType, Stream,
@@ -21,7 +21,17 @@ use std::{
     time::Duration,
 };
 
-const USAGE: &str = "geodomdesk-cli exec --id ID --shell bash|powershell|pwsh --script PATH|- [--timeout SECONDS] [--relay]";
+const USAGE: &str =
+    "Usage: geodomdesk-cli exec --id ID --shell bash|powershell|pwsh --script PATH|-
+  --timeout SECONDS       Command timeout (1-300, default 30)
+  --relay                 Use a relay instead of trying a direct connection
+  --account-user USER     Sign in to GeodomDesk for this invocation
+  --admin-user USER       Authenticate to the target Windows administrator terminal
+  --ask-device-password   Prompt for a device access password if absent from the environment
+  --non-interactive       Read credentials from the environment or saved session, never prompt
+
+Environment: GEODOMDESK_ACCOUNT_PASSWORD, GEODOMDESK_DEVICE_PASSWORD,
+             GEODOMDESK_ADMIN_PASSWORD, GEODOMDESK_DEVICE_CODE";
 
 #[derive(Clone)]
 struct TerminalClient(Arc<RwLock<LoginConfigHandler>>);
@@ -82,16 +92,19 @@ pub(super) async fn receive(stream: &mut Stream) -> ResultType<Message> {
 async fn connect(
     id: String,
     relay: bool,
-) -> ResultType<(Stream, Option<tokio::sync::mpsc::UnboundedSender<()>>)> {
-    let token = LocalConfig::get_option("access_token");
-    if token.is_empty() {
-        bail!("Sign in to GeodomDesk on this computer first");
-    }
-    if hbb_common::config::is_incoming_only() {
-        bail!("Incoming-only mode");
-    }
+    token: String,
+    device_password: String,
+    mut admin: Option<auth::Credentials>,
+) -> ResultType<(
+    Stream,
+    PeerInfo,
+    Option<tokio::sync::mpsc::UnboundedSender<()>>,
+)> {
     let mut login = LoginConfigHandler::default();
     login.initialize(id, ConnType::TERMINAL, None, relay, None, None, None);
+    login.terminal_one_shot = true;
+    login.is_terminal_admin = admin.is_some();
+    let is_admin = login.is_terminal_admin;
     let interface = TerminalClient(Arc::new(RwLock::new(login)));
     let id = interface.get_id();
     let key = crate::get_key(false).await;
@@ -109,26 +122,46 @@ async fn connect(
         Session::new(&login, true, pk.as_deref())?
     };
     let keep_alive = client::hc_connection(feedback, rendezvous, &token).await;
-    let password = std::env::var("GEODOMDESK_DEVICE_PASSWORD").unwrap_or_default();
+    let mut sent_device_code = false;
     loop {
         match receive(&mut stream).await?.union {
             Some(message::Union::Hash(hash)) => {
                 if !interface
-                    .handle_hash(&password, hash, &mut trust, &mut stream)
+                    .handle_hash(&device_password, hash, &mut trust, &mut stream)
                     .await
                 {
                     bail!("Device authentication could not be started");
                 }
+                if is_admin {
+                    let credentials = admin.take().context("Administrator login was rejected")?;
+                    auth::send_admin_login(&interface, credentials, &mut trust, &mut stream)
+                        .await?;
+                }
             }
             Some(message::Union::LoginResponse(response)) => {
                 match trust.respond(response, &interface).await.union {
-                    Some(login_response::Union::PeerInfo(info)) if info.features.terminal_exec => {
-                        return Ok((stream, keep_alive));
+                    Some(login_response::Union::PeerInfo(info)) => {
+                        if is_admin && (admin.is_some() || info.platform != "Windows") {
+                            bail!("Administrator terminal login requires a Windows target");
+                        }
+                        stream.set_max_packet_length(1024 * 1024);
+                        return Ok((stream, info, keep_alive));
                     }
-                    Some(login_response::Union::PeerInfo(_)) => {
-                        bail!("The remote GeodomDesk version does not support exec");
-                    }
-                    Some(login_response::Union::Error(error)) => bail!("{error}"),
+                    Some(login_response::Union::Error(error)) => match error.as_str() {
+                        client::REQUIRE_2FA if !sent_device_code => {
+                            let mut message = Message::new();
+                            message.set_auth_2fa(Auth2FA {
+                                code: auth::device_code()?,
+                                ..Default::default()
+                            });
+                            stream.send(&message).await?;
+                            sent_device_code = true;
+                        }
+                        client::LOGIN_MSG_PASSWORD_EMPTY | client::LOGIN_MSG_PASSWORD_WRONG => {
+                            bail!("{error}. Use --ask-device-password or set GEODOMDESK_DEVICE_PASSWORD");
+                        }
+                        _ => bail!("{error}"),
+                    },
                     _ => {}
                 }
             }
@@ -146,16 +179,29 @@ pub(super) async fn exchange(
 ) -> ResultType<TerminalExecResult> {
     let mut action = TerminalAction::new();
     action.set_exec(request);
+    send_terminal_action(stream, action).await?;
+    loop {
+        match receive_terminal_response(stream).await?.union {
+            Some(terminal_response::Union::ExecResult(result)) => return Ok(result),
+            Some(terminal_response::Union::Error(error)) => bail!("{}", error.message),
+            _ => {}
+        }
+    }
+}
+
+pub(super) async fn send_terminal_action(
+    stream: &mut Stream,
+    action: TerminalAction,
+) -> ResultType<()> {
     let mut message = Message::new();
     message.set_terminal_action(action);
-    stream.send(&message).await?;
+    stream.send(&message).await
+}
+
+pub(super) async fn receive_terminal_response(stream: &mut Stream) -> ResultType<TerminalResponse> {
     loop {
         match receive(stream).await?.union {
-            Some(message::Union::TerminalResponse(response)) => match response.union {
-                Some(terminal_response::Union::ExecResult(result)) => return Ok(result),
-                Some(terminal_response::Union::Error(error)) => bail!("{}", error.message),
-                _ => {}
-            },
+            Some(message::Union::TerminalResponse(response)) => return Ok(response),
             Some(message::Union::TestDelay(delay)) => {
                 client::handle_test_delay(delay, stream).await
             }
@@ -171,37 +217,56 @@ pub async fn run_cli() -> ResultType<i32> {
         println!("{USAGE}");
         return Ok(0);
     }
+    if matches!(first.as_deref(), Some("--version" | "-V")) {
+        println!("GeodomDesk {}", crate::VERSION);
+        return Ok(0);
+    }
     if first.as_deref() != Some("exec") {
         bail!("{USAGE}");
     }
     let (mut id, mut shell, mut script) = (None, None, None);
+    let (mut account_user, mut admin_user) = (None, None);
     let mut timeout = 30u32;
     let mut relay = false;
+    let mut ask_device_password = false;
+    let mut non_interactive = false;
     while let Some(flag) = args.next() {
-        if flag == "--relay" {
-            relay = true;
-            continue;
-        }
-        let value = args
-            .next()
-            .with_context(|| format!("Missing value for {flag}"))?;
         match flag.as_str() {
-            "--id" => id = Some(value),
-            "--shell" => {
-                shell = Some(match value.as_str() {
-                    "bash" => ExecShell::BASH,
-                    "powershell" => ExecShell::WINDOWS_POWERSHELL,
-                    "pwsh" => ExecShell::POWERSHELL_CORE,
-                    _ => bail!("Unknown shell: {value}"),
-                })
+            "--help" | "-h" => {
+                println!("{USAGE}");
+                return Ok(0);
             }
-            "--script" => script = Some(value),
-            "--timeout" => timeout = value.parse().context("Invalid timeout")?,
-            _ => bail!("Unknown option: {flag}"),
+            "--relay" => relay = true,
+            "--ask-device-password" => ask_device_password = true,
+            "--non-interactive" => non_interactive = true,
+            _ => {
+                let value = args
+                    .next()
+                    .with_context(|| format!("Missing value for {flag}"))?;
+                match flag.as_str() {
+                    "--id" => id = Some(value),
+                    "--shell" => {
+                        shell = Some(match value.as_str() {
+                            "bash" => ExecShell::BASH,
+                            "powershell" => ExecShell::WINDOWS_POWERSHELL,
+                            "pwsh" => ExecShell::POWERSHELL_CORE,
+                            _ => bail!("Unknown shell: {value}"),
+                        })
+                    }
+                    "--script" => script = Some(value),
+                    "--timeout" => timeout = value.parse().context("Invalid timeout")?,
+                    "--account-user" => account_user = Some(value),
+                    "--admin-user" => admin_user = Some(value),
+                    _ => bail!("Unknown option: {flag}"),
+                }
+            }
         }
     }
     let id = id.filter(|id| !id.is_empty()).context("Missing --id")?;
     let shell = shell.context("Missing --shell")?;
+    if admin_user.is_some() && shell == ExecShell::BASH {
+        bail!("--admin-user requires powershell or pwsh");
+    }
     let path = script.context("Missing --script")?;
     let reader: Box<dyn Read> = if path == "-" {
         Box::new(std::io::stdin())
@@ -219,20 +284,105 @@ pub async fn run_cli() -> ResultType<i32> {
         ..Default::default()
     };
     validate(&request)?;
-    let (mut stream, _keep_alive) =
-        tokio::time::timeout(Duration::from_secs(60), connect(id, relay))
-            .await
-            .context("Timed out connecting or authenticating")??;
-    let result = tokio::time::timeout(
-        Duration::from_secs(u64::from(timeout) + 25),
-        exchange(&mut stream, request),
+    if hbb_common::config::is_incoming_only() {
+        bail!("Incoming-only mode");
+    }
+    let token = auth::account_token(account_user, non_interactive).await?;
+    let device_password = auth::device_password(ask_device_password, non_interactive)?;
+    let admin = auth::admin_credentials(admin_user, non_interactive)?;
+    let (mut stream, peer, _keep_alive) = tokio::time::timeout(
+        Duration::from_secs(60),
+        connect(id, relay, token, device_password, admin),
     )
     .await
-    .context("Timed out waiting for remote execution result")??;
+    .context("Timed out connecting or authenticating")??;
+    let result = if peer.features.terminal_exec {
+        tokio::time::timeout(
+            Duration::from_secs(u64::from(timeout) + 25),
+            exchange(&mut stream, request),
+        )
+        .await
+        .context("Timed out waiting for remote execution result")??
+    } else if peer.features.terminal {
+        legacy::exchange(&mut stream, &peer.platform, request).await?
+    } else {
+        bail!("Remote device does not support terminal commands");
+    };
     if !result.error.is_empty() {
         bail!("{}", result.error);
     }
     std::io::stdout().write_all(&result.stdout)?;
     std::io::stderr().write_all(&result.stderr)?;
     Ok(result.exit_code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hbb_common::{
+        sodiumoxide::crypto::secretbox,
+        tcp::FramedStream,
+        tokio::net::{TcpListener, TcpStream},
+    };
+    use sha2::{Digest, Sha256};
+
+    #[tokio::test]
+    async fn admin_challenge_sends_windows_login_and_device_hash() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (server, client_addr) = listener.accept().await.unwrap();
+        let mut client = Stream::Tcp(FramedStream::from(client, addr));
+        let mut server = Stream::Tcp(FramedStream::from(server, client_addr));
+        let key = secretbox::gen_key();
+        client.set_key(key.clone());
+        server.set_key(key);
+
+        let mut login = LoginConfigHandler::default();
+        login.initialize(
+            "987654321".into(),
+            ConnType::TERMINAL,
+            None,
+            false,
+            None,
+            None,
+            None,
+        );
+        login.is_terminal_admin = true;
+        login.terminal_one_shot = true;
+        let interface = TerminalClient(Arc::new(RwLock::new(login)));
+        let mut trust = Session::default();
+        let hash = Hash {
+            salt: "salt".into(),
+            challenge: "challenge".into(),
+            ..Default::default()
+        };
+        assert!(
+            interface
+                .handle_hash("device-secret", hash, &mut trust, &mut client)
+                .await
+        );
+        let admin = auth::Credentials {
+            username: "DOMAIN\\Admin".into(),
+            password: "windows-secret".into(),
+        };
+        auth::send_admin_login(&interface, admin, &mut trust, &mut client)
+            .await
+            .unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(2), receive(&mut server))
+            .await
+            .unwrap()
+            .unwrap();
+        let Some(message::Union::LoginRequest(request)) = response.union else {
+            panic!("Expected administrator login request");
+        };
+        let mut challenge = Sha256::new();
+        challenge.update(Sha256::digest(b"device-secretsalt"));
+        challenge.update(b"challenge");
+        assert_eq!(&request.password[..], &challenge.finalize()[..]);
+        assert_eq!(request.os_login.username, "DOMAIN\\Admin");
+        assert_eq!(request.os_login.password, "windows-secret");
+        assert!(request.has_terminal());
+        assert!(request.terminal().service_id.is_empty());
+    }
 }
