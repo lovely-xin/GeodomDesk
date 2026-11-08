@@ -86,13 +86,18 @@ class PackagingTests(unittest.TestCase):
 
         payload = self.stub_deb()
         output = self.root / "geodomdesk.deb"
-        repack_deb.repack(payload, output, "1.5.2", 101)
+        cli = self.root / "geodomdesk-cli"
+        cli.write_bytes(b"#!/bin/sh\nexit 37\n")
+        repack_deb.repack(payload, output, "1.5.2", 101, cli=cli)
         check_deb(output, "1.5.2", 101)
         extracted = self.root / "unpacked"
         subprocess.run(["dpkg-deb", "-R", str(output), str(extracted)], check=True)
         self.assertEqual(
             os.readlink(extracted / "usr/bin/geodomdesk"), "/usr/share/geodomdesk/geodomdesk"
         )
+        self.assertEqual(os.readlink(extracted / "usr/bin/geodomdesk-cli"),
+                         "../share/geodomdesk/geodomdesk-cli")
+        self.assertEqual(subprocess.run([str(extracted / "usr/bin/geodomdesk-cli")]).returncode, 37)
         self.assertFalse((extracted / "usr/bin/rustdesk").exists())
         self.assertFalse((extracted / "DEBIAN/preinst").exists())
         fakebin = self.root / "fakebin"

@@ -81,9 +81,10 @@ systemctl daemon-reload || true
         exe.parent.mkdir(parents=True, exist_ok=True)
         exe.symlink_to("/usr/share/geodomdesk/geodomdesk")
         if cli is not None:
-            cli_path = exe.with_name("geodomdesk-cli")
+            cli_path = data / "geodomdesk-cli"
             shutil.copyfile(cli, cli_path)
             cli_path.chmod(0o755)
+            exe.with_name("geodomdesk-cli").symlink_to("../share/geodomdesk/geodomdesk-cli")
         service = root / "usr/lib/systemd/system/geodomdesk.service"
         service.parent.mkdir(parents=True, exist_ok=True)
         service.write_bytes(

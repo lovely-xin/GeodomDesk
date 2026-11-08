@@ -241,6 +241,11 @@ jobs:
           cargo build --locked --release --features $features --bin geodomdesk-cli
           if ($LASTEXITCODE -ne 0) { throw 'Terminal CLI build failed' }
           Copy-Item ./target/release/geodomdesk-cli.exe ./flutter/build/windows/x64/runner/Release/
+          python -m unittest discover -s ../customization/tests -p test_terminal_cli.py -v
+          if ($LASTEXITCODE -ne 0) { throw 'Terminal CLI stream forwarding failed' }
+          $cli = './flutter/build/windows/x64/runner/Release/geodomdesk-cli.exe'
+          $help = (& $cli --help | Out-String)
+          if ($LASTEXITCODE -ne 0 -or !$help.Contains('geodomdesk-cli exec')) { throw 'Bundled terminal CLI could not start the main client' }
           $env:GEODOMDESK_TEST_CLIENT = (Resolve-Path ./flutter/build/windows/x64/runner/Release/GeodomDesk.exe).Path
           cargo test --locked --release --features $features --lib terminal_exec::windows::tests::native_powershell_helper_round_trip -- --ignored --exact
           if ($LASTEXITCODE -ne 0) { throw 'Native PowerShell execution failed' }
@@ -343,6 +348,7 @@ jobs:
           python3 ./build.py --flutter --hwcodec --unix-file-copy-paste
           features=$(python3 ./build.py --print-features --flutter --hwcodec --unix-file-copy-paste)
           cargo build --locked --release --features "$features" --bin geodomdesk-cli
+          python3 -m unittest discover -s ../customization/tests -p test_terminal_cli.py -v
           mkdir -p ../ubuntu-artifact
           python3 ../customization/repack_deb.py --input "rustdesk-$VERSION.deb" --output ../ubuntu-artifact/geodomdesk.deb --version "$VERSION" --build-number "$BUILD_NUMBER" --cli target/release/geodomdesk-cli
           dpkg-deb -x ../ubuntu-artifact/geodomdesk.deb "$RUNNER_TEMP/geodomdesk-package"

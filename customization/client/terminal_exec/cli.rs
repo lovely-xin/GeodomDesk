@@ -210,8 +210,7 @@ pub(super) async fn receive_terminal_response(stream: &mut Stream) -> ResultType
     }
 }
 
-pub async fn run_cli() -> ResultType<i32> {
-    let mut args = std::env::args().skip(1);
+pub async fn run_cli(mut args: impl Iterator<Item = String>) -> ResultType<i32> {
     let first = args.next();
     if matches!(first.as_deref(), Some("--help" | "-h")) {
         println!("{USAGE}");

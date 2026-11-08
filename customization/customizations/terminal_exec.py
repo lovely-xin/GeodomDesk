@@ -36,6 +36,42 @@ def apply(changes, root):
         for name in paths:
             changes[name] = (staging / name).read_text(encoding="utf-8")
 
+    # Run commands in the main executable so service IPC retains its identity check.
+    changes["src/core_main.rs"] = replace_once(
+        changes["src/core_main.rs"],
+        "    crate::load_custom_client();\n",
+        "    crate::load_custom_client();\n" + """    #[cfg(any(windows, target_os = "linux"))]
+    if std::env::args().nth(1).as_deref() == Some("--terminal-cli") {
+        use hbb_common::tokio::runtime::Builder;
+        let result = Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(hbb_common::anyhow::Error::from)
+            .and_then(|runtime| {
+                runtime.block_on(crate::terminal_exec::run_cli(std::env::args().skip(2)))
+            });
+        crate::common::global_clean();
+        std::process::exit(match result {
+            Ok(code) => code,
+            Err(error) => {
+                eprintln!("geodomdesk-cli: {error:#}");
+                1
+            }
+        });
+    }
+""",
+    )
+    changes["flutter/windows/runner/main.cpp"] = replace_once(
+        changes["flutter/windows/runner/main.cpp"],
+        '  HINSTANCE hInstance = LoadLibraryA("librustdesk.dll");',
+        """  const auto cli_args = GetCommandLineArguments();
+  if (!cli_args.empty() && cli_args.front() == "--terminal-cli") {
+    // No console is expected when an agent supplies redirected standard handles.
+    AttachConsole(ATTACH_PARENT_PROCESS);
+  }
+  HINSTANCE hInstance = LoadLibraryA("librustdesk.dll");""",
+    )
+
     client = changes["src/client.rs"]
     for old, new in (
         (
