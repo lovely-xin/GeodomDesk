@@ -63,13 +63,12 @@ def apply(changes, root):
     )
     changes["flutter/windows/runner/main.cpp"] = replace_once(
         changes["flutter/windows/runner/main.cpp"],
-        '  HINSTANCE hInstance = LoadLibraryA("librustdesk.dll");',
-        """  const auto cli_args = GetCommandLineArguments();
-  if (!cli_args.empty() && cli_args.front() == "--terminal-cli") {
+        "  int args_len = 0;",
+        """  if (!command_line_arguments.empty() && command_line_arguments.front() == "--terminal-cli") {
     // No console is expected when an agent supplies redirected standard handles.
     AttachConsole(ATTACH_PARENT_PROCESS);
   }
-  HINSTANCE hInstance = LoadLibraryA("librustdesk.dll");""",
+  int args_len = 0;""",
     )
 
     client = changes["src/client.rs"]
