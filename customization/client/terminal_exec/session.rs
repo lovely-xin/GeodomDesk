@@ -195,20 +195,21 @@ mod tests {
 
     #[test]
     fn local_script_and_default_shell_are_validated_without_consuming_stdin() {
-        let file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(file.path(), "printf '你好'").unwrap();
+        let file = std::env::temp_dir().join(format!("geodomdesk-cli-{}.sh", uuid::Uuid::new_v4()));
+        std::fs::write(&file, "printf '你好'").unwrap();
         let command: Command =
-            serde_json::from_value(json!({"id": "check", "script_file": file.path()})).unwrap();
+            serde_json::from_value(json!({"id": "check", "script_file": &file})).unwrap();
         assert_eq!(command.id.as_ref().unwrap(), "check");
         let request = command.request(false, 15, Some(ExecShell::BASH)).unwrap();
         assert_eq!(request.script.as_ref(), "printf '你好'".as_bytes());
         for value in [
             json!({"script_file": "-"}),
-            json!({"script": "exit", "script_file": file.path()}),
+            json!({"script": "exit", "script_file": &file}),
         ] {
             let command: Command = serde_json::from_value(value).unwrap();
             assert!(command.request(false, 15, Some(ExecShell::BASH)).is_err());
         }
+        std::fs::remove_file(&file).unwrap();
         assert!(!input::wants_json(
             &["exec", "--command", "--json"].map(String::from)
         ));
