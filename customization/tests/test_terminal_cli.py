@@ -29,6 +29,17 @@ fn main() {
         AttachConsole(u32::MAX);
     }
     let args: Vec<_> = std::env::args().skip(1).collect();
+    #[cfg(windows)]
+    if args == ["--terminal-cli", "lifetime"] {
+        use std::os::windows::process::CommandExt;
+        let child = std::process::Command::new(r"C:\\Windows\\System32\\ping.exe")
+            .args(["-t", "127.0.0.1"]).creation_flags(0x08000000)
+            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()).spawn().unwrap();
+        println!("{}:{}", std::process::id(), child.id());
+        std::io::stdout().flush().unwrap();
+        loop { std::thread::sleep(std::time::Duration::from_secs(1)); }
+    }
     assert_eq!(args, ["--terminal-cli", "exec", "--script", "脚本 with spaces.ps1"]);
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input).unwrap();
@@ -61,6 +72,36 @@ fn main() {
         self.assertEqual(result.returncode, 1)
         self.assertIn(b"cannot run GeodomDesk", result.stderr)
         self.assertEqual(result.stdout, b"")
+
+    @unittest.skipUnless(os.name == "nt", "Windows process job")
+    def test_killed_launcher_closes_the_owned_process_tree(self):
+        import ctypes
+        process = subprocess.Popen([str(self.cli), "lifetime"], stdin=subprocess.PIPE,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+        kernel.OpenProcess.restype = ctypes.c_void_p
+        kernel.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        kernel.WaitForSingleObject.restype = ctypes.c_uint32
+        kernel.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+        handles = []
+        try:
+            pids = [int(value) for value in process.stdout.readline().decode().strip().split(":")]
+            self.assertEqual(len(pids), 2)
+            handles = [kernel.OpenProcess(0x100001, False, pid) for pid in pids]
+            self.assertTrue(all(handles))
+            process.kill()
+            process.wait(timeout=8)
+            self.assertTrue(all(kernel.WaitForSingleObject(handle, 2500) == 0 for handle in handles))
+        finally:
+            if process.poll() is None:
+                process.kill()
+            for handle in handles:
+                if handle:
+                    if kernel.WaitForSingleObject(handle, 0) != 0:
+                        kernel.TerminateProcess(handle, 1)
+                    kernel.CloseHandle(handle)
 
     @unittest.skipIf(os.name == "nt", "Unix package symlink")
     def test_package_symlink_locates_bundled_main(self):

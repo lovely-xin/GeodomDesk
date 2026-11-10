@@ -86,7 +86,7 @@ fn command(
         )
     } else {
         format!(
-            "bash --noprofile --norc -c 'eval \"$(printf %s {} | base64 -d)\"'",
+            "env -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS bash --noprofile --norc -c 'eval \"$(printf %s {} | base64 -d)\"'",
             crate::encode64(bootstrap)
         )
     };
@@ -362,14 +362,14 @@ mod tests {
         };
         let request = TerminalExecRequest {
             shell: ExecShell::BASH.into(),
-            script: b"printf STRICT_OK".to_vec().into(),
+            script: b"false; printf STRICT_OK; exit 7".to_vec().into(),
             timeout_seconds: 15,
             ..Default::default()
         };
         let (launcher, payload) = command("Linux", &request, "GDSTRICT").unwrap();
         let mut child = Command::new("bash")
             .args(["--noprofile", "--norc", "-c", &launcher])
-            .env("SHELLOPTS", "nounset")
+            .env("SHELLOPTS", "errexit:nounset:pipefail:posix")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -383,7 +383,7 @@ mod tests {
             .unwrap();
         let result = child.wait_with_output().unwrap();
         assert!(
-            String::from_utf8_lossy(&result.stdout).contains("GDSTRICT:END:0"),
+            String::from_utf8_lossy(&result.stdout).contains("GDSTRICT:END:7"),
             "{}",
             String::from_utf8_lossy(&result.stderr)
         );

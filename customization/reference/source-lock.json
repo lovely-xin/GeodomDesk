@@ -62,5 +62,6 @@
   "src/ui_session_interface.rs": "a8e04fefded8d1f5cd829b78ee016d81c9352d71cb5a1a244b3d4d29a74aee50",
   "libs/base/protos/message.proto": "03646089840bb5189003aee547d51cd5afd3ccc3843f0e18436b6ef8e134ba0c",
   "src/server/connection.rs": "5d1f77656c3d533b08e846794987a687208c8557d10942aa49aa6e36b4cc0893",
-  "src/server/terminal_helper.rs": "9934fefa00821d9d8cd4314d66396e8ddac7b2457a046566046d2826a3de5ce8"
+  "src/server/terminal_helper.rs": "9934fefa00821d9d8cd4314d66396e8ddac7b2457a046566046d2826a3de5ce8",
+  "flutter/lib/desktop/pages/port_forward_page.dart": "4c65b5fdf2705b1b799aeb9e9f2207997a84560ab8dfbf6236a9011fa5c1a081"
 }

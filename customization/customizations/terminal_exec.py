@@ -17,6 +17,9 @@ SOURCES = (
     "terminal_exec/legacy.rs",
     "terminal_exec/session.rs",
     "terminal_exec/stage.rs",
+    "terminal_exec/tunnel.rs",
+    "terminal_exec/ssh.rs",
+    "terminal_exec/ssh_worker.sh",
     "terminal_exec/legacy_bootstrap.ps1",
     "terminal_exec/legacy_bootstrap.sh",
     "terminal_exec/windows.rs",
@@ -224,3 +227,136 @@ pub(crate) async fn post_terminal_login(body: String) -> ResultType<(u16, String
 
     for name in SOURCES:
         changes["src/" + name] = (root / "client" / name).read_text(encoding="utf-8")
+
+    # CLI mappings remain process-owned: listing them never starts a second GUI listener.
+    ffi = changes["src/flutter_ffi.rs"]
+    ffi = replace_once(ffi, "pub fn main_get_peer_sync(id: String) -> SyncReturn<String> {", r'''pub async fn main_list_cli_tunnels(id: String) -> String {
+    #[cfg(any(windows, target_os = "linux"))]
+    return match crate::terminal_exec::list_tunnels(&id).await {
+        Ok(value) => value.to_string(),
+        Err(error) => serde_json::json!({"error":format!("{error:#}")}).to_string(),
+    };
+    #[cfg(not(any(windows, target_os = "linux")))]
+    "[]".to_owned()
+}
+
+pub async fn main_close_cli_tunnel(id: String, tunnel_id: String) -> String {
+    #[cfg(any(windows, target_os = "linux"))]
+    return match crate::terminal_exec::close_tunnel(&id, &tunnel_id).await {
+        Ok(value) => value.to_string(),
+        Err(error) => serde_json::json!({"error":format!("{error:#}")}).to_string(),
+    };
+    #[cfg(not(any(windows, target_os = "linux")))]
+    "{\"error\":\"CLI tunnels require Windows or Linux\"}".to_owned()
+}
+
+pub fn main_get_peer_sync(id: String) -> SyncReturn<String> {''')
+    changes["src/flutter_ffi.rs"] = ffi
+    changes["flutter/lib/web/bridge.dart"] = replace_once(
+        changes["flutter/lib/web/bridge.dart"],
+        "  String mainGetPeerSync({required String id, dynamic hint}) {",
+        """  Future<String> mainListCliTunnels({required String id, dynamic hint}) async => '[]';
+  Future<String> mainCloseCliTunnel({required String id, required String tunnelId, dynamic hint}) async =>
+      '{"error":"CLI tunnels require Windows or Linux"}';
+
+  String mainGetPeerSync({required String id, dynamic hint}) {""")
+    page = changes["flutter/lib/desktop/pages/port_forward_page.dart"]
+    for old, new in (
+        ("import 'dart:convert';", "import 'dart:convert';\nimport 'dart:async';"),
+        ("  late FFI _ffi;", """  late FFI _ffi;
+  final RxList<Map<String, dynamic>> cliTunnels = <Map<String, dynamic>>[].obs;
+  Timer? _cliTimer;
+  bool _refreshingCli = false;
+  final RxnString _cliError = RxnString();
+"""),
+        ('    Get.put<FFI>(_ffi, tag:', """    if (!widget.isRDP) {
+      refreshCliTunnels();
+      _cliTimer = Timer.periodic(const Duration(seconds: 1), (_) => refreshCliTunnels());
+    }
+    Get.put<FFI>(_ffi, tag:"""),
+        ("    _ffi.close();", "    _cliTimer?.cancel();\n    _ffi.close();"),
+        ("              height: 45,", "              height: cliTunnels.isEmpty && _cliError.value == null ? 45 : null,\n              constraints: const BoxConstraints(minHeight: 45),"),
+        ("                  mainAxisAlignment: MainAxisAlignment.center,", "                  mainAxisSize: MainAxisSize.min,\n                  mainAxisAlignment: MainAxisAlignment.center,"),
+        ("offstage: pfs.isEmpty && !widget.isRDP,", "offstage: pfs.isEmpty && cliTunnels.isEmpty && !widget.isRDP,"),
+        ("translate('not_close_tcp_tip')", "translate(pfs.isEmpty && cliTunnels.isNotEmpty ? 'CLI tunnel lifetime' : 'not_close_tcp_tip')"),
+        ("itemCount: pfs.length + 2,", "itemCount: pfs.length + cliTunnels.length + 2 + (_cliError.value == null ? 0 : 1),"),
+        ("          itemCount: pfs.length + cliTunnels.length + 2 + (_cliError.value == null ? 0 : 1),\n          itemBuilder: ((context, index) {\n            if (index == 0) {", """          itemCount: pfs.length + cliTunnels.length + 2 + (_cliError.value == null ? 0 : 1),
+          itemBuilder: ((context, index) {
+            if (_cliError.value != null && index == pfs.length + cliTunnels.length + 2) {
+              return ListTile(title: Text(translate('CLI tunnel status unavailable')),
+                subtitle: Text(_cliError.value!, maxLines: 2, overflow: TextOverflow.ellipsis),
+                trailing: IconButton(tooltip: translate('Refresh'), icon: const Icon(Icons.refresh), onPressed: refreshCliTunnels));
+            }
+            if (index == 0) {"""),
+        ("              return buildTunnelDataRow(context, pfs[index - 2], index - 2);", """              if (index - 2 < pfs.length) {
+                return buildTunnelDataRow(context, pfs[index - 2], index - 2);
+              }
+              return buildCliTunnelRow(context, cliTunnels[index - 2 - pfs.length]);"""),
+        ("  void refreshTunnelConfig() async {", """  Future<void> refreshCliTunnels() async {
+    if (_refreshingCli || !mounted) return;
+    _refreshingCli = true;
+    try {
+      final value = jsonDecode(await bind.mainListCliTunnels(id: widget.id));
+      if (!mounted) return;
+      if (value is! List) throw Exception(value['error'] ?? 'Cannot list CLI tunnels');
+      cliTunnels.assignAll(value.cast<Map<String, dynamic>>());
+      _cliError.value = null;
+    } catch (error) {
+      // Keep the last observed rows; a failed refresh does not prove that a mapping closed.
+      if (mounted && _cliError.value != error.toString()) {
+        _cliError.value = error.toString();
+        debugPrint('CLI tunnel refresh: $error');
+      }
+    } finally {
+      _refreshingCli = false;
+    }
+  }
+
+  Widget buildCliTunnelRow(BuildContext context, Map<String, dynamic> tunnel) {
+    Widget cell(String value) => Expanded(
+        child: Tooltip(message: value, child: Text(value, style: const TextStyle(fontSize: 20), maxLines: 1, overflow: TextOverflow.ellipsis)).marginOnly(left: _kTextLeftMargin));
+    final id = tunnel['tunnel_id'] as String;
+    final state = tunnel['state'] == 'active' ? translate('Active') : tunnel['state'] == 'listening' ? translate('Listening ...') : translate('Status unavailable');
+    return Container(
+      constraints: const BoxConstraints(minHeight: _kRowHeight),
+      child: Row(children: [
+        Expanded(child: Tooltip(
+          message: '${translate('CLI tunnel')} · $id · PID ${tunnel['owner_pid']}',
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('${tunnel['local_port']}', style: const TextStyle(fontSize: 20)),
+            Text('CLI · $state', style: Theme.of(context).textTheme.bodySmall),
+          ]).marginOnly(left: _kTextLeftMargin),
+        )),
+        const SizedBox(width: _kColumn1Width, child: Icon(Icons.arrow_forward_sharp)),
+        cell('${tunnel['remote_host']}'),
+        cell('${tunnel['remote_port']}'),
+        SizedBox(width: _kColumn4Width, child: IconButton(
+          tooltip: translate('Close CLI tunnel'),
+          icon: const Icon(Icons.close),
+          onPressed: () async {
+            try {
+              final value = jsonDecode(await bind.mainCloseCliTunnel(id: widget.id, tunnelId: id));
+              if (value['error'] != null) throw Exception(value['error']);
+              await refreshCliTunnels();
+            } catch (error) {
+              if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error.toString())));
+            }
+          },
+        )),
+      ]),
+    );
+  }
+
+  void refreshTunnelConfig() async {"""),
+    ):
+        page = replace_once(page, old, new)
+    page = replace_once(page,
+        "                height: 25,\n                color: Theme.of(context).scaffoldBackgroundColor,\n                child: Row(children: [\n                  text('Local Port'),",
+        "                constraints: const BoxConstraints(minHeight: 25),\n                color: Theme.of(context).scaffoldBackgroundColor,\n                child: Row(children: [\n                  text('Local Port'),")
+    changes["flutter/lib/desktop/pages/port_forward_page.dart"] = page
+
+    entries = {'CLI tunnel': 'CLI 隧道', 'Close CLI tunnel': '关闭 CLI 隧道', 'CLI tunnel lifetime': '由 CLI 管理，关闭此窗口不会停止该隧道', 'Active': '使用中', 'CLI tunnel status unavailable': 'CLI 隧道状态暂不可用', 'Status unavailable': '状态暂不可用'}
+    import json
+    cn = changes["src/lang/cn.rs"]
+    text = "".join("        (" + json.dumps(k, ensure_ascii=False) + ", " + json.dumps(v, ensure_ascii=False) + "),\n" for k,v in entries.items() if "(" + json.dumps(k) + "," not in cn)
+    changes["src/lang/cn.rs"] = replace_once(cn, "    [\n", "    [\n" + text)

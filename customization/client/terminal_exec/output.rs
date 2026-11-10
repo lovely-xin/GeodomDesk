@@ -37,6 +37,9 @@ pub(super) fn failure(
     value["connection_id"] = json!(error
         .downcast_ref::<super::stage::ConnectionId>()
         .map(|id| id.0.clone()));
+    if let Some(history) = error.downcast_ref::<super::stage::SetupHistory>() {
+        value["setup_errors"] = json!(history.0);
+    }
     if let Some(id) = id {
         value["id"] = id;
     }

@@ -95,19 +95,21 @@ pub(super) async fn execute(
     request: TerminalExecRequest,
     terminal_id: i32,
 ) -> ResultType<TerminalExecResult> {
+    if let cli::Backend::Ssh(session)=&mut connection.backend {return session.execute(request).await;}
     if connection.peer.features.terminal_exec {
         tokio::time::timeout(
             Duration::from_secs(u64::from(request.timeout_seconds) + 25),
-            cli::exchange(&mut connection.stream, request),
+            cli::exchange(connection.terminal_stream()?, request),
         )
         .await
         .context("Timed out waiting for remote execution result")
         .and_then(|result| result)
         .map_err(|error| stage::wrap(error, "execution", "unknown"))
     } else if connection.peer.features.terminal {
+        let platform=connection.peer.platform.clone();
         legacy::exchange(
-            &mut connection.stream,
-            &connection.peer.platform,
+            connection.terminal_stream()?,
+            &platform,
             request,
             terminal_id,
         )
@@ -119,6 +121,41 @@ pub(super) async fn execute(
             "not_started",
         ))
     }
+}
+
+pub(super) async fn execute_with_setup_recovery(
+    connection: &mut cli::Connection,
+    options: &cli::ConnectOptions,
+    request: TerminalExecRequest,
+    terminal_id: i32,
+) -> ResultType<TerminalExecResult> {
+    let started = Instant::now();
+    let error = match execute(connection, request.clone(), terminal_id).await {
+        Ok(result) => return Ok(result),
+        Err(error) => error,
+    };
+    let (_, phase, state) = stage::describe(&error);
+    if phase != "prepare" || state != "not_started" || !stage::transient_setup_error(&error) {
+        return Err(error);
+    }
+    let failed_prepare = stage::SetupError::new(&error, started.elapsed());
+    let mut history=connection.setup_errors.clone();history.push(failed_prepare);
+    eprintln!("Terminal preparation disconnected before script upload; opening a new connection once: {error:#}");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut next = match options.open().await {
+        Ok(connection) => connection,
+        Err(error) => {
+            if let Some(attempts) = error.downcast_ref::<stage::SetupHistory>() { history.extend(attempts.0.clone()); }
+            let old=history.len().saturating_sub(6);history.drain(..old).for_each(drop);
+            return Err(error.context(stage::SetupHistory(history)));
+        }
+    };
+    history.append(&mut next.setup_errors);
+    let old=history.len().saturating_sub(6);history.drain(..old).for_each(drop);
+    next.setup_errors=history;
+    *connection = next;
+    // Only preparation can reach this retry; no user script bytes have been uploaded.
+    execute(connection, request, terminal_id).await
 }
 
 pub(super) async fn run(
@@ -183,7 +220,9 @@ pub(super) async fn run(
                 worker=Some(tokio::spawn(async move {
                     let start=Instant::now();let reused=saved.is_some();
                     let mut connection=match saved {Some(connection)=>connection,None=>options.open().await?};
-                    let result=execute(&mut connection,request,terminal_id).await.map_err(|error|error.context(stage::ConnectionId(connection.id.clone())))?;
+                    let original_connection_id=connection.id.clone();
+                    let result=execute_with_setup_recovery(&mut connection,&options,request,terminal_id).await.map_err(|error|connection.command_error(error))?;
+                    let reused=reused && connection.id==original_connection_id;
                     Ok(Completed::Executed(connection,result,start.elapsed(),reused))
                 }));
                 }
@@ -257,6 +296,9 @@ pub(super) async fn run(
                     if queue.len()>=MAX_QUEUED {
                         had_failure=true;output::write(rejected(id,"busy","The bounded request queue is full; wait for a result before submitting more commands"))?;continue;
                     }
+                    if options.ssh.is_some() && request.shell.enum_value()!=Ok(ExecShell::BASH) {
+                        had_failure=true;output::write(rejected(id,"invalid_request","An SSH Bash session accepts only shell bash"))?;continue;
+                    }
                     queue.push_back((id,request,fresh));
                 },
                 completed=async { match worker.as_mut(){Some(worker)=>worker.await,None=>pending().await} } => {
@@ -273,6 +315,7 @@ pub(super) async fn run(
                             had_failure|=failed;
                             let mut value=output::result(active_id.take(),&result,elapsed);
                             value["connection_id"]=json!(next.id);value["reused_connection"]=json!(reused);
+                            if !next.setup_errors.is_empty(){value["setup_errors"]=json!(next.setup_errors);}
                             output::write(value)?;connection=Some(next);
                             if failed && !continue_on_error {
                                 for (id,_,_) in queue.drain(..) {
@@ -293,10 +336,10 @@ pub(super) async fn run(
                         }
                     }
                 },
-                message=async { match connection.as_mut(){Some(connection)=>cli::receive(&mut connection.stream).await,None=>pending().await} } => {
+                message=async { match connection.as_mut(){Some(connection)=>connection.receive_idle().await,None=>pending().await} } => {
                     match message {
                         Ok(message)=>if let Some(message::Union::TestDelay(delay))=message.union {
-                            if let Some(connection)=connection.as_mut(){crate::client::handle_test_delay(delay,&mut connection.stream).await;}
+                            if let Some(connection)=connection.as_mut(){crate::client::handle_test_delay(delay,connection.terminal_stream()?).await;}
                         },
                         Err(error)=> {
                             had_failure=true;

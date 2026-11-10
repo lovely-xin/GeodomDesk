@@ -6,6 +6,9 @@ mod legacy;
 mod output;
 mod session;
 mod stage;
+mod tunnel;
+mod ssh;
+pub(crate) use tunnel::{list as list_tunnels, close as close_tunnel};
 #[cfg(windows)]
 mod windows;
 
@@ -158,6 +161,9 @@ async fn bash(request: TerminalExecRequest) -> ResultType<TerminalExecResult> {
     let mut child = command
         .arg(script.path())
         .env_remove("BASH_ENV")
+        .env_remove("ENV")
+        .env_remove("SHELLOPTS")
+        .env_remove("BASHOPTS")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -200,7 +206,7 @@ mod tests {
 
     #[tokio::test]
     async fn bash_keeps_output_channels_and_exit_code() {
-        let result = execute(request("printf '你好'; printf '错误' >&2; exit 7", 3)).await;
+        let result = execute(request("false; printf '你好'; printf '错误' >&2; exit 7", 3)).await;
         assert!(result.error.is_empty(), "{}", result.error);
         assert_eq!(result.stdout.as_ref(), "你好".as_bytes());
         assert_eq!(result.stderr.as_ref(), "错误".as_bytes());

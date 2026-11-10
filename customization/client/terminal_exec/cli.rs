@@ -29,6 +29,22 @@ const USAGE: &str =
   session                 Read JSON Lines from stdin and reuse one authenticated connection
                           {\"shell\":\"bash\",\"script\":\"pwd\",\"timeout\":120}
                           Results: JSON Lines; stdout/stderr are Base64 encoded
+  tunnel open --id ID --remote-port PORT [--remote-host HOST] [--local-port PORT]
+                          Own a loopback TCP mapping (default: free local port, forced relay)
+                          Keep stdin open; JSON controls status/close; EOF or exit cleans up
+  tunnel list [--id ID]    List only live CLI-owned tunnels; includes owner and real status
+  tunnel close --tunnel-id UUID [--id ID]
+                          Close that CLI-owned mapping and all of its connections
+  --transport MODE        auto (default): Bash uses SSH over a managed TCP relay
+                          terminal: use GeodomDesk terminal; ssh: require SSH Bash
+                          Session without --shell keeps the terminal transport
+  --ssh-user USER         Target SSH login (default: authenticated peer username)
+  --ssh-port PORT         Target SSH service port (default 22)
+  --ssh-identity PATH     Use an SSH private key; otherwise agent/default keys or password
+  --ask-ssh-password      Prompt without echo; automation: GEODOMDESK_SSH_PASSWORD
+  --ssh-known-hosts PATH  Dedicated host-key file (default: client configuration)
+  --ssh-strict-host-key   Require a previously trusted host key; otherwise trust first key
+                          Changed keys always fail; no fallback or command replay
   --timeout SECONDS       Command timeout (1-300, default 15)
   --connect-timeout SEC    Connection and device authentication timeout (1-300, default 60)
   --json                  Machine-readable exec results, including failures
@@ -40,7 +56,7 @@ const USAGE: &str =
   session controls        {\"op\":\"status|reconnect|cancel|close\",\"id\":\"request-id\"}
                           Commands may set \"connection\":\"fresh\" to replace the transport
                           exec processes always create independent fresh connections
-  probe                   Authenticate and report transport and terminal capabilities; no command is run
+  probe                   Authenticate and report capabilities; no user script is run
   --relay                 Use a relay instead of trying a direct connection
   --account-user USER     Sign in to GeodomDesk for this invocation
   --admin-user USER       Authenticate to the target Windows administrator terminal
@@ -48,17 +64,58 @@ const USAGE: &str =
   --non-interactive       Read credentials from the environment or saved session, never prompt
 
 Environment: GEODOMDESK_ACCOUNT_PASSWORD, GEODOMDESK_DEVICE_PASSWORD,
-             GEODOMDESK_ADMIN_PASSWORD, GEODOMDESK_DEVICE_CODE";
+             GEODOMDESK_ADMIN_PASSWORD, GEODOMDESK_DEVICE_CODE, GEODOMDESK_SSH_PASSWORD";
 
+pub(super) enum Backend {
+    Terminal(Stream),
+    Ssh(super::ssh::Session),
+}
 pub(super) struct Connection {
     pub(super) id: String,
-    pub(super) stream: Stream,
+    pub(super) backend: Backend,
     pub(super) peer: PeerInfo,
     direct: bool,
     transport: &'static str,
     _keep_alive: Option<tokio::sync::mpsc::UnboundedSender<()>>,
     // The framed stream alone does not retain KCP's UDP pump.
     _kcp: Option<crate::kcp_stream::KcpStream>,
+    pub(super) setup_errors: Vec<super::stage::SetupError>,
+    connect_elapsed: Duration,
+}
+
+impl Connection {
+    pub(super) fn from_ssh(session:super::ssh::Session,elapsed:Duration)->Self {
+        Self{id:uuid::Uuid::new_v4().to_string(),peer:session.tunnel.peer.clone(),
+            setup_errors:session.tunnel.setup_errors.clone(),
+            backend:Backend::Ssh(session),direct:false,transport:"Relay",_keep_alive:None,_kcp:None,
+            connect_elapsed:elapsed}
+    }
+    pub(super) fn encrypted(&self)->bool {match &self.backend {Backend::Terminal(stream)=>stream.is_secured(),Backend::Ssh(_)=>true}}
+    pub(super) fn terminal_stream(&mut self)->ResultType<&mut Stream> {
+        match &mut self.backend {Backend::Terminal(stream)=>Ok(stream),Backend::Ssh(_)=>bail!("This connection uses SSH")}
+    }
+    pub(super) async fn receive_idle(&mut self)->ResultType<Message> {
+        match &mut self.backend {
+            Backend::Terminal(stream)=>receive(stream).await,
+            Backend::Ssh(session)=>{session.idle().await?;bail!("SSH channel closed")},
+        }
+    }
+    pub(super) fn command_error(
+        &self,
+        mut error: hbb_common::anyhow::Error,
+    ) -> hbb_common::anyhow::Error {
+        if error.downcast_ref::<super::stage::SetupHistory>().is_none()
+            && !self.setup_errors.is_empty()
+        {
+            error = error.context(super::stage::SetupHistory(self.setup_errors.clone()));
+        }
+        if super::stage::describe(&error).1 != "connect"
+            && error.downcast_ref::<super::stage::ConnectionId>().is_none()
+        {
+            error = error.context(super::stage::ConnectionId(self.id.clone()));
+        }
+        error
+    }
 }
 
 #[derive(Clone)]
@@ -71,23 +128,45 @@ pub(super) struct ConnectOptions {
     pub(super) timeout: u32,
     pub(super) expected_platform: Option<String>,
     pub(super) expected_hostname: Option<String>,
+    pub(super) ssh: Option<super::ssh::Options>,
 }
 impl ConnectOptions {
+    fn credential_bound(&self) -> bool {
+        self.admin.is_some() || !self.device_password.is_empty() || std::env::var_os("GEODOMDESK_DEVICE_CODE").is_some()
+    }
+    pub(super) async fn open_forward(&self, host:&str, port:u16)->ResultType<Connection> {
+        let started=Instant::now();
+        let (mut connection,history)=super::stage::connect_with_recovery(Duration::from_secs(self.timeout.into()), self.credential_bound(), || {
+            connect_for(self.id.clone(),self.relay,self.token.clone(),self.device_password.clone(),None,Some((host,port)))
+        }).await?;
+        connection.connect_elapsed=started.elapsed();connection.setup_errors=history;
+        for (expected,actual,label) in [(&self.expected_platform,&connection.peer.platform,"platform"),(&self.expected_hostname,&connection.peer.hostname,"hostname")] {
+            if let Some(expected)=expected {if !expected.eq_ignore_ascii_case(actual) {
+                return Err(connection.command_error(super::stage::wrap(anyhow!("Target {label} mismatch: expected {expected}, received {actual}"),"target","not_started")));
+            }}
+        }
+        Ok(connection)
+    }
     pub(super) async fn open(&self) -> ResultType<Connection> {
-        let connection = tokio::time::timeout(
-            Duration::from_secs(self.timeout.into()),
-            connect(
-                self.id.clone(),
-                self.relay,
-                self.token.clone(),
-                self.device_password.clone(),
-                self.admin.clone(),
-            ),
-        )
-        .await
-        .context("Timed out connecting or authenticating")
-        .and_then(|result| result)
-        .map_err(|error| super::stage::wrap(error, "connect", "not_started"))?;
+        if let Some(ssh)=&self.ssh {
+            return tokio::time::timeout(Duration::from_secs(self.timeout.into()),super::ssh::open(self,ssh)).await
+                .context("SSH setup timed out before script dispatch").and_then(|v|v)
+                .map_err(|error|super::stage::wrap(error,"ssh","not_started"));
+        }
+        let started = Instant::now();
+        let (mut connection, history) =
+            super::stage::connect_with_recovery(Duration::from_secs(self.timeout.into()), self.credential_bound(), || {
+                connect(
+                    self.id.clone(),
+                    self.relay,
+                    self.token.clone(),
+                    self.device_password.clone(),
+                    self.admin.clone(),
+                )
+            })
+            .await?;
+        connection.connect_elapsed = started.elapsed();
+        connection.setup_errors = history;
         for (expected, actual, label) in [
             (
                 &self.expected_platform,
@@ -102,11 +181,11 @@ impl ConnectOptions {
         ] {
             if let Some(expected) = expected {
                 if !expected.eq_ignore_ascii_case(actual) {
-                    return Err(super::stage::wrap(
+                    return Err(connection.command_error(super::stage::wrap(
                         anyhow!("Target {label} mismatch: expected {expected}, received {actual}"),
                         "target",
                         "not_started",
-                    ));
+                    )));
                 }
             }
         }
@@ -120,16 +199,27 @@ pub(super) fn connection_info(
     connecting: Duration,
     setup: Duration,
 ) -> serde_json::Value {
-    serde_json::json!({
+    let mut info = serde_json::json!({
         "event":"ready","connection_id":connection.id,"session_protocol":2,
+        "cli_version":crate::VERSION,"cli_build":crate::geodomdesk_update::BUILD_NUMBER,
         "platform":connection.peer.platform,"hostname":connection.peer.hostname,"version":connection.peer.version,
-        "direct":connection.direct,"transport":connection.transport,"encrypted":connection.stream.is_secured(),
+        "direct":connection.direct,"transport":connection.transport,"encrypted":connection.encrypted(),
         "connect_ms":connecting.as_millis(),"setup_ms":setup.as_millis(),
         "terminal":connection.peer.features.terminal,"terminal_exec":connection.peer.features.terminal_exec,
         "protocol":if connection.peer.features.terminal_exec {"exec"} else if connection.peer.features.terminal {"legacy"} else {"none"},
         "max_script_bytes":MAX_SCRIPT,"max_output_bytes":MAX_OUTPUT,"default_timeout":timeout,
         "session_controls":["status","reconnect","cancel","close"],"connection_policy":["reuse","fresh"]
-    })
+    });
+    if let Backend::Ssh(session)=&connection.backend {
+        info["protocol"]=serde_json::json!("ssh");
+        info["command_transport"]=serde_json::json!("ssh-relay");
+        info["tunnel"]=session.tunnel.snapshot();
+        info["terminal"]=serde_json::json!(true);
+    } else {info["command_transport"]=serde_json::json!("terminal");}
+    if !connection.setup_errors.is_empty() {
+        info["setup_errors"] = serde_json::json!(connection.setup_errors);
+    }
+    info
 }
 
 #[derive(Clone)]
@@ -180,7 +270,7 @@ pub(super) async fn receive(stream: &mut Stream) -> ResultType<Message> {
         let frame = stream
             .next()
             .await
-            .context("Remote device closed the connection")??;
+            .context(super::stage::PeerDisconnected)??;
         if frame.is_empty() {
             continue;
         }
@@ -199,10 +289,19 @@ async fn connect(
     relay: bool,
     token: String,
     device_password: String,
-    mut admin: Option<auth::Credentials>,
+    admin: Option<auth::Credentials>,
 ) -> ResultType<Connection> {
+    connect_for(id, relay, token, device_password, admin, None).await
+}
+
+async fn connect_for(
+    id: String, relay: bool, token: String, device_password: String,
+    mut admin: Option<auth::Credentials>, forward: Option<(&str,u16)>,
+) -> ResultType<Connection> {
+    let conn_type=if forward.is_some(){ConnType::PORT_FORWARD}else{ConnType::TERMINAL};
     let mut login = LoginConfigHandler::default();
-    login.initialize(id, ConnType::TERMINAL, None, relay, None, None, None);
+    login.initialize(id, conn_type, None, relay, None, None, None);
+    if let Some((host,port))=forward {login.port_forward=(host.to_owned(),i32::from(port));}
     login.terminal_one_shot = true;
     login.is_terminal_admin = admin.is_some();
     let is_admin = login.is_terminal_admin;
@@ -210,9 +309,9 @@ async fn connect(
     let id = interface.get_id();
     let key = crate::get_key(false).await;
     let ((mut stream, direct, pk, kcp, transport), (feedback, rendezvous)) =
-        Client::start(&id, &key, &token, ConnType::TERMINAL, interface.clone()).await?;
+        Client::start(&id, &key, &token, conn_type, interface.clone()).await?;
     if !stream.is_secured() {
-        bail!("Remote command execution requires an encrypted peer connection");
+        return Err(super::stage::wrap(anyhow!("Remote command execution requires an encrypted peer connection"), "security", "not_started"));
     }
     interface.update_direct(Some(direct));
     let mut trust = {
@@ -231,7 +330,7 @@ async fn connect(
                     .handle_hash(&device_password, hash, &mut trust, &mut stream)
                     .await
                 {
-                    bail!("Device authentication could not be started");
+                    return Err(super::stage::wrap(anyhow!("Device authentication could not be started"), "authentication", "not_started"));
                 }
                 if is_admin {
                     let credentials = admin.take().context("Administrator login was rejected")?;
@@ -248,28 +347,30 @@ async fn connect(
                         stream.set_max_packet_length(1024 * 1024);
                         return Ok(Connection {
                             id: uuid::Uuid::new_v4().to_string(),
-                            stream,
+                            backend:Backend::Terminal(stream),
                             peer: info,
                             direct,
                             transport,
                             _keep_alive: keep_alive,
                             _kcp: kcp,
+                            setup_errors: Vec::new(),
+                            connect_elapsed: Duration::ZERO,
                         });
                     }
                     Some(login_response::Union::Error(error)) => match error.as_str() {
                         client::REQUIRE_2FA if !sent_device_code => {
                             let mut message = Message::new();
                             message.set_auth_2fa(Auth2FA {
-                                code: auth::device_code()?,
+                                code: auth::device_code().map_err(|error| super::stage::wrap(error,"authentication","not_started"))?,
                                 ..Default::default()
                             });
                             stream.send(&message).await?;
                             sent_device_code = true;
                         }
                         client::LOGIN_MSG_PASSWORD_EMPTY | client::LOGIN_MSG_PASSWORD_WRONG => {
-                            bail!("{error}. Use --ask-device-password or set GEODOMDESK_DEVICE_PASSWORD");
+                            return Err(super::stage::wrap(anyhow!("{error}. Use --ask-device-password or set GEODOMDESK_DEVICE_PASSWORD"),"authentication","not_started"));
                         }
-                        _ => bail!("{error}"),
+                        _ => return Err(super::stage::wrap(anyhow!("{error}"),"authentication","not_started")),
                     },
                     _ => {}
                 }
@@ -322,7 +423,7 @@ pub(super) async fn receive_terminal_response(stream: &mut Stream) -> ResultType
 pub async fn run_cli(args: impl Iterator<Item = String>) -> ResultType<i32> {
     let args: Vec<_> = args.collect();
     let json = input::wants_json(&args)
-        || matches!(args.first().map(String::as_str), Some("session" | "probe"));
+        || matches!(args.first().map(String::as_str), Some("session" | "probe" | "tunnel"));
     let started = Instant::now();
     let result = run(args.into_iter(), started).await;
     if json {
@@ -340,16 +441,32 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
         return Ok(0);
     }
     if matches!(first.as_deref(), Some("--version" | "-V")) {
-        println!("GeodomDesk {}", crate::VERSION);
+        println!("GeodomDesk {}-r{}", crate::VERSION,crate::geodomdesk_update::BUILD_NUMBER);
         return Ok(0);
+    }
+    let tunnel=first.as_deref()==Some("tunnel");
+    if tunnel {
+        let op=args.next().context("Use tunnel open, list or close")?;
+        if matches!(op.as_str(),"--help"|"-h"){println!("{USAGE}");return Ok(0);}
+        if op!="open" {return super::tunnel::manage(&op,args).await;}
     }
     let session = first.as_deref() == Some("session");
     let probe = first.as_deref() == Some("probe");
-    if !session && !probe && first.as_deref() != Some("exec") {
+    if !session && !probe && !tunnel && first.as_deref() != Some("exec") {
         bail!("{USAGE}");
     }
     let (mut id, mut shell, mut script) = (None, None, None);
     let mut command = None;
+    let mut local_port=0u16;
+    let mut remote_port=None;
+    let mut remote_host="127.0.0.1".to_owned();
+    let mut command_transport="auto".to_owned();
+    let mut ssh_user=None;
+    let mut ssh_port=22u16;
+    let mut ssh_identity=None;
+    let mut ssh_known_hosts=None;
+    let mut ssh_strict=false;
+    let mut ask_ssh_password=false;
     let mut json = false;
     let mut connect_timeout = 60u32;
     let mut expected_platform = None;
@@ -367,6 +484,8 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
                 return Ok(0);
             }
             "--relay" => relay = true,
+            "--ssh-strict-host-key"=>ssh_strict=true,
+            "--ask-ssh-password"=>ask_ssh_password=true,
             "--json" => json = true,
             "--continue-on-error" => continue_on_error = true,
             "--ask-device-password" => ask_device_password = true,
@@ -414,6 +533,14 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
                         }
                         command = Some(value);
                     }
+                    "--transport"=>{if !matches!(value.as_str(),"auto"|"terminal"|"ssh"){bail!("transport must be auto, terminal or ssh");}command_transport=value;},
+                    "--ssh-user"=>{if ssh_user.is_some(){bail!("Specify --ssh-user only once");}ssh_user=Some(value);},
+                    "--ssh-port"=>ssh_port=value.parse().context("Invalid SSH port")?,
+                    "--ssh-identity"=>ssh_identity=Some(std::path::PathBuf::from(value)),
+                    "--ssh-known-hosts"=>ssh_known_hosts=Some(std::path::PathBuf::from(value)),
+                    "--local-port" if tunnel=>local_port=value.parse().context("Invalid local port")?,
+                    "--remote-port" if tunnel=>{if remote_port.is_some(){bail!("Specify --remote-port only once");}remote_port=Some(value.parse::<u16>().context("Invalid remote port")?);},
+                    "--remote-host" if tunnel=>remote_host=value,
                     "--connect-timeout" => {
                         connect_timeout = value.parse().context("Invalid connection timeout")?
                     }
@@ -425,9 +552,11 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
             }
         }
     }
-    let id = id
-        .filter(|id| !id.trim().is_empty())
-        .context("Missing --id")?;
+    let id = id.map(|id|id.trim().to_owned())
+        .filter(|id| !id.is_empty()).context("Missing --id")?;
+    let id=if id.chars().all(|c|c.is_ascii_digit() || c.is_ascii_whitespace()) {
+        id.chars().filter(|c|!c.is_ascii_whitespace()).collect()
+    } else {id};
     if !(1..=super::MAX_TIMEOUT).contains(&timeout) {
         bail!(
             "Timeout must be between 1 and {} seconds",
@@ -437,7 +566,10 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
     if !(1..=300).contains(&connect_timeout) {
         bail!("Connection timeout must be between 1 and 300 seconds");
     }
-    if (session || probe) && (script.is_some() || command.is_some()) {
+    if tunnel && (remote_port.unwrap_or(0)==0 || remote_host.trim().is_empty() || remote_host.len()>253 || remote_host.chars().any(char::is_control)) {bail!("Specify a valid --remote-host and --remote-port (1-65535)");}
+    if tunnel && command_transport!="auto" {bail!("tunnel open maps TCP ports; select SSH with exec or session --transport ssh");}
+    if tunnel && (shell.is_some() || admin_user.is_some() || continue_on_error) {bail!("tunnel open accepts port mappings, not shell options");}
+    if (session || probe || tunnel) && (script.is_some() || command.is_some()) {
         bail!("Only exec accepts --script or --command");
     }
     if probe && shell.is_some() {
@@ -457,11 +589,26 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
             bail!("Expected target properties must not be empty");
         }
     }
+    let use_ssh=!tunnel && (command_transport=="ssh" || (command_transport=="auto" && shell==Some(ExecShell::BASH)));
+    if use_ssh && (ssh_port==0 || admin_user.is_some() || shell.is_some_and(|shell|shell!=ExecShell::BASH)) {bail!("SSH transport requires Bash, a valid SSH port and a Linux login");}
+    if !use_ssh && (ssh_user.is_some() || ssh_identity.is_some() || ssh_known_hosts.is_some() || ssh_strict || ask_ssh_password || ssh_port!=22) {bail!("SSH options require --shell bash or --transport ssh");}
+    if use_ssh && shell.is_none(){shell=Some(ExecShell::BASH);}
+    let ssh=if use_ssh {
+        let password=match std::env::var("GEODOMDESK_SSH_PASSWORD") {
+            Ok(value)=>Some(value),Err(std::env::VarError::NotPresent) if ask_ssh_password=>{
+                if non_interactive {bail!("Set GEODOMDESK_SSH_PASSWORD for non-interactive use");}
+                Some(rpassword::prompt_password("Target SSH password: ")?)
+            },Err(std::env::VarError::NotPresent)=>None,Err(std::env::VarError::NotUnicode(_))=>bail!("GEODOMDESK_SSH_PASSWORD must be valid Unicode"),
+        };
+        let mut askpass=std::env::current_exe()?;askpass.set_file_name(if cfg!(windows){"geodomdesk-cli.exe"}else{"geodomdesk-cli"});
+        Some(super::ssh::Options{username:ssh_user,port:ssh_port,identity:ssh_identity,
+            known_hosts:ssh_known_hosts.unwrap_or_else(||hbb_common::config::Config::path("cli-ssh-known_hosts")),strict_host_key:ssh_strict,password,askpass})
+    } else {None};
     let is_admin = admin_user.is_some();
     if is_admin && shell == Some(ExecShell::BASH) {
         bail!("--admin-user requires powershell or pwsh");
     }
-    let request = if session || probe {
+    let request = if session || probe || tunnel {
         None
     } else {
         let shell = shell.context("Missing --shell")?;
@@ -495,14 +642,14 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
         timeout: connect_timeout,
         expected_platform,
         expected_hostname,
+        ssh,
     };
+    if tunnel {
+        return super::tunnel::Managed::start(&options,local_port,remote_host,remote_port.context("Missing --remote-port")?,"port proxy").await?.serve().await;
+    }
     let mut connection = options.open().await?;
-    let info = connection_info(
-        &connection,
-        timeout,
-        connecting.elapsed(),
-        started.elapsed(),
-    );
+    let setup_elapsed = started.elapsed();
+    let info = connection_info(&connection, timeout, connecting.elapsed(), setup_elapsed);
     if probe {
         output::write(info)?;
         return Ok(0);
@@ -521,12 +668,17 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
     }
     let execution = Instant::now();
     let request = request.context("Missing command")?;
-    let result = session::execute(&mut connection, request, 1)
+    let result = session::execute_with_setup_recovery(&mut connection, &options, request, 1)
         .await
-        .map_err(|error| error.context(super::stage::ConnectionId(connection.id.clone())))?;
+        .map_err(|error| connection.command_error(error))?;
     if json {
         let mut value = output::result(None, &result, execution.elapsed());
-        value["connection"] = info;
+        value["connection"] = connection_info(
+            &connection,
+            timeout,
+            connection.connect_elapsed,
+            setup_elapsed,
+        );
         output::write(value)?;
         return Ok(if result.error.is_empty() {
             result.exit_code
@@ -595,6 +747,9 @@ mod tests {
                 vec!["probe", "--id", "1", "--expect-hostname", " "],
                 "Expected target properties must not be empty",
             ),
+            (vec!["exec","--id","1","--transport","invalid"],"transport must be auto, terminal or ssh"),
+            (vec!["exec","--id","1","--transport","ssh","--shell","powershell"],"SSH transport requires Bash"),
+            (vec!["tunnel","open","--id","1","--remote-port","0"],"Specify a valid --remote-host and --remote-port"),
             (
                 vec!["exec", "--id", "1", "--continue-on-error"],
                 "--continue-on-error applies only to session",

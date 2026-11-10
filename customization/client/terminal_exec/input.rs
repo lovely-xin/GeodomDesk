@@ -45,6 +45,8 @@ pub(super) fn wants_json(args: &[String]) -> bool {
             "--json" => return true,
             "--relay"
             | "--ask-device-password"
+            | "--ask-ssh-password"
+            | "--ssh-strict-host-key"
             | "--non-interactive"
             | "--help"
             | "-h"
@@ -89,5 +91,18 @@ mod tests {
             result.unwrap().is_err(),
             "A FIFO must be refused, not read as a script"
         );
+    }
+}
+
+
+#[cfg(test)]
+mod json_flag_tests {
+    use super::*;
+    #[test]
+    fn ssh_switches_preserve_json_failures_without_treating_script_text_as_flags() {
+        for args in [vec!["exec","--ask-ssh-password","--json"],vec!["exec","--ssh-strict-host-key","--json"]] {
+            assert!(wants_json(&args.into_iter().map(str::to_owned).collect::<Vec<_>>()));
+        }
+        assert!(!wants_json(&["exec","--command","--json"].into_iter().map(str::to_owned).collect::<Vec<_>>()));
     }
 }
