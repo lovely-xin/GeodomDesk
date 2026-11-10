@@ -230,9 +230,12 @@ pub(crate) async fn post_terminal_login(body: String) -> ResultType<(u16, String
 
     # CLI mappings remain process-owned: listing them never starts a second GUI listener.
     ffi = changes["src/flutter_ffi.rs"]
-    ffi = replace_once(ffi, "pub fn main_get_peer_sync(id: String) -> SyncReturn<String> {", r'''pub async fn main_list_cli_tunnels(id: String) -> String {
+    ffi = replace_once(ffi, "pub fn main_get_peer_sync(id: String) -> SyncReturn<String> {", r'''pub fn main_list_cli_tunnels(id: String) -> String {
     #[cfg(any(windows, target_os = "linux"))]
-    return match crate::terminal_exec::list_tunnels(&id).await {
+    // FRB 1.x runs ordinary functions on its worker pool and returns a Dart Future.
+    return match hbb_common::tokio::runtime::Builder::new_current_thread()
+        .enable_all().build().map_err(hbb_common::anyhow::Error::from)
+        .and_then(|runtime| runtime.block_on(crate::terminal_exec::list_tunnels(&id))) {
         Ok(value) => value.to_string(),
         Err(error) => serde_json::json!({"error":format!("{error:#}")}).to_string(),
     };
@@ -240,9 +243,12 @@ pub(crate) async fn post_terminal_login(body: String) -> ResultType<(u16, String
     "[]".to_owned()
 }
 
-pub async fn main_close_cli_tunnel(id: String, tunnel_id: String) -> String {
+pub fn main_close_cli_tunnel(id: String, tunnel_id: String) -> String {
     #[cfg(any(windows, target_os = "linux"))]
-    return match crate::terminal_exec::close_tunnel(&id, &tunnel_id).await {
+    // FRB 1.x runs ordinary functions on its worker pool and returns a Dart Future.
+    return match hbb_common::tokio::runtime::Builder::new_current_thread()
+        .enable_all().build().map_err(hbb_common::anyhow::Error::from)
+        .and_then(|runtime| runtime.block_on(crate::terminal_exec::close_tunnel(&id, &tunnel_id))) {
         Ok(value) => value.to_string(),
         Err(error) => serde_json::json!({"error":format!("{error:#}")}).to_string(),
     };

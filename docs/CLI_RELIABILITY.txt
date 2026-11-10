@@ -153,3 +153,8 @@ SSH 首次启动预算包括隧道认证、SSH 登录和工作进程 ready，不
 实现参考：OpenSSH ssh(1) 与 ssh_config(5) 官方手册说明 SSH_ASKPASS、HostKeyAlias、StrictHostKeyChecking 和保活行为：
 https://man.openbsd.org/ssh
 https://man.openbsd.org/ssh_config
+
+十三、完整客户端的界面接口验证
+
+本项目的 FRB 1.x 普通 Rust 接口在工作线程执行，并向 Dart 返回 Future。隧道列表与关闭接口返回具体 String，在该工作线程内使用短生命周期的当前线程运行时等待本地控制调用；不要直接暴露 async Rust 函数，让生成器把 Future 当成字符串返回。
+验证必须包含启用 flutter 功能、使用 CI 正式生成的桥接源码编译完整核心库。只通过不含 GUI 的 CLI 模块测试、只生成桥接文件或只渲染隔离接口页面，都不足以证明完整客户端能编译。随后仍需各平台正式构建与发布包实测。
