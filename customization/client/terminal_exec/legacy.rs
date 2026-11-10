@@ -13,6 +13,15 @@ const LINE_BYTES: usize = 512;
 const BATCH_LINES: usize = 16;
 const PREPARE_TIMEOUT: Duration = Duration::from_secs(15);
 
+fn input_line_bytes(platform: &str) -> usize {
+    if platform == "Windows" {
+        // Older Windows consoles truncate ReadLine input at 254 characters.
+        128
+    } else {
+        LINE_BYTES
+    }
+}
+
 fn encode_powershell(script: &str) -> String {
     crate::encode64(
         script
@@ -53,7 +62,13 @@ fn command(
             "__DIGEST__",
             &hex::encode(sha256::hash(payload.as_bytes()).0),
         )
-        .replace("__LINES__", &payload.len().div_ceil(LINE_BYTES).to_string())
+        .replace(
+            "__LINES__",
+            &payload
+                .len()
+                .div_ceil(input_line_bytes(platform))
+                .to_string(),
+        )
         .replace("__BATCH__", &BATCH_LINES.to_string())
         .replace(
             "__CORE__",
@@ -96,8 +111,10 @@ pub(super) async fn exchange(
 ) -> ResultType<TerminalExecResult> {
     let marker = format!("GD{}", uuid::Uuid::new_v4().simple());
     let (launcher, payload) = command(platform, &request, &marker)?;
+    let line_bytes = input_line_bytes(platform);
     let mut terminal = Transcript {
         terminal_id,
+        windows_console: platform == "Windows",
         ..Default::default()
     };
     let result: ResultType<TerminalExecResult> = async {
@@ -141,15 +158,15 @@ pub(super) async fn exchange(
         .and_then(|result| result)
         .map_err(|error| super::stage::wrap(error, "prepare", "not_started"))?;
 
-        for batch in payload.as_bytes().chunks(LINE_BYTES * BATCH_LINES) {
+        for batch in payload.as_bytes().chunks(line_bytes * BATCH_LINES) {
             tokio::time::timeout(PREPARE_TIMEOUT, async {
                 let mut input = Vec::with_capacity(batch.len() + BATCH_LINES);
-                for line in batch.chunks(LINE_BYTES) {
+                for line in batch.chunks(line_bytes) {
                     input.extend_from_slice(line);
                     input.push(b'\r');
                 }
                 send_input(stream, terminal_id, input).await?;
-                if batch.len() > LINE_BYTES * (BATCH_LINES - 1) {
+                if batch.len() > line_bytes * (BATCH_LINES - 1) {
                     terminal.until(stream, &marker, ":ACK", None).await?;
                 }
                 Ok::<(), hbb_common::anyhow::Error>(())
@@ -211,6 +228,7 @@ pub(super) async fn exchange(
 #[derive(Default)]
 struct Transcript {
     terminal_id: i32,
+    windows_console: bool,
     frame: vec::IntoIter<u8>,
     escape: Escape,
 }
@@ -262,6 +280,15 @@ impl Transcript {
         let mut size = 0;
         loop {
             let line = self.line(stream).await?;
+            // Older Windows consoles leave repaint residue around the protocol record.
+            let line = if self.windows_console {
+                line.windows(marker.len())
+                    .position(|part| part == marker.as_bytes())
+                    .map(|start| line[start..].trim_ascii_end())
+                    .unwrap_or(&line)
+            } else {
+                &line
+            };
             if let Some(record) = line.strip_prefix(marker.as_bytes()) {
                 if let Some(error) = record.strip_prefix(b":ERROR:") {
                     bail!("{}", String::from_utf8_lossy(error));
@@ -372,7 +399,7 @@ mod tests {
         let marker = format!("GD{}", uuid::Uuid::new_v4().simple());
         let request = TerminalExecRequest {
             shell: ExecShell::WINDOWS_POWERSHELL.into(),
-            script: b"Write-Output ('W' * 200)".to_vec().into(),
+            script: b"Write-Output ('W' * 1200)".to_vec().into(),
             timeout_seconds: 15,
             ..Default::default()
         };
@@ -388,10 +415,13 @@ mod tests {
             .unwrap();
         let data = payload
             .as_bytes()
-            .chunks(LINE_BYTES)
+            .chunks(input_line_bytes("Windows"))
             .flat_map(|chunk| chunk.iter().copied().chain(std::iter::once(b'\n')))
             .collect::<Vec<_>>();
-        child.stdin.take().unwrap().write_all(&data).unwrap();
+        let mut input = child.stdin.take().unwrap();
+        input.write_all(&data).unwrap();
+        input.write_all(b"GDOUTPUT\n").unwrap();
+        drop(input);
         let result = child.wait_with_output().unwrap();
         let output = String::from_utf8(result.stdout).unwrap();
         let records = output
@@ -407,7 +437,30 @@ mod tests {
             records.iter().all(|line| line.len() <= 160),
             "A protocol record must fit the actual ConPTY width"
         );
+        let received = records
+            .iter()
+            .flat_map(|line| crate::decode64(line.split_once(":DATA:").unwrap().1).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(received, format!("{}\n", "W".repeat(1200)).as_bytes());
+        assert!(output.contains(&format!("{marker}:WINDOW")));
         assert!(output.contains(&format!("{marker}:END:0")));
+    }
+
+    #[test]
+    fn regression_windows_upload_survives_legacy_console_line_limit() {
+        let request = TerminalExecRequest {
+            shell: ExecShell::WINDOWS_POWERSHELL.into(),
+            script: vec![b'#'; super::super::MAX_SCRIPT].into(),
+            timeout_seconds: 15,
+            ..Default::default()
+        };
+        let (_, payload) = command("Windows", &request, "GDUPLOAD").unwrap();
+        let received = payload
+            .as_bytes()
+            .chunks(input_line_bytes("Windows"))
+            .flat_map(|line| line.iter().copied().take(254))
+            .collect::<Vec<_>>();
+        assert_eq!(sha256::hash(&received), sha256::hash(payload.as_bytes()));
     }
 
     const TERMINAL_ID: i32 = 1;
@@ -415,7 +468,7 @@ mod tests {
     use hbb_common::{sodiumoxide::crypto::secretbox, tcp::FramedStream};
 
     #[tokio::test]
-    async fn legacy_transcript_decodes_split_compressed_output_and_ignores_echo() {
+    async fn legacy_windows_transcript_decodes_repainted_split_compressed_output() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = listener.local_addr().unwrap();
         let (client, accepted) =
@@ -429,8 +482,8 @@ mod tests {
         let server = async {
             for raw in [
                 "echoed script\r\n\x1b[",
-                "1mGDtest:START\x1b[0m\r\nGDtest:DA",
-                "TA:5L2g5aW9\r\nGDtest:END:7\r\n",
+                "1mGDtest:START\x1b[0m\r\n\rJJGDtest:DA",
+                "TA:5L2g5aW9 \r\n\rWGDtest:END:7 \r\n",
             ] {
                 let mut response = TerminalResponse::new();
                 response.set_data(TerminalData {
@@ -447,6 +500,7 @@ mod tests {
         let controller = async {
             let mut terminal = Transcript {
                 terminal_id: TERMINAL_ID,
+                windows_console: true,
                 ..Default::default()
             };
             terminal

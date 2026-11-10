@@ -46,13 +46,14 @@ $script | & $shell -NoLogo -NoProfile -NonInteractive -EncodedCommand $parts[0] 
     # Base64 plus the marker must fit the 160-column ConPTY to preserve scrollback.
     for ($offset = 0; $offset -lt $bytes.Length; $offset += 84) {
         $record = [Convert]::ToBase64String($bytes, $offset, [Math]::Min(84, $bytes.Length - $offset))
-        [Console]::WriteLine("${marker}:DATA:$record")
+        [Console]::WriteLine("`n${marker}:DATA:$record")
         $window++
-        if ($window % 64 -eq 0) {
-            [Console]::WriteLine("${marker}:WINDOW")
+        # Keep records and separators inside the old 24-row console viewport.
+        if ($window % 8 -eq 0) {
+            [Console]::WriteLine("`n${marker}:WINDOW`n")
             if ([Console]::ReadLine() -ne 'GDOUTPUT') { exit 1 }
         }
     }
 }
 $code = $LASTEXITCODE
-[Console]::WriteLine("`n${marker}:END:$code")
+[Console]::WriteLine("`n${marker}:END:$code`n")
