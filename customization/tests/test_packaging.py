@@ -145,6 +145,7 @@ class PackagingTests(unittest.TestCase):
             "src/terminal_exec/cli.rs",
             "src/terminal_exec/exec_bootstrap.ps1",
             "src/terminal_exec/legacy.rs",
+            "src/terminal_exec/session.rs",
             "src/terminal_exec/legacy_bootstrap.ps1",
             "src/terminal_exec/legacy_bootstrap.sh",
             "src/terminal_exec/windows.rs",

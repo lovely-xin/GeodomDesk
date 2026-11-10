@@ -9,9 +9,9 @@ use hbb_common::{
 };
 use std::{time::Duration, vec};
 
-const TERMINAL_ID: i32 = 1;
 const LINE_BYTES: usize = 512;
 const BATCH_LINES: usize = 16;
+const PREPARE_TIMEOUT: Duration = Duration::from_secs(15);
 
 fn encode_powershell(script: &str) -> String {
     crate::encode64(
@@ -78,10 +78,10 @@ fn command(
     Ok((launcher, payload))
 }
 
-async fn send_input(stream: &mut Stream, data: Vec<u8>) -> ResultType<()> {
+async fn send_input(stream: &mut Stream, terminal_id: i32, data: Vec<u8>) -> ResultType<()> {
     let mut action = TerminalAction::new();
     action.set_data(TerminalData {
-        terminal_id: TERMINAL_ID,
+        terminal_id,
         data: data.into(),
         ..Default::default()
     });
@@ -92,15 +92,19 @@ pub(super) async fn exchange(
     stream: &mut Stream,
     platform: &str,
     request: TerminalExecRequest,
+    terminal_id: i32,
 ) -> ResultType<TerminalExecResult> {
     let marker = format!("GD{}", uuid::Uuid::new_v4().simple());
     let (launcher, payload) = command(platform, &request, &marker)?;
-    let mut terminal = Transcript::default();
-    let result = async {
-        tokio::time::timeout(Duration::from_secs(15), async {
+    let mut terminal = Transcript {
+        terminal_id,
+        ..Default::default()
+    };
+    let result: ResultType<TerminalExecResult> = async {
+        tokio::time::timeout(PREPARE_TIMEOUT, async {
             let mut open = TerminalAction::new();
             open.set_open(OpenTerminal {
-                terminal_id: TERMINAL_ID,
+                terminal_id,
                 rows: 24,
                 cols: 160,
                 ..Default::default()
@@ -108,7 +112,7 @@ pub(super) async fn exchange(
             cli::send_terminal_action(stream, open).await?;
             loop {
                 match cli::receive_terminal_response(stream).await?.union {
-                    Some(Union::Opened(opened)) if opened.terminal_id == TERMINAL_ID => {
+                    Some(Union::Opened(opened)) if opened.terminal_id == terminal_id => {
                         if !opened.success {
                             bail!("Cannot open legacy terminal: {}", opened.message);
                         }
@@ -118,26 +122,37 @@ pub(super) async fn exchange(
                     _ => {}
                 }
             }
-            send_input(stream, format!("{launcher}\r").into_bytes()).await?;
+            send_input(stream, terminal_id, format!("{launcher}\r").into_bytes()).await?;
             terminal.until(stream, &marker, ":READY", None).await?;
-            for batch in payload.as_bytes().chunks(LINE_BYTES * BATCH_LINES) {
-                let mut input = Vec::with_capacity(batch.len() + BATCH_LINES);
-                for line in batch.chunks(LINE_BYTES) {
-                    input.extend_from_slice(line);
-                    input.push(b'\r');
-                }
-                send_input(stream, input).await?;
-                if batch.len() > LINE_BYTES * (BATCH_LINES - 1) {
-                    terminal.until(stream, &marker, ":ACK", None).await?;
-                }
-            }
             Ok::<(), hbb_common::anyhow::Error>(())
         })
         .await
         .context("Timed out preparing legacy terminal")??;
 
+        for batch in payload.as_bytes().chunks(LINE_BYTES * BATCH_LINES) {
+            tokio::time::timeout(PREPARE_TIMEOUT, async {
+                let mut input = Vec::with_capacity(batch.len() + BATCH_LINES);
+                for line in batch.chunks(LINE_BYTES) {
+                    input.extend_from_slice(line);
+                    input.push(b'\r');
+                }
+                send_input(stream, terminal_id, input).await?;
+                if batch.len() > LINE_BYTES * (BATCH_LINES - 1) {
+                    terminal.until(stream, &marker, ":ACK", None).await?;
+                }
+                Ok::<(), hbb_common::anyhow::Error>(())
+            })
+            .await
+            .context("Timed out uploading legacy script")??;
+        }
+        tokio::time::timeout(
+            PREPARE_TIMEOUT,
+            terminal.until(stream, &marker, ":START", None),
+        )
+        .await
+        .context("Timed out starting legacy command")??;
+
         tokio::time::timeout(Duration::from_secs(request.timeout_seconds.into()), async {
-            terminal.until(stream, &marker, ":START", None).await?;
             let mut output = Vec::new();
             let status = terminal
                 .until(stream, &marker, ":END:", Some(&mut output))
@@ -157,19 +172,24 @@ pub(super) async fn exchange(
     .await;
     let mut close = TerminalAction::new();
     close.set_close(CloseTerminal {
-        terminal_id: TERMINAL_ID,
+        terminal_id,
         ..Default::default()
     });
-    let _ = tokio::time::timeout(
+    let closed = tokio::time::timeout(
         Duration::from_secs(1),
         cli::send_terminal_action(stream, close),
     )
-    .await;
-    result
+    .await
+    .context("Timed out closing legacy terminal")
+    .and_then(|result| result);
+    let result = result?;
+    closed?;
+    Ok(result)
 }
 
 #[derive(Default)]
 struct Transcript {
+    terminal_id: i32,
     frame: vec::IntoIter<u8>,
     escape: Escape,
 }
@@ -193,7 +213,7 @@ impl Transcript {
                 }
             }
             match cli::receive_terminal_response(stream).await?.union {
-                Some(Union::Data(data)) if data.terminal_id == TERMINAL_ID => {
+                Some(Union::Data(data)) if data.terminal_id == self.terminal_id => {
                     let bytes = if data.compressed {
                         zstd::bulk::decompress(&data.data, MAX_OUTPUT)
                             .context("Invalid compressed legacy terminal output")?
@@ -202,7 +222,7 @@ impl Transcript {
                     };
                     self.frame = bytes.into_iter();
                 }
-                Some(Union::Closed(closed)) if closed.terminal_id == TERMINAL_ID => {
+                Some(Union::Closed(closed)) if closed.terminal_id == self.terminal_id => {
                     bail!("Legacy terminal closed before reporting the command result");
                 }
                 Some(Union::Error(error)) => bail!("{}", error.message),
@@ -281,6 +301,7 @@ impl Escape {
 #[cfg(test)]
 mod tests {
     use super::*;
+    const TERMINAL_ID: i32 = 1;
     use base::message_proto::{Message, TerminalResponse};
     use hbb_common::{sodiumoxide::crypto::secretbox, tcp::FramedStream};
 
@@ -315,7 +336,10 @@ mod tests {
             }
         };
         let controller = async {
-            let mut terminal = Transcript::default();
+            let mut terminal = Transcript {
+                terminal_id: TERMINAL_ID,
+                ..Default::default()
+            };
             terminal
                 .until(&mut client, "GDtest", ":START", None)
                 .await
@@ -329,6 +353,139 @@ mod tests {
             assert_eq!(code, b"7");
         };
         tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::join!(server, controller);
+        })
+        .await
+        .unwrap();
+    }
+    #[tokio::test]
+    async fn legacy_slow_upload_and_consecutive_commands_reuse_the_stream() {
+        use base::message_proto::{TerminalClosed, TerminalOpened};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let (client, accepted) =
+            tokio::join!(tokio::net::TcpStream::connect(endpoint), listener.accept());
+        let (peer, address) = accepted.unwrap();
+        let mut peer = Stream::Tcp(FramedStream::from(peer, address));
+        let mut client = Stream::Tcp(FramedStream::from(client.unwrap(), endpoint));
+        let key = secretbox::gen_key();
+        peer.set_key(key.clone());
+        client.set_key(key);
+        let requests: Vec<_> = [
+            vec![b'#'; super::super::MAX_SCRIPT],
+            b"printf second".to_vec(),
+        ]
+        .into_iter()
+        .map(|script| TerminalExecRequest {
+            shell: ExecShell::BASH.into(),
+            script: script.into(),
+            timeout_seconds: 1,
+            ..Default::default()
+        })
+        .collect();
+        let server = async {
+            for (index, request) in requests.iter().enumerate() {
+                let id = index as i32 + 17;
+                let Some(base::message_proto::message::Union::TerminalAction(mut action)) =
+                    cli::receive(&mut peer).await.unwrap().union
+                else {
+                    panic!("Expected terminal open")
+                };
+                assert_eq!(action.take_open().terminal_id, id);
+                let mut response = TerminalResponse::new();
+                response.set_opened(TerminalOpened {
+                    terminal_id: id,
+                    success: true,
+                    ..Default::default()
+                });
+                let mut message = Message::new();
+                message.set_terminal_response(response);
+                peer.send(&message).await.unwrap();
+                let Some(base::message_proto::message::Union::TerminalAction(mut action)) =
+                    cli::receive(&mut peer).await.unwrap().union
+                else {
+                    panic!("Expected bootstrap")
+                };
+                let launcher = String::from_utf8(action.take_data().data.to_vec()).unwrap();
+                let encoded = launcher
+                    .split("printf %s ")
+                    .nth(1)
+                    .unwrap()
+                    .split_whitespace()
+                    .next()
+                    .unwrap();
+                let bootstrap = String::from_utf8(crate::decode64(encoded).unwrap()).unwrap();
+                let marker = bootstrap
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .strip_prefix("gd_marker=")
+                    .unwrap();
+                let send = |text: String| {
+                    let mut response = TerminalResponse::new();
+                    response.set_data(TerminalData {
+                        terminal_id: id,
+                        data: text.into_bytes().into(),
+                        ..Default::default()
+                    });
+                    let mut message = Message::new();
+                    message.set_terminal_response(response);
+                    message
+                };
+                peer.send(&send(format!("{marker}:READY\n"))).await.unwrap();
+                let (_, payload) = command("Linux", request, marker).unwrap();
+                for batch in payload.as_bytes().chunks(LINE_BYTES * BATCH_LINES) {
+                    let Some(base::message_proto::message::Union::TerminalAction(mut action)) =
+                        cli::receive(&mut peer).await.unwrap().union
+                    else {
+                        panic!("Expected script batch")
+                    };
+                    let data = action.take_data();
+                    assert_eq!(data.terminal_id, id);
+                    assert_eq!(
+                        data.data
+                            .iter()
+                            .copied()
+                            .filter(|byte| *byte != b'\r')
+                            .collect::<Vec<_>>(),
+                        batch
+                    );
+                    if batch.len() > LINE_BYTES * (BATCH_LINES - 1) {
+                        tokio::time::sleep(Duration::from_millis(1600)).await;
+                        peer.send(&send(format!("{marker}:ACK\n"))).await.unwrap();
+                    }
+                }
+                peer.send(&send(format!(
+                    "{marker}:START\n{marker}:DATA:5L2g5aW9\n{marker}:END:7\n"
+                )))
+                .await
+                .unwrap();
+                let Some(base::message_proto::message::Union::TerminalAction(mut action)) =
+                    cli::receive(&mut peer).await.unwrap().union
+                else {
+                    panic!("Expected terminal close")
+                };
+                assert_eq!(action.take_close().terminal_id, id);
+                let mut response = TerminalResponse::new();
+                response.set_closed(TerminalClosed {
+                    terminal_id: id,
+                    ..Default::default()
+                });
+                let mut message = Message::new();
+                message.set_terminal_response(response);
+                peer.send(&message).await.unwrap();
+            }
+        };
+        let controller = async {
+            for (index, request) in requests.iter().enumerate() {
+                let result = exchange(&mut client, "Linux", request.clone(), index as i32 + 17)
+                    .await
+                    .unwrap();
+                assert_eq!(result.stdout.as_ref(), "你好".as_bytes());
+                assert_eq!(result.exit_code, 7);
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(25), async {
             tokio::join!(server, controller);
         })
         .await

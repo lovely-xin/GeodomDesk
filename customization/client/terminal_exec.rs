@@ -2,6 +2,7 @@
 mod auth;
 mod cli;
 mod legacy;
+mod session;
 #[cfg(windows)]
 mod windows;
 
@@ -220,18 +221,27 @@ mod tests {
         server.set_key(key.clone());
         client.set_key(key);
         let peer = async {
-            let Some(message::Union::TerminalAction(mut action)) =
-                cli::receive(&mut server).await.unwrap().union
-            else {
-                panic!("Expected terminal action");
-            };
-            assert!(action.has_exec());
-            serve(&mut server, action.take_exec()).await.unwrap();
+            for _ in 0..2 {
+                let Some(message::Union::TerminalAction(mut action)) =
+                    cli::receive(&mut server).await.unwrap().union
+                else {
+                    panic!("Expected terminal action");
+                };
+                assert!(action.has_exec());
+                serve(&mut server, action.take_exec()).await.unwrap();
+            }
         };
-        let command = cli::exchange(
-            &mut client,
-            request("sleep 5.2; printf '你好'; printf '错误' >&2; exit 7", 8),
-        );
+        let command = async {
+            let first = cli::exchange(&mut client, request("sleep 5.2; printf 'first'", 8))
+                .await
+                .unwrap();
+            assert_eq!(first.stdout.as_ref(), b"first");
+            cli::exchange(
+                &mut client,
+                request("printf '你好'; printf '错误' >&2; exit 7", 2),
+            )
+            .await
+        };
         let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
             tokio::join!(command, peer)
         })

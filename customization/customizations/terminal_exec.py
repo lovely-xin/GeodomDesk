@@ -13,6 +13,7 @@ SOURCES = (
     "terminal_exec/cli.rs",
     "terminal_exec/exec_bootstrap.ps1",
     "terminal_exec/legacy.rs",
+    "terminal_exec/session.rs",
     "terminal_exec/legacy_bootstrap.ps1",
     "terminal_exec/legacy_bootstrap.sh",
     "terminal_exec/windows.rs",

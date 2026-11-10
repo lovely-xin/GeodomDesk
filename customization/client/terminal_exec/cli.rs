@@ -1,4 +1,4 @@
-use super::{auth, legacy, validate, MAX_SCRIPT};
+use super::{auth, legacy, session, validate, MAX_SCRIPT};
 use crate::{
     client::{self, Client, Data, Interface, LoginConfigHandler},
     trusted_devices::client::Session,
@@ -23,7 +23,11 @@ use std::{
 
 const USAGE: &str =
     "Usage: geodomdesk-cli exec --id ID --shell bash|powershell|pwsh --script PATH|-
-  --timeout SECONDS       Command timeout (1-300, default 30)
+       geodomdesk-cli session --id ID [authentication options]
+  session                 Read JSON Lines from stdin and reuse one authenticated connection
+                          {\"shell\":\"bash\",\"script\":\"pwd\",\"timeout\":120}
+                          Results: JSON Lines; stdout/stderr are Base64 encoded
+  --timeout SECONDS       Command timeout (1-300, default 15)
   --relay                 Use a relay instead of trying a direct connection
   --account-user USER     Sign in to GeodomDesk for this invocation
   --admin-user USER       Authenticate to the target Windows administrator terminal
@@ -220,12 +224,13 @@ pub async fn run_cli(mut args: impl Iterator<Item = String>) -> ResultType<i32> 
         println!("GeodomDesk {}", crate::VERSION);
         return Ok(0);
     }
-    if first.as_deref() != Some("exec") {
+    let session = first.as_deref() == Some("session");
+    if !session && first.as_deref() != Some("exec") {
         bail!("{USAGE}");
     }
     let (mut id, mut shell, mut script) = (None, None, None);
     let (mut account_user, mut admin_user) = (None, None);
-    let mut timeout = 30u32;
+    let mut timeout = 15u32;
     let mut relay = false;
     let mut ask_device_password = false;
     let mut non_interactive = false;
@@ -262,27 +267,42 @@ pub async fn run_cli(mut args: impl Iterator<Item = String>) -> ResultType<i32> 
         }
     }
     let id = id.filter(|id| !id.is_empty()).context("Missing --id")?;
-    let shell = shell.context("Missing --shell")?;
-    if admin_user.is_some() && shell == ExecShell::BASH {
+    if !(1..=super::MAX_TIMEOUT).contains(&timeout) {
+        bail!(
+            "Timeout must be between 1 and {} seconds",
+            super::MAX_TIMEOUT
+        );
+    }
+    if session && (shell.is_some() || script.is_some()) {
+        bail!("session reads shell, script and timeout from JSON Lines on stdin");
+    }
+    let is_admin = admin_user.is_some();
+    if is_admin && shell == Some(ExecShell::BASH) {
         bail!("--admin-user requires powershell or pwsh");
     }
-    let path = script.context("Missing --script")?;
-    let reader: Box<dyn Read> = if path == "-" {
-        Box::new(std::io::stdin())
+    let request = if session {
+        None
     } else {
-        Box::new(std::fs::File::open(&path).context("Cannot open script")?)
+        let shell = shell.context("Missing --shell")?;
+        let path = script.context("Missing --script")?;
+        let reader: Box<dyn Read> = if path == "-" {
+            Box::new(std::io::stdin())
+        } else {
+            Box::new(std::fs::File::open(&path).context("Cannot open script")?)
+        };
+        let mut script = Vec::new();
+        reader
+            .take(MAX_SCRIPT as u64 + 1)
+            .read_to_end(&mut script)?;
+        let request = TerminalExecRequest {
+            shell: shell.into(),
+            script: script.into(),
+            timeout_seconds: timeout,
+            ..Default::default()
+        };
+        validate(&request)?;
+        Some(request)
     };
-    let mut script = Vec::new();
-    reader
-        .take(MAX_SCRIPT as u64 + 1)
-        .read_to_end(&mut script)?;
-    let request = TerminalExecRequest {
-        shell: shell.into(),
-        script: script.into(),
-        timeout_seconds: timeout,
-        ..Default::default()
-    };
-    validate(&request)?;
     if hbb_common::config::is_incoming_only() {
         bail!("Incoming-only mode");
     }
@@ -295,6 +315,10 @@ pub async fn run_cli(mut args: impl Iterator<Item = String>) -> ResultType<i32> 
     )
     .await
     .context("Timed out connecting or authenticating")??;
+    if session {
+        return session::run(&mut stream, &peer, is_admin, timeout).await;
+    }
+    let request = request.context("Missing command")?;
     let result = if peer.features.terminal_exec {
         tokio::time::timeout(
             Duration::from_secs(u64::from(timeout) + 25),
@@ -303,7 +327,7 @@ pub async fn run_cli(mut args: impl Iterator<Item = String>) -> ResultType<i32> 
         .await
         .context("Timed out waiting for remote execution result")??
     } else if peer.features.terminal {
-        legacy::exchange(&mut stream, &peer.platform, request).await?
+        legacy::exchange(&mut stream, &peer.platform, request, 1).await?
     } else {
         bail!("Remote device does not support terminal commands");
     };

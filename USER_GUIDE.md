@@ -18,7 +18,7 @@ geodomdesk-cli.exe exec --id DEVICE_ID --shell powershell --script check.ps1
 geodomdesk-cli.exe exec --id DEVICE_ID --shell pwsh --script check.ps1 --admin-user "DOMAIN\Administrator" --ask-device-password
 ```
 
-根据目标系统选用 Bash、Windows PowerShell 或 PowerShell 7。`--script -` 从标准输入读取脚本，`--relay` 指定中继，`--timeout` 设置远端执行时限（默认 30 秒）。`exec --help` 显示完整参数。新协议分别返回标准输出和错误输出，进程返回远端退出码。
+根据目标系统选用 Bash、Windows PowerShell 或 PowerShell 7。`--script -` 从标准输入读取脚本，`--relay` 指定中继，`--timeout` 设置远端执行时限（默认 15 秒）。`exec --help` 显示完整参数。新协议分别返回标准输出和错误输出，进程返回远端退出码。
 
 - GeodomDesk 账号默认沿用发起端的登录状态。无界面时可用 `--account-user` 登录，令牌仅供本次调用使用。账号若需要二次验证，请先在客户端完成登录。
 - 设备密码默认沿用已保存的连接密码。可用 `--ask-device-password` 无回显输入，或者设置 `GEODOMDESK_DEVICE_PASSWORD`。目标设备要求二次验证时，使用 `GEODOMDESK_DEVICE_CODE` 提供当次验证码。
@@ -26,6 +26,23 @@ geodomdesk-cli.exe exec --id DEVICE_ID --shell pwsh --script check.ps1 --admin-u
 - 自动化可使用 `--non-interactive`，由运行环境注入 `GEODOMDESK_ACCOUNT_PASSWORD` 和 `GEODOMDESK_ADMIN_PASSWORD` 等对应凭据。脚本从标准输入读取时，凭据仍通过终端或环境变量提供。
 
 遇到只支持旧终端协议的 Windows 或 Linux 设备，CLI 会在认证后使用独立的加密终端会话执行命令。这种模式会将远端的标准输出和错误输出合并返回，并报告命令退出码。
+
+连续命令可使用常驻会话，共用一次账号验证和一条加密连接，兼容只支持旧终端的设备：
+
+```text
+geodomdesk-cli session --id DEVICE_ID --non-interactive --timeout 120
+```
+
+保持这个进程的标准输入打开，每行发送一条 JSON：
+
+```json
+{"shell":"bash","script":"printf '你好\\n'","timeout":60}
+{"shell":"powershell","script":"Get-Process | Select-Object -First 3"}
+```
+
+先返回 `event: ready`，之后每条命令返回一行 `event: result`。`stdout`、`stderr` 使用 Base64 编码，`exit_code` 是远端退出码；旧终端的错误输出合并到 `stdout`。逐条提交并等待结果即可复用连接，命令使用独立进程，不保留上一条命令的工作目录和变量。关闭标准输入会在已提交命令执行完成后退出。分别启动的 `exec` 进程仍各自建立连接。
+
+参数或脚本无效时返回 `fatal: false`，可以修正后继续；连接中断、传输或等待结果超时时返回 `fatal: true` 并结束会话，不自动重跑命令。此时命令可能已执行，应先核对远端状态。启动、分批上传和执行分别计时；旧终端上传每批最多等待 15 秒进展，`timeout` 仅从脚本开始执行后计时，范围为 1–300 秒。脚本上限为 64 KiB，单个输出通道上限为 256 KiB；旧终端合并输出上限为 256 KiB。
 
 新配置默认关闭 TCP 打洞。需要时可在设置中手动开启。TCP 中继仍可使用。
 
