@@ -17,6 +17,7 @@ fi
 gd_script=$(printf '%s' "$gd_payload" | base64 -d && printf '.') || exit 1
 gd_script=${gd_script%.}
 printf '\n%s:START\n' "$gd_marker"
+gd_window=0
 exec 3<&0
 bash --noprofile --norc -c "$gd_script" </dev/null 3<&- 2>&1 | base64 -w 3072 |
     while IFS= read -r gd_line; do

@@ -326,6 +326,90 @@ impl Escape {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn regression_strict_legacy_shell_initializes_its_output_window() {
+        use std::{
+            io::Write,
+            process::{Command, Stdio},
+        };
+        let request = TerminalExecRequest {
+            shell: ExecShell::BASH.into(),
+            script: b"printf STRICT_OK".to_vec().into(),
+            timeout_seconds: 15,
+            ..Default::default()
+        };
+        let (launcher, payload) = command("Linux", &request, "GDSTRICT").unwrap();
+        let mut child = Command::new("bash")
+            .args(["--noprofile", "--norc", "-c", &launcher])
+            .env("SHELLOPTS", "nounset")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(format!("{payload}\n").as_bytes())
+            .unwrap();
+        let result = child.wait_with_output().unwrap();
+        assert!(
+            String::from_utf8_lossy(&result.stdout).contains("GDSTRICT:END:0"),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn regression_legacy_windows_output_records_fit_terminal_width() {
+        use std::{
+            io::Write,
+            process::{Command, Stdio},
+        };
+        let marker = format!("GD{}", uuid::Uuid::new_v4().simple());
+        let request = TerminalExecRequest {
+            shell: ExecShell::WINDOWS_POWERSHELL.into(),
+            script: b"Write-Output ('W' * 200)".to_vec().into(),
+            timeout_seconds: 15,
+            ..Default::default()
+        };
+        let (launcher, payload) = command("Windows", &request, &marker).unwrap();
+        let encoded = launcher.rsplit_once(' ').unwrap().1;
+        let executable = launcher.split_once(" -NoLogo").unwrap().0;
+        let mut child = Command::new(executable)
+            .args(["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let data = payload
+            .as_bytes()
+            .chunks(LINE_BYTES)
+            .flat_map(|chunk| chunk.iter().copied().chain(std::iter::once(b'\n')))
+            .collect::<Vec<_>>();
+        child.stdin.take().unwrap().write_all(&data).unwrap();
+        let result = child.wait_with_output().unwrap();
+        let output = String::from_utf8(result.stdout).unwrap();
+        let records = output
+            .lines()
+            .filter(|line| line.starts_with(&format!("{marker}:DATA:")))
+            .collect::<Vec<_>>();
+        assert!(
+            !records.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(
+            records.iter().all(|line| line.len() <= 160),
+            "A protocol record must fit the actual ConPTY width"
+        );
+        assert!(output.contains(&format!("{marker}:END:0")));
+    }
+
     const TERMINAL_ID: i32 = 1;
     use base::message_proto::{Message, TerminalResponse};
     use hbb_common::{sodiumoxide::crypto::secretbox, tcp::FramedStream};

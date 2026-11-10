@@ -43,11 +43,12 @@ $script = $utf8.GetString([Convert]::FromBase64String($parts[1]))
 $window = 0
 $script | & $shell -NoLogo -NoProfile -NonInteractive -EncodedCommand $parts[0] 2>&1 | ForEach-Object {
     $bytes = $utf8.GetBytes($_.ToString() + "`n")
-    for ($offset = 0; $offset -lt $bytes.Length; $offset += 2304) {
-        $record = [Convert]::ToBase64String($bytes, $offset, [Math]::Min(2304, $bytes.Length - $offset))
+    # Base64 plus the marker must fit the 160-column ConPTY to preserve scrollback.
+    for ($offset = 0; $offset -lt $bytes.Length; $offset += 84) {
+        $record = [Convert]::ToBase64String($bytes, $offset, [Math]::Min(84, $bytes.Length - $offset))
         [Console]::WriteLine("${marker}:DATA:$record")
         $window++
-        if ($window % 16 -eq 0) {
+        if ($window % 64 -eq 0) {
             [Console]::WriteLine("${marker}:WINDOW")
             if ([Console]::ReadLine() -ne 'GDOUTPUT') { exit 1 }
         }

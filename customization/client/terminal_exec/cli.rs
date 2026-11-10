@@ -1,4 +1,4 @@
-use super::{auth, input, legacy, output, session, validate, MAX_OUTPUT, MAX_SCRIPT};
+use super::{auth, input, output, session, validate, MAX_OUTPUT, MAX_SCRIPT};
 use crate::{
     client::{self, Client, Data, Interface, LoginConfigHandler},
     trusted_devices::client::Session,
