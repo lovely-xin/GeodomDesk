@@ -1,10 +1,10 @@
-use super::{auth, legacy, session, validate, MAX_SCRIPT};
+use super::{auth, input, legacy, output, session, validate, MAX_OUTPUT, MAX_SCRIPT};
 use crate::{
     client::{self, Client, Data, Interface, LoginConfigHandler},
     trusted_devices::client::Session,
 };
 use base::message_proto::{
-    login_response, message, terminal_response, Auth2FA, ExecShell, Hash, Message, PeerInfo,
+    login_response, message, misc, terminal_response, Auth2FA, ExecShell, Hash, Message, PeerInfo,
     TerminalAction, TerminalExecRequest, TerminalExecResult, TerminalResponse, TestDelay,
     WindowsSession,
 };
@@ -16,18 +16,24 @@ use hbb_common::{
     tokio, ResultType, Stream,
 };
 use std::{
-    io::{Read, Write},
+    io::Write,
     sync::{Arc, RwLock},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 const USAGE: &str =
     "Usage: geodomdesk-cli exec --id ID --shell bash|powershell|pwsh --script PATH|-
-       geodomdesk-cli session --id ID [authentication options]
+       geodomdesk-cli exec --id ID --shell bash|powershell|pwsh --command TEXT
+       geodomdesk-cli session --id ID [--shell SHELL] [authentication options]
+       geodomdesk-cli probe --id ID [authentication options]
   session                 Read JSON Lines from stdin and reuse one authenticated connection
                           {\"shell\":\"bash\",\"script\":\"pwd\",\"timeout\":120}
                           Results: JSON Lines; stdout/stderr are Base64 encoded
   --timeout SECONDS       Command timeout (1-300, default 15)
+  --connect-timeout SEC    Connection and device authentication timeout (1-300, default 60)
+  --json                  Machine-readable exec results, including failures
+  --command TEXT          Execute an inline script instead of --script
+  probe                   Authenticate and report transport and terminal capabilities; no command is run
   --relay                 Use a relay instead of trying a direct connection
   --account-user USER     Sign in to GeodomDesk for this invocation
   --admin-user USER       Authenticate to the target Windows administrator terminal
@@ -36,6 +42,16 @@ const USAGE: &str =
 
 Environment: GEODOMDESK_ACCOUNT_PASSWORD, GEODOMDESK_DEVICE_PASSWORD,
              GEODOMDESK_ADMIN_PASSWORD, GEODOMDESK_DEVICE_CODE";
+
+struct Connection {
+    stream: Stream,
+    peer: PeerInfo,
+    direct: bool,
+    transport: &'static str,
+    _keep_alive: Option<tokio::sync::mpsc::UnboundedSender<()>>,
+    // The framed stream alone does not retain KCP's UDP pump.
+    _kcp: Option<crate::kcp_stream::KcpStream>,
+}
 
 #[derive(Clone)]
 struct TerminalClient(Arc<RwLock<LoginConfigHandler>>);
@@ -89,7 +105,13 @@ pub(super) async fn receive(stream: &mut Stream) -> ResultType<Message> {
         if frame.is_empty() {
             continue;
         }
-        return Ok(Message::parse_from_bytes(&frame)?);
+        let message = Message::parse_from_bytes(&frame)?;
+        if let Some(message::Union::Misc(misc)) = &message.union {
+            if let Some(misc::Union::CloseReason(reason)) = &misc.union {
+                bail!("Remote device closed the connection: {reason}");
+            }
+        }
+        return Ok(message);
     }
 }
 
@@ -99,11 +121,7 @@ async fn connect(
     token: String,
     device_password: String,
     mut admin: Option<auth::Credentials>,
-) -> ResultType<(
-    Stream,
-    PeerInfo,
-    Option<tokio::sync::mpsc::UnboundedSender<()>>,
-)> {
+) -> ResultType<Connection> {
     let mut login = LoginConfigHandler::default();
     login.initialize(id, ConnType::TERMINAL, None, relay, None, None, None);
     login.terminal_one_shot = true;
@@ -112,7 +130,7 @@ async fn connect(
     let interface = TerminalClient(Arc::new(RwLock::new(login)));
     let id = interface.get_id();
     let key = crate::get_key(false).await;
-    let ((mut stream, direct, pk, _, _), (feedback, rendezvous)) =
+    let ((mut stream, direct, pk, kcp, transport), (feedback, rendezvous)) =
         Client::start(&id, &key, &token, ConnType::TERMINAL, interface.clone()).await?;
     if !stream.is_secured() {
         bail!("Remote command execution requires an encrypted peer connection");
@@ -149,7 +167,14 @@ async fn connect(
                             bail!("Administrator terminal login requires a Windows target");
                         }
                         stream.set_max_packet_length(1024 * 1024);
-                        return Ok((stream, info, keep_alive));
+                        return Ok(Connection {
+                            stream,
+                            peer: info,
+                            direct,
+                            transport,
+                            _keep_alive: keep_alive,
+                            _kcp: kcp,
+                        });
                     }
                     Some(login_response::Union::Error(error)) => match error.as_str() {
                         client::REQUIRE_2FA if !sent_device_code => {
@@ -214,7 +239,20 @@ pub(super) async fn receive_terminal_response(stream: &mut Stream) -> ResultType
     }
 }
 
-pub async fn run_cli(mut args: impl Iterator<Item = String>) -> ResultType<i32> {
+pub async fn run_cli(args: impl Iterator<Item = String>) -> ResultType<i32> {
+    let args: Vec<_> = args.collect();
+    let json = input::wants_json(&args);
+    let started = Instant::now();
+    let result = run(args.into_iter(), started).await;
+    if json {
+        if let Err(error) = &result {
+            output::write(output::failure(None, error, true, started.elapsed()))?;
+        }
+    }
+    result
+}
+
+async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> ResultType<i32> {
     let first = args.next();
     if matches!(first.as_deref(), Some("--help" | "-h")) {
         println!("{USAGE}");
@@ -225,10 +263,14 @@ pub async fn run_cli(mut args: impl Iterator<Item = String>) -> ResultType<i32> 
         return Ok(0);
     }
     let session = first.as_deref() == Some("session");
-    if !session && first.as_deref() != Some("exec") {
+    let probe = first.as_deref() == Some("probe");
+    if !session && !probe && first.as_deref() != Some("exec") {
         bail!("{USAGE}");
     }
     let (mut id, mut shell, mut script) = (None, None, None);
+    let mut command = None;
+    let mut json = false;
+    let mut connect_timeout = 60u32;
     let (mut account_user, mut admin_user) = (None, None);
     let mut timeout = 15u32;
     let mut relay = false;
@@ -241,6 +283,7 @@ pub async fn run_cli(mut args: impl Iterator<Item = String>) -> ResultType<i32> 
                 return Ok(0);
             }
             "--relay" => relay = true,
+            "--json" => json = true,
             "--ask-device-password" => ask_device_password = true,
             "--non-interactive" => non_interactive = true,
             _ => {
@@ -258,6 +301,10 @@ pub async fn run_cli(mut args: impl Iterator<Item = String>) -> ResultType<i32> 
                         })
                     }
                     "--script" => script = Some(value),
+                    "--command" => command = Some(value),
+                    "--connect-timeout" => {
+                        connect_timeout = value.parse().context("Invalid connection timeout")?
+                    }
                     "--timeout" => timeout = value.parse().context("Invalid timeout")?,
                     "--account-user" => account_user = Some(value),
                     "--admin-user" => admin_user = Some(value),
@@ -273,27 +320,31 @@ pub async fn run_cli(mut args: impl Iterator<Item = String>) -> ResultType<i32> 
             super::MAX_TIMEOUT
         );
     }
-    if session && (shell.is_some() || script.is_some()) {
-        bail!("session reads shell, script and timeout from JSON Lines on stdin");
+    if !(1..=300).contains(&connect_timeout) {
+        bail!("Connection timeout must be between 1 and 300 seconds");
+    }
+    if (session || probe) && (script.is_some() || command.is_some()) {
+        bail!("Only exec accepts --script or --command");
+    }
+    if probe && shell.is_some() {
+        bail!("probe does not execute a shell");
+    }
+    if script.is_some() && command.is_some() {
+        bail!("Use either --script or --command");
     }
     let is_admin = admin_user.is_some();
     if is_admin && shell == Some(ExecShell::BASH) {
         bail!("--admin-user requires powershell or pwsh");
     }
-    let request = if session {
+    let request = if session || probe {
         None
     } else {
         let shell = shell.context("Missing --shell")?;
-        let path = script.context("Missing --script")?;
-        let reader: Box<dyn Read> = if path == "-" {
-            Box::new(std::io::stdin())
-        } else {
-            Box::new(std::fs::File::open(&path).context("Cannot open script")?)
+        let script = match (script, command) {
+            (Some(path), None) => input::read_script(&path, true)?,
+            (None, Some(command)) => command.into_bytes(),
+            _ => bail!("Missing --script or --command"),
         };
-        let mut script = Vec::new();
-        reader
-            .take(MAX_SCRIPT as u64 + 1)
-            .read_to_end(&mut script)?;
         let request = TerminalExecRequest {
             shell: shell.into(),
             script: script.into(),
@@ -309,28 +360,69 @@ pub async fn run_cli(mut args: impl Iterator<Item = String>) -> ResultType<i32> 
     let token = auth::account_token(account_user, non_interactive).await?;
     let device_password = auth::device_password(ask_device_password, non_interactive)?;
     let admin = auth::admin_credentials(admin_user, non_interactive)?;
-    let (mut stream, peer, _keep_alive) = tokio::time::timeout(
-        Duration::from_secs(60),
+    let connecting = Instant::now();
+    let mut connection = tokio::time::timeout(
+        Duration::from_secs(connect_timeout.into()),
         connect(id, relay, token, device_password, admin),
     )
     .await
     .context("Timed out connecting or authenticating")??;
-    if session {
-        return session::run(&mut stream, &peer, is_admin, timeout).await;
+    let info = serde_json::json!({
+        "event": "ready", "platform": connection.peer.platform,
+        "hostname": connection.peer.hostname, "version": connection.peer.version,
+        "direct": connection.direct, "transport": connection.transport,
+        "encrypted": connection.stream.is_secured(), "connect_ms": connecting.elapsed().as_millis(), "setup_ms": started.elapsed().as_millis(),
+        "terminal": connection.peer.features.terminal,
+        "terminal_exec": connection.peer.features.terminal_exec,
+        "protocol": if connection.peer.features.terminal_exec { "exec" } else if connection.peer.features.terminal { "legacy" } else { "none" },
+        "max_script_bytes": MAX_SCRIPT, "max_output_bytes": MAX_OUTPUT,
+        "default_timeout": timeout
+    });
+    if probe {
+        output::write(info)?;
+        return Ok(0);
     }
+    if session {
+        return session::run(
+            &mut connection.stream,
+            &connection.peer,
+            is_admin,
+            timeout,
+            shell,
+            info,
+        )
+        .await;
+    }
+    let execution = Instant::now();
     let request = request.context("Missing command")?;
-    let result = if peer.features.terminal_exec {
+    let result = if connection.peer.features.terminal_exec {
         tokio::time::timeout(
             Duration::from_secs(u64::from(timeout) + 25),
-            exchange(&mut stream, request),
+            exchange(&mut connection.stream, request),
         )
         .await
         .context("Timed out waiting for remote execution result")??
-    } else if peer.features.terminal {
-        legacy::exchange(&mut stream, &peer.platform, request, 1).await?
+    } else if connection.peer.features.terminal {
+        legacy::exchange(
+            &mut connection.stream,
+            &connection.peer.platform,
+            request,
+            1,
+        )
+        .await?
     } else {
         bail!("Remote device does not support terminal commands");
     };
+    if json {
+        let mut value = output::result(None, &result, execution.elapsed());
+        value["connection"] = info;
+        output::write(value)?;
+        return Ok(if result.error.is_empty() {
+            result.exit_code
+        } else {
+            1
+        });
+    }
     if !result.error.is_empty() {
         bail!("{}", result.error);
     }
@@ -348,6 +440,23 @@ mod tests {
         tokio::net::{TcpListener, TcpStream},
     };
     use sha2::{Digest, Sha256};
+
+    #[tokio::test]
+    async fn remote_close_reason_reaches_the_caller() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (client, accepted) = tokio::join!(TcpStream::connect(addr), listener.accept());
+        let (server, client_addr) = accepted.unwrap();
+        let mut client = Stream::Tcp(FramedStream::from(client.unwrap(), addr));
+        let mut server = Stream::Tcp(FramedStream::from(server, client_addr));
+        let mut message = Message::new();
+        message
+            .mut_misc()
+            .set_close_reason("Terminal permission denied".into());
+        server.send(&message).await.unwrap();
+        let error = receive(&mut client).await.unwrap_err();
+        assert!(error.to_string().contains("Terminal permission denied"));
+    }
 
     #[tokio::test]
     async fn admin_challenge_sends_windows_login_and_device_hash() {

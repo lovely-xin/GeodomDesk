@@ -1,12 +1,12 @@
 //! JSON Lines commands over a single authenticated terminal connection.
-use super::{cli, legacy, validate, MAX_SCRIPT};
-use base::message_proto::{message, ExecShell, PeerInfo, TerminalExecRequest, TerminalExecResult};
+use super::{cli, input, legacy, output, validate, MAX_SCRIPT};
+use base::message_proto::{message, ExecShell, PeerInfo, TerminalExecRequest};
 use hbb_common::{anyhow::Context, bail, tokio, ResultType, Stream};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::Value;
 use std::{
-    io::{BufRead, Read, Write},
-    time::Duration,
+    io::{BufRead, Read},
+    time::{Duration, Instant},
 };
 
 const MAX_LINE: usize = MAX_SCRIPT * 6 + 1024;
@@ -14,36 +14,44 @@ const MAX_LINE: usize = MAX_SCRIPT * 6 + 1024;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Command {
-    shell: String,
-    script: String,
+    id: Option<Value>,
+    shell: Option<String>,
+    script: Option<String>,
+    script_file: Option<String>,
     timeout: Option<u32>,
 }
 
-fn parse(line: &[u8], admin: bool, timeout: u32) -> ResultType<TerminalExecRequest> {
-    let command: Command = serde_json::from_slice(line).context("Invalid session command")?;
-    let shell = match command.shell.as_str() {
-        "bash" if !admin => ExecShell::BASH,
-        "powershell" => ExecShell::WINDOWS_POWERSHELL,
-        "pwsh" => ExecShell::POWERSHELL_CORE,
-        _ => bail!("Unavailable shell: {}", command.shell),
-    };
-    let request = TerminalExecRequest {
-        shell: shell.into(),
-        script: command.script.into_bytes().into(),
-        timeout_seconds: command.timeout.unwrap_or(timeout),
-        ..Default::default()
-    };
-    validate(&request)?;
-    Ok(request)
-}
-
-fn write_record(value: serde_json::Value) -> ResultType<()> {
-    let mut data = serde_json::to_vec(&value)?;
-    data.push(b'\n');
-    let mut output = std::io::stdout().lock();
-    output.write_all(&data)?;
-    output.flush()?;
-    Ok(())
+impl Command {
+    fn request(
+        self,
+        admin: bool,
+        timeout: u32,
+        shell: Option<ExecShell>,
+    ) -> ResultType<TerminalExecRequest> {
+        let shell = match self.shell.as_deref() {
+            Some("bash") => ExecShell::BASH,
+            Some("powershell") => ExecShell::WINDOWS_POWERSHELL,
+            Some("pwsh") => ExecShell::POWERSHELL_CORE,
+            Some(shell) => bail!("Unknown shell: {shell}"),
+            None => shell.context("Missing shell; specify it in the command or session --shell")?,
+        };
+        if admin && shell == ExecShell::BASH {
+            bail!("--admin-user requires powershell or pwsh");
+        }
+        let script = match (self.script, self.script_file) {
+            (Some(script), None) => script.into_bytes(),
+            (None, Some(path)) => input::read_script(&path, false)?,
+            _ => bail!("Specify exactly one of script or script_file"),
+        };
+        let request = TerminalExecRequest {
+            shell: shell.into(),
+            script: script.into(),
+            timeout_seconds: self.timeout.unwrap_or(timeout),
+            ..Default::default()
+        };
+        validate(&request)?;
+        Ok(request)
+    }
 }
 
 pub(super) async fn run(
@@ -51,6 +59,8 @@ pub(super) async fn run(
     peer: &PeerInfo,
     admin: bool,
     timeout: u32,
+    shell: Option<ExecShell>,
+    info: Value,
 ) -> ResultType<i32> {
     if !peer.features.terminal_exec && !peer.features.terminal {
         bail!("Remote device does not support terminal commands");
@@ -84,8 +94,7 @@ pub(super) async fn run(
                 }
             }
         })?;
-    write_record(json!({"event": "ready", "platform": peer.platform,
-        "protocol": if peer.features.terminal_exec { "exec" } else { "legacy" }}))?;
+    output::write(info)?;
     let result: ResultType<i32> = async {
         let mut terminal_id = 0i32;
         loop {
@@ -101,12 +110,23 @@ pub(super) async fn run(
                     continue;
                 }
             };
-            let request = match parse(&line, admin, timeout) {
+            if line.iter().all(u8::is_ascii_whitespace) {
+                continue;
+            }
+            let started = Instant::now();
+            let mut command: Command =
+                match serde_json::from_slice(&line).context("Invalid session command") {
+                    Ok(command) => command,
+                    Err(error) => {
+                        output::write(output::failure(None, &error, false, started.elapsed()))?;
+                        continue;
+                    }
+                };
+            let id = command.id.take();
+            let request = match command.request(admin, timeout, shell) {
                 Ok(request) => request,
                 Err(error) => {
-                    write_record(
-                        json!({"event": "result", "error": format!("{error:#}"), "fatal": false}),
-                    )?;
+                    output::write(output::failure(id, &error, false, started.elapsed()))?;
                     continue;
                 }
             };
@@ -125,24 +145,17 @@ pub(super) async fn run(
                 legacy::exchange(stream, &peer.platform, request, terminal_id).await
             };
             match result {
-                Ok(TerminalExecResult {
-                    stdout,
-                    stderr,
-                    exit_code,
-                    error,
-                    ..
-                }) => {
-                    write_record(json!({"event": "result", "encoding": "base64",
-                    "stdout": crate::encode64(stdout), "stderr": crate::encode64(stderr),
-                    "exit_code": exit_code, "error": error, "fatal": false}))?;
+                Ok(result) => output::write(output::result(id, &result, started.elapsed()))?,
+                Err(error) => {
+                    output::write(output::failure(id, &error, true, started.elapsed()))?;
+                    return Ok(1);
                 }
-                Err(error) => return Err(error),
             }
         }
     }
     .await;
     if let Err(error) = &result {
-        write_record(json!({"event": "result", "error": format!("{error:#}"), "fatal": true}))?;
+        output::write(output::failure(None, error, true, Duration::ZERO))?;
     }
     result
 }
@@ -150,9 +163,13 @@ pub(super) async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn session_commands_preserve_limits_and_admin_scope() {
+        let parse = |line: &[u8], admin, timeout| -> ResultType<TerminalExecRequest> {
+            serde_json::from_slice::<Command>(line)?.request(admin, timeout, None)
+        };
         let line = br#"{"shell":"bash","script":"printf ok"}"#;
         assert_eq!(parse(line, false, 120).unwrap().timeout_seconds, 120);
         assert!(parse(line, true, 30).is_err());
@@ -174,5 +191,35 @@ mod tests {
             30
         )
         .is_ok());
+    }
+
+    #[test]
+    fn local_script_and_default_shell_are_validated_without_consuming_stdin() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "printf '你好'").unwrap();
+        let command: Command =
+            serde_json::from_value(json!({"id": "check", "script_file": file.path()})).unwrap();
+        assert_eq!(command.id.as_ref().unwrap(), "check");
+        let request = command.request(false, 15, Some(ExecShell::BASH)).unwrap();
+        assert_eq!(request.script.as_ref(), "printf '你好'".as_bytes());
+        for value in [
+            json!({"script_file": "-"}),
+            json!({"script": "exit", "script_file": file.path()}),
+        ] {
+            let command: Command = serde_json::from_value(value).unwrap();
+            assert!(command.request(false, 15, Some(ExecShell::BASH)).is_err());
+        }
+        assert!(!input::wants_json(
+            &["exec", "--command", "--json"].map(String::from)
+        ));
+        assert!(input::wants_json(
+            &["exec", "--command", "pwd", "--json"].map(String::from)
+        ));
+        let mut command: Command =
+            serde_json::from_value(json!({"id": 7, "script": "exit"})).unwrap();
+        let id = command.id.take();
+        let result = output::result(id, &Default::default(), Duration::from_millis(23));
+        assert_eq!(result["id"], 7);
+        assert_eq!(result["elapsed_ms"], 23);
     }
 }

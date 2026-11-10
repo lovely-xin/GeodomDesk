@@ -11,6 +11,8 @@ SOURCES = (
     "terminal_exec.rs",
     "terminal_exec/auth.rs",
     "terminal_exec/cli.rs",
+    "terminal_exec/input.rs",
+    "terminal_exec/output.rs",
     "terminal_exec/exec_bootstrap.ps1",
     "terminal_exec/legacy.rs",
     "terminal_exec/session.rs",

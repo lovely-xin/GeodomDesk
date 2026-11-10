@@ -44,6 +44,25 @@ geodomdesk-cli session --id DEVICE_ID --non-interactive --timeout 120
 
 参数或脚本无效时返回 `fatal: false`，可以修正后继续；连接中断、传输或等待结果超时时返回 `fatal: true` 并结束会话，不自动重跑命令。此时命令可能已执行，应先核对远端状态。启动、分批上传和执行分别计时；旧终端上传每批最多等待 15 秒进展，`timeout` 仅从脚本开始执行后计时，范围为 1–300 秒。脚本上限为 64 KiB，单个输出通道上限为 256 KiB；旧终端合并输出上限为 256 KiB。
 
+### Agent 常用增强参数
+
+```text
+geodomdesk-cli.exe probe --id DEVICE_ID --non-interactive --connect-timeout 30
+geodomdesk-cli.exe exec --id DEVICE_ID --shell powershell --command "Get-Location" --json --non-interactive
+geodomdesk-cli session --id DEVICE_ID --shell bash --timeout 120 --non-interactive
+```
+
+`probe` 只连接和认证，不执行命令；返回设备平台、版本、加密状态、直连/中继、传输类型及新旧终端能力。`--connect-timeout` 单独设置连接及设备认证时限（默认 60 秒，1–300 秒），与脚本执行时限分开。`--command` 支持内联脚本，与 `--script` 二选一。旧用法保持可用。
+
+`exec --json` 返回单行 JSON，包括成功或失败、远端退出码、Base64 编码的 stdout/stderr、耗时和连接信息；连接或参数错误也返回 JSON，诊断信息仍可能写入 stderr。`session` 始终使用 JSON Lines，无需 `--json`。会话的 `--shell` 为后续命令提供默认 Shell，单条命令仍可覆盖：
+
+```json
+{"id":"inspect","script":"pwd"}
+{"id":2,"script_file":"./check.sh","timeout":60}
+```
+
+`script_file` 读取发起端的 UTF-8 文件，与 `script` 二选一，不能用 `-`，以免消耗命令输入流。结果原样返回 `id` 以便关联；`elapsed_ms` 是本次请求处理耗时（旧协议包含终端准备和上传），`ok` 表示无执行错误且远端退出码为 0。`fatal: true` 后应结束会话并核对远端状态，不能直接自动重试有副作用的命令。
+
 新配置默认关闭 TCP 打洞。需要时可在设置中手动开启。TCP 中继仍可使用。
 
 ## 导入设备记录

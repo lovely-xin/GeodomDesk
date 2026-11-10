@@ -143,6 +143,8 @@ class PackagingTests(unittest.TestCase):
             "src/terminal_exec.rs",
             "src/terminal_exec/auth.rs",
             "src/terminal_exec/cli.rs",
+            "src/terminal_exec/input.rs",
+            "src/terminal_exec/output.rs",
             "src/terminal_exec/exec_bootstrap.ps1",
             "src/terminal_exec/legacy.rs",
             "src/terminal_exec/session.rs",
