@@ -554,37 +554,58 @@ mod tests {
 
     #[tokio::test]
     async fn ambiguous_targets_and_payloads_are_rejected_before_authentication() {
-        for args in [
-            vec!["exec", "--id", "1", "--id", "2"],
-            vec!["exec", "--id", "1", "--command", "a", "--command", "b"],
-            vec!["exec", "--id", "1", "--script", "a", "--script", "b"],
-            vec![
-                "probe",
-                "--id",
-                "1",
-                "--expect-platform",
-                "Linux",
-                "--expect-platform",
-                "Windows",
-            ],
-            vec![
-                "probe",
-                "--id",
-                "1",
-                "--expect-hostname",
-                "host",
-                "--expect-hostname",
-                "other",
-            ],
-            vec!["probe", "--id", "1", "--expect-hostname", " "],
-            vec!["exec", "--id", "1", "--continue-on-error"],
+        for (args, reason) in [
+            (
+                vec!["exec", "--id", "1", "--id", "2"],
+                "Specify --id exactly once",
+            ),
+            (
+                vec!["exec", "--id", "1", "--command", "a", "--command", "b"],
+                "Specify --command only once",
+            ),
+            (
+                vec!["exec", "--id", "1", "--script", "a", "--script", "b"],
+                "Specify --script only once",
+            ),
+            (
+                vec![
+                    "probe",
+                    "--id",
+                    "1",
+                    "--expect-platform",
+                    "Linux",
+                    "--expect-platform",
+                    "Windows",
+                ],
+                "Specify --expect-platform only once",
+            ),
+            (
+                vec![
+                    "probe",
+                    "--id",
+                    "1",
+                    "--expect-hostname",
+                    "host",
+                    "--expect-hostname",
+                    "other",
+                ],
+                "Specify --expect-hostname only once",
+            ),
+            (
+                vec!["probe", "--id", "1", "--expect-hostname", " "],
+                "Expected target properties must not be empty",
+            ),
+            (
+                vec!["exec", "--id", "1", "--continue-on-error"],
+                "--continue-on-error applies only to session",
+            ),
         ] {
             let error = run(args.into_iter().map(str::to_owned), Instant::now())
                 .await
                 .unwrap_err();
             assert!(
-                !format!("{error:#}").contains("authentication"),
-                "{error:#}"
+                format!("{error:#}").contains(reason),
+                "Expected {reason}, received {error:#}"
             );
         }
     }
