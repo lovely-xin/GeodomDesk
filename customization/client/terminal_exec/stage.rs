@@ -94,6 +94,7 @@ pub(super) fn transient_setup_error(error: &anyhow::Error) -> bool {
     }
     error.downcast_ref::<PeerDisconnected>().is_some()
         || error.downcast_ref::<ConnectAttemptTimeout>().is_some()
+        || error.downcast_ref::<tokio::time::error::Elapsed>().is_some()
         || error.chain().any(|cause| {
             // The shared client exposes an exhausted rendezvous exchange as this stable message.
             cause
@@ -179,6 +180,27 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn inner_setup_timeout_recovers_but_authentication_timeout_does_not() {
+        let calls = std::cell::Cell::new(0);
+        let (value, history) = connect_with_recovery(Duration::from_secs(30), false, || {
+            calls.set(calls.get() + 1);
+            let attempt = calls.get();
+            async move {
+                if attempt == 1 {
+                    tokio::time::timeout(Duration::ZERO, std::future::pending::<()>()).await?;
+                }
+                Ok(12)
+            }
+        }).await.unwrap();
+        assert_eq!(value, 12);
+        assert_eq!(calls.get(), 2);
+        assert_eq!(history.len(), 1);
+        let elapsed = tokio::time::timeout(Duration::ZERO, std::future::pending::<()>()).await.unwrap_err();
+        let error = wrap(elapsed.into(), "authentication", "not_started");
+        assert!(!transient_setup_error(&error));
+    }
+
     #[tokio::test]
     async fn explicit_credentials_never_repeat_a_login_after_transport_failure() {
         let calls = std::cell::Cell::new(0);
