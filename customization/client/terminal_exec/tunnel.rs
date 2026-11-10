@@ -144,10 +144,13 @@ fn verify_owner(record: &Record, nonce: &str, proof: &str) -> ResultType<()> {
 }
 
 async fn rpc(record: &Record, op: &str) -> ResultType<Value> {
+    // Windows can take about two seconds to report a refused loopback connection.
+    // Keep this separate from the short response budget of a live owner.
+    let socket = tokio::time::timeout(Duration::from_secs(3),
+        TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, record.control_port)))
+        .await.context("Tunnel control connection timed out")??;
     tokio::time::timeout(Duration::from_millis(400), async {
-        let mut socket = BufReader::new(
-            TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, record.control_port)).await?,
-        );
+        let mut socket = BufReader::new(socket);
         socket.get_mut().set_nodelay(true)?;
         let nonce = uuid::Uuid::new_v4().simple().to_string();
         socket
@@ -271,7 +274,34 @@ pub(crate) async fn close(device: &str, id: &str) -> ResultType<Value> {
     if !device.is_empty() && record.device_id != device {
         bail!("Tunnel belongs to a different device");
     }
-    rpc(&record, "close").await
+    match rpc(&record, "close").await {
+        Err(error) if error.chain().any(|cause| cause.downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::ConnectionRefused)) => {
+            if let Err(error) = fs::remove_file(record_path(id)?) {
+                if error.kind() != std::io::ErrorKind::NotFound { return Err(error.into()); }
+            }
+            Ok(json!({"tunnel_id":record.tunnel_id,"state":"closed","already_closed":true}))
+        }
+        result => result,
+    }
+}
+
+// Once authenticated, closing the owner must not depend on delivering its reply.
+struct CloseRequest(tokio::sync::mpsc::Sender<()>);
+impl Drop for CloseRequest {
+    fn drop(&mut self) { let _ = self.0.try_send(()); }
+}
+
+async fn send_control_response(
+    socket: &mut (impl tokio::io::AsyncWrite + Unpin),
+    record: &Record, state: &State, close: bool,
+    close_tx: tokio::sync::mpsc::Sender<()>,
+) -> ResultType<()> {
+    let _close = close.then(|| CloseRequest(close_tx));
+    if close { state.closed.store(true, Ordering::Relaxed); }
+    socket.write_all(&serde_json::to_vec(&record.public(state))?).await?;
+    socket.write_all(b"\n").await?;
+    Ok(())
 }
 
 pub(super) struct Managed {
@@ -415,11 +445,7 @@ impl Managed {
                                 if value["secret"]!=record.secret || value["tunnel_id"]!=record.tunnel_id {bail!("Invalid tunnel owner token");}
                                 let close=value["op"]=="close";
                                 if !close && value["op"]!="status" {bail!("Unknown tunnel operation");}
-                                if close {status.closed.store(true,Ordering::Relaxed);}
-                                socket.get_mut().write_all(&serde_json::to_vec(&record.public(&status))?).await?;
-                                socket.get_mut().write_all(b"\n").await?;
-                                if close {let _=close_tx.try_send(());}
-                                Ok::<_,hbb_common::anyhow::Error>(())
+                                send_control_response(socket.get_mut(), &record, &status, close, close_tx).await
                             }).await;
                         });
                     },
@@ -540,6 +566,10 @@ pub(super) async fn manage(op: &str, mut args: impl Iterator<Item = String>) -> 
             _ => bail!("Unknown or duplicate tunnel option: {flag}"),
         }
     }
+    let device = device.trim();
+    let device = if device.chars().all(|c| c.is_ascii_digit() || c.is_ascii_whitespace()) {
+        device.chars().filter(|c| !c.is_ascii_whitespace()).collect::<String>()
+    } else { device.to_owned() };
     let value = match op {
         "list" if tunnel.is_none() => {
             json!({"event":"tunnel_list","ok":true,"tunnels":list(&device).await?})
@@ -559,6 +589,35 @@ pub(super) async fn manage(op: &str, mut args: impl Iterator<Item = String>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn control_record(port: u16) -> Record {
+        Record { tunnel_id: uuid::Uuid::new_v4().to_string(), device_id:"test-device".into(),
+            local_port:1, remote_host:"127.0.0.1".into(), remote_port:22, owner_pid:0,
+            purpose:"test".into(), control_port:port, secret:uuid::Uuid::new_v4().to_string() }
+    }
+
+    #[tokio::test]
+    async fn refused_control_port_reaches_cleanup_instead_of_short_rpc_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let record = control_record(listener.local_addr().unwrap().port());
+        drop(listener);
+        let error = rpc(&record, "status").await.unwrap_err();
+        assert!(error.chain().any(|cause| cause.downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::ConnectionRefused)), "{error:#}");
+    }
+
+    #[tokio::test]
+    async fn accepted_close_still_notifies_owner_when_reply_is_interrupted() {
+        let (mut client, mut socket) = tokio::io::duplex(16);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let task = tokio::spawn(async move {
+            send_control_response(&mut socket, &control_record(1), &State::default(), true, tx).await
+        });
+        assert_eq!(client.read_u8().await.unwrap(), b'{');
+        drop(client); // The response has started, then its receiver disappears.
+        assert!(task.await.unwrap().is_err());
+        assert_eq!(rx.recv().await, Some(()));
+    }
+
     #[tokio::test]
     async fn reused_control_port_never_receives_an_operation_or_owner_secret() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
