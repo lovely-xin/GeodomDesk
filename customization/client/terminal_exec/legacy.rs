@@ -122,12 +122,24 @@ pub(super) async fn exchange(
                     _ => {}
                 }
             }
+            if platform == "Linux" {
+                // Old PTY services drop output when echoed input fills their bounded queue.
+                send_input(
+                    stream,
+                    terminal_id,
+                    b"stty -echo && echo && echo GDINIT\r".to_vec(),
+                )
+                .await?;
+                terminal.until(stream, "GDINIT", "", None).await?;
+            }
             send_input(stream, terminal_id, format!("{launcher}\r").into_bytes()).await?;
             terminal.until(stream, &marker, ":READY", None).await?;
             Ok::<(), hbb_common::anyhow::Error>(())
         })
         .await
-        .context("Timed out preparing legacy terminal")??;
+        .context("Timed out preparing legacy terminal")
+        .and_then(|result| result)
+        .map_err(|error| super::stage::wrap(error, "prepare", "not_started"))?;
 
         for batch in payload.as_bytes().chunks(LINE_BYTES * BATCH_LINES) {
             tokio::time::timeout(PREPARE_TIMEOUT, async {
@@ -143,14 +155,18 @@ pub(super) async fn exchange(
                 Ok::<(), hbb_common::anyhow::Error>(())
             })
             .await
-            .context("Timed out uploading legacy script")??;
+            .context("Timed out uploading legacy script")
+            .and_then(|result| result)
+            .map_err(|error| super::stage::wrap(error, "upload", "unknown"))?;
         }
         tokio::time::timeout(
             PREPARE_TIMEOUT,
             terminal.until(stream, &marker, ":START", None),
         )
         .await
-        .context("Timed out starting legacy command")??;
+        .context("Timed out starting legacy command")
+        .and_then(|result| result)
+        .map_err(|error| super::stage::wrap(error, "start", "unknown"))?;
 
         tokio::time::timeout(Duration::from_secs(request.timeout_seconds.into()), async {
             let mut output = Vec::new();
@@ -167,7 +183,9 @@ pub(super) async fn exchange(
             })
         })
         .await
-        .context("Timed out waiting for legacy command result")?
+        .context("Timed out waiting for legacy command result")
+        .and_then(|result| result)
+        .map_err(|error| super::stage::wrap(error, "execution", "unknown"))
     }
     .await;
     let mut close = TerminalAction::new();
@@ -183,7 +201,10 @@ pub(super) async fn exchange(
     .context("Timed out closing legacy terminal")
     .and_then(|result| result);
     let result = result?;
-    closed?;
+    // A cleanup failure must not erase an already received execution outcome.
+    if let Err(error) = closed {
+        eprintln!("Command completed; could not close legacy terminal: {error:#}");
+    }
     Ok(result)
 }
 
@@ -249,6 +270,10 @@ impl Transcript {
                     if event == ":END:" || value.is_empty() {
                         return Ok(value.to_vec());
                     }
+                }
+                if record == b":WINDOW" {
+                    send_input(stream, self.terminal_id, b"GDOUTPUT\r".to_vec()).await?;
+                    continue;
                 }
                 if let (Some(encoded), Some(output)) =
                     (record.strip_prefix(b":DATA:"), output.as_deref_mut())
@@ -405,6 +430,23 @@ mod tests {
                     cli::receive(&mut peer).await.unwrap().union
                 else {
                     panic!("Expected bootstrap")
+                };
+                assert!(String::from_utf8(action.take_data().data.to_vec())
+                    .unwrap()
+                    .starts_with("stty -echo"));
+                let mut initialized = TerminalResponse::new();
+                initialized.set_data(TerminalData {
+                    terminal_id: id,
+                    data: b"\nGDINIT\n".to_vec().into(),
+                    ..Default::default()
+                });
+                let mut initialized_message = Message::new();
+                initialized_message.set_terminal_response(initialized);
+                peer.send(&initialized_message).await.unwrap();
+                let Some(base::message_proto::message::Union::TerminalAction(mut action)) =
+                    cli::receive(&mut peer).await.unwrap().union
+                else {
+                    panic!("Expected bootstrap");
                 };
                 let launcher = String::from_utf8(action.take_data().data.to_vec()).unwrap();
                 let encoded = launcher

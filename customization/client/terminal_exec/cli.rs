@@ -32,7 +32,14 @@ const USAGE: &str =
   --timeout SECONDS       Command timeout (1-300, default 15)
   --connect-timeout SEC    Connection and device authentication timeout (1-300, default 60)
   --json                  Machine-readable exec results, including failures
+  --expect-platform NAME  Refuse to execute if the authenticated target platform differs
+  --expect-hostname NAME  Refuse to execute if the authenticated target hostname differs
+  --continue-on-error     Session only: keep queued commands after a completed command fails
+                          Default: cancel unsent queued commands on failure; never replay
   --command TEXT          Execute an inline script instead of --script
+  session controls        {\"op\":\"status|reconnect|cancel|close\",\"id\":\"request-id\"}
+                          Commands may set \"connection\":\"fresh\" to replace the transport
+                          exec processes always create independent fresh connections
   probe                   Authenticate and report transport and terminal capabilities; no command is run
   --relay                 Use a relay instead of trying a direct connection
   --account-user USER     Sign in to GeodomDesk for this invocation
@@ -43,14 +50,86 @@ const USAGE: &str =
 Environment: GEODOMDESK_ACCOUNT_PASSWORD, GEODOMDESK_DEVICE_PASSWORD,
              GEODOMDESK_ADMIN_PASSWORD, GEODOMDESK_DEVICE_CODE";
 
-struct Connection {
-    stream: Stream,
-    peer: PeerInfo,
+pub(super) struct Connection {
+    pub(super) id: String,
+    pub(super) stream: Stream,
+    pub(super) peer: PeerInfo,
     direct: bool,
     transport: &'static str,
     _keep_alive: Option<tokio::sync::mpsc::UnboundedSender<()>>,
     // The framed stream alone does not retain KCP's UDP pump.
     _kcp: Option<crate::kcp_stream::KcpStream>,
+}
+
+#[derive(Clone)]
+pub(super) struct ConnectOptions {
+    pub(super) id: String,
+    pub(super) relay: bool,
+    pub(super) token: String,
+    pub(super) device_password: String,
+    pub(super) admin: Option<auth::Credentials>,
+    pub(super) timeout: u32,
+    pub(super) expected_platform: Option<String>,
+    pub(super) expected_hostname: Option<String>,
+}
+impl ConnectOptions {
+    pub(super) async fn open(&self) -> ResultType<Connection> {
+        let connection = tokio::time::timeout(
+            Duration::from_secs(self.timeout.into()),
+            connect(
+                self.id.clone(),
+                self.relay,
+                self.token.clone(),
+                self.device_password.clone(),
+                self.admin.clone(),
+            ),
+        )
+        .await
+        .context("Timed out connecting or authenticating")
+        .and_then(|result| result)
+        .map_err(|error| super::stage::wrap(error, "connect", "not_started"))?;
+        for (expected, actual, label) in [
+            (
+                &self.expected_platform,
+                &connection.peer.platform,
+                "platform",
+            ),
+            (
+                &self.expected_hostname,
+                &connection.peer.hostname,
+                "hostname",
+            ),
+        ] {
+            if let Some(expected) = expected {
+                if !expected.eq_ignore_ascii_case(actual) {
+                    return Err(super::stage::wrap(
+                        anyhow!("Target {label} mismatch: expected {expected}, received {actual}"),
+                        "target",
+                        "not_started",
+                    ));
+                }
+            }
+        }
+        Ok(connection)
+    }
+}
+
+pub(super) fn connection_info(
+    connection: &Connection,
+    timeout: u32,
+    connecting: Duration,
+    setup: Duration,
+) -> serde_json::Value {
+    serde_json::json!({
+        "event":"ready","connection_id":connection.id,"session_protocol":2,
+        "platform":connection.peer.platform,"hostname":connection.peer.hostname,"version":connection.peer.version,
+        "direct":connection.direct,"transport":connection.transport,"encrypted":connection.stream.is_secured(),
+        "connect_ms":connecting.as_millis(),"setup_ms":setup.as_millis(),
+        "terminal":connection.peer.features.terminal,"terminal_exec":connection.peer.features.terminal_exec,
+        "protocol":if connection.peer.features.terminal_exec {"exec"} else if connection.peer.features.terminal {"legacy"} else {"none"},
+        "max_script_bytes":MAX_SCRIPT,"max_output_bytes":MAX_OUTPUT,"default_timeout":timeout,
+        "session_controls":["status","reconnect","cancel","close"],"connection_policy":["reuse","fresh"]
+    })
 }
 
 #[derive(Clone)]
@@ -168,6 +247,7 @@ async fn connect(
                         }
                         stream.set_max_packet_length(1024 * 1024);
                         return Ok(Connection {
+                            id: uuid::Uuid::new_v4().to_string(),
                             stream,
                             peer: info,
                             direct,
@@ -241,7 +321,8 @@ pub(super) async fn receive_terminal_response(stream: &mut Stream) -> ResultType
 
 pub async fn run_cli(args: impl Iterator<Item = String>) -> ResultType<i32> {
     let args: Vec<_> = args.collect();
-    let json = input::wants_json(&args);
+    let json = input::wants_json(&args)
+        || matches!(args.first().map(String::as_str), Some("session" | "probe"));
     let started = Instant::now();
     let result = run(args.into_iter(), started).await;
     if json {
@@ -271,6 +352,9 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
     let mut command = None;
     let mut json = false;
     let mut connect_timeout = 60u32;
+    let mut expected_platform = None;
+    let mut expected_hostname = None;
+    let mut continue_on_error = false;
     let (mut account_user, mut admin_user) = (None, None);
     let mut timeout = 15u32;
     let mut relay = false;
@@ -284,6 +368,7 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
             }
             "--relay" => relay = true,
             "--json" => json = true,
+            "--continue-on-error" => continue_on_error = true,
             "--ask-device-password" => ask_device_password = true,
             "--non-interactive" => non_interactive = true,
             _ => {
@@ -291,7 +376,24 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
                     .next()
                     .with_context(|| format!("Missing value for {flag}"))?;
                 match flag.as_str() {
-                    "--id" => id = Some(value),
+                    "--id" => {
+                        if id.is_some() {
+                            bail!("Specify --id exactly once; the target must not be silently replaced");
+                        }
+                        id = Some(value);
+                    }
+                    "--expect-platform" => {
+                        if expected_platform.is_some() {
+                            bail!("Specify --expect-platform only once");
+                        }
+                        expected_platform = Some(value);
+                    }
+                    "--expect-hostname" => {
+                        if expected_hostname.is_some() {
+                            bail!("Specify --expect-hostname only once");
+                        }
+                        expected_hostname = Some(value);
+                    }
                     "--shell" => {
                         shell = Some(match value.as_str() {
                             "bash" => ExecShell::BASH,
@@ -300,8 +402,18 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
                             _ => bail!("Unknown shell: {value}"),
                         })
                     }
-                    "--script" => script = Some(value),
-                    "--command" => command = Some(value),
+                    "--script" => {
+                        if script.is_some() {
+                            bail!("Specify --script only once");
+                        }
+                        script = Some(value);
+                    }
+                    "--command" => {
+                        if command.is_some() {
+                            bail!("Specify --command only once");
+                        }
+                        command = Some(value);
+                    }
                     "--connect-timeout" => {
                         connect_timeout = value.parse().context("Invalid connection timeout")?
                     }
@@ -313,7 +425,9 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
             }
         }
     }
-    let id = id.filter(|id| !id.is_empty()).context("Missing --id")?;
+    let id = id
+        .filter(|id| !id.trim().is_empty())
+        .context("Missing --id")?;
     if !(1..=super::MAX_TIMEOUT).contains(&timeout) {
         bail!(
             "Timeout must be between 1 and {} seconds",
@@ -331,6 +445,17 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
     }
     if script.is_some() && command.is_some() {
         bail!("Use either --script or --command");
+    }
+    if continue_on_error && !session {
+        bail!("--continue-on-error applies only to session");
+    }
+    for expected in [&expected_platform, &expected_hostname]
+        .into_iter()
+        .flatten()
+    {
+        if expected.trim().is_empty() {
+            bail!("Expected target properties must not be empty");
+        }
     }
     let is_admin = admin_user.is_some();
     if is_admin && shell == Some(ExecShell::BASH) {
@@ -361,58 +486,44 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
     let device_password = auth::device_password(ask_device_password, non_interactive)?;
     let admin = auth::admin_credentials(admin_user, non_interactive)?;
     let connecting = Instant::now();
-    let mut connection = tokio::time::timeout(
-        Duration::from_secs(connect_timeout.into()),
-        connect(id, relay, token, device_password, admin),
-    )
-    .await
-    .context("Timed out connecting or authenticating")??;
-    let info = serde_json::json!({
-        "event": "ready", "platform": connection.peer.platform,
-        "hostname": connection.peer.hostname, "version": connection.peer.version,
-        "direct": connection.direct, "transport": connection.transport,
-        "encrypted": connection.stream.is_secured(), "connect_ms": connecting.elapsed().as_millis(), "setup_ms": started.elapsed().as_millis(),
-        "terminal": connection.peer.features.terminal,
-        "terminal_exec": connection.peer.features.terminal_exec,
-        "protocol": if connection.peer.features.terminal_exec { "exec" } else if connection.peer.features.terminal { "legacy" } else { "none" },
-        "max_script_bytes": MAX_SCRIPT, "max_output_bytes": MAX_OUTPUT,
-        "default_timeout": timeout
-    });
+    let options = ConnectOptions {
+        id,
+        relay,
+        token,
+        device_password,
+        admin,
+        timeout: connect_timeout,
+        expected_platform,
+        expected_hostname,
+    };
+    let mut connection = options.open().await?;
+    let info = connection_info(
+        &connection,
+        timeout,
+        connecting.elapsed(),
+        started.elapsed(),
+    );
     if probe {
         output::write(info)?;
         return Ok(0);
     }
     if session {
         return session::run(
-            &mut connection.stream,
-            &connection.peer,
+            connection,
+            options,
             is_admin,
             timeout,
             shell,
             info,
+            continue_on_error,
         )
         .await;
     }
     let execution = Instant::now();
     let request = request.context("Missing command")?;
-    let result = if connection.peer.features.terminal_exec {
-        tokio::time::timeout(
-            Duration::from_secs(u64::from(timeout) + 25),
-            exchange(&mut connection.stream, request),
-        )
+    let result = session::execute(&mut connection, request, 1)
         .await
-        .context("Timed out waiting for remote execution result")??
-    } else if connection.peer.features.terminal {
-        legacy::exchange(
-            &mut connection.stream,
-            &connection.peer.platform,
-            request,
-            1,
-        )
-        .await?
-    } else {
-        bail!("Remote device does not support terminal commands");
-    };
+        .map_err(|error| error.context(super::stage::ConnectionId(connection.id.clone())))?;
     if json {
         let mut value = output::result(None, &result, execution.elapsed());
         value["connection"] = info;
@@ -440,6 +551,43 @@ mod tests {
         tokio::net::{TcpListener, TcpStream},
     };
     use sha2::{Digest, Sha256};
+
+    #[tokio::test]
+    async fn ambiguous_targets_and_payloads_are_rejected_before_authentication() {
+        for args in [
+            vec!["exec", "--id", "1", "--id", "2"],
+            vec!["exec", "--id", "1", "--command", "a", "--command", "b"],
+            vec!["exec", "--id", "1", "--script", "a", "--script", "b"],
+            vec![
+                "probe",
+                "--id",
+                "1",
+                "--expect-platform",
+                "Linux",
+                "--expect-platform",
+                "Windows",
+            ],
+            vec![
+                "probe",
+                "--id",
+                "1",
+                "--expect-hostname",
+                "host",
+                "--expect-hostname",
+                "other",
+            ],
+            vec!["probe", "--id", "1", "--expect-hostname", " "],
+            vec!["exec", "--id", "1", "--continue-on-error"],
+        ] {
+            let error = run(args.into_iter().map(str::to_owned), Instant::now())
+                .await
+                .unwrap_err();
+            assert!(
+                !format!("{error:#}").contains("authentication"),
+                "{error:#}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn remote_close_reason_reaches_the_caller() {

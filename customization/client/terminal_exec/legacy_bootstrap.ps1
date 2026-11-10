@@ -40,11 +40,17 @@ if ($digest -ne '__DIGEST__') {
 $parts = $payload.Split(':', 2)
 $script = $utf8.GetString([Convert]::FromBase64String($parts[1]))
 [Console]::WriteLine("`n${marker}:START")
+$window = 0
 $script | & $shell -NoLogo -NoProfile -NonInteractive -EncodedCommand $parts[0] 2>&1 | ForEach-Object {
     $bytes = $utf8.GetBytes($_.ToString() + "`n")
-    for ($offset = 0; $offset -lt $bytes.Length; $offset += 48) {
-        $record = [Convert]::ToBase64String($bytes, $offset, [Math]::Min(48, $bytes.Length - $offset))
+    for ($offset = 0; $offset -lt $bytes.Length; $offset += 2304) {
+        $record = [Convert]::ToBase64String($bytes, $offset, [Math]::Min(2304, $bytes.Length - $offset))
         [Console]::WriteLine("${marker}:DATA:$record")
+        $window++
+        if ($window % 16 -eq 0) {
+            [Console]::WriteLine("${marker}:WINDOW")
+            if ([Console]::ReadLine() -ne 'GDOUTPUT') { exit 1 }
+        }
     }
 }
 $code = $LASTEXITCODE

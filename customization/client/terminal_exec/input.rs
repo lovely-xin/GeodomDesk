@@ -24,7 +24,12 @@ pub(super) fn wants_json(args: &[String]) -> bool {
     while let Some(flag) = args.next() {
         match flag.as_str() {
             "--json" => return true,
-            "--relay" | "--ask-device-password" | "--non-interactive" | "--help" | "-h" => {}
+            "--relay"
+            | "--ask-device-password"
+            | "--non-interactive"
+            | "--help"
+            | "-h"
+            | "--continue-on-error" => {}
             _ => {
                 args.next();
             }

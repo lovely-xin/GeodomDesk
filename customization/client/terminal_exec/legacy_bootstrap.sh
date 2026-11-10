@@ -17,9 +17,16 @@ fi
 gd_script=$(printf '%s' "$gd_payload" | base64 -d && printf '.') || exit 1
 gd_script=${gd_script%.}
 printf '\n%s:START\n' "$gd_marker"
-bash --noprofile --norc -c "$gd_script" </dev/null 2>&1 | base64 -w 64 |
+exec 3<&0
+bash --noprofile --norc -c "$gd_script" </dev/null 3<&- 2>&1 | base64 -w 3072 |
     while IFS= read -r gd_line; do
         printf '%s:DATA:%s\n' "$gd_marker" "$gd_line"
+        ((gd_window+=1))
+        if ((gd_window % 16 == 0)); then
+            printf '%s:WINDOW\n' "$gd_marker"
+            IFS= read -r gd_ack <&3 || exit 1
+            [[ $gd_ack == GDOUTPUT ]] || exit 1
+        fi
     done
 gd_status=("${PIPESTATUS[@]}")
 if ((gd_status[1] != 0 || gd_status[2] != 0)); then

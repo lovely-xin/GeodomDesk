@@ -2,9 +2,10 @@
 mod auth;
 mod cli;
 mod input;
-mod output;
 mod legacy;
+mod output;
 mod session;
+mod stage;
 #[cfg(windows)]
 mod windows;
 

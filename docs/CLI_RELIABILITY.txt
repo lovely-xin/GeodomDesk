@@ -1,0 +1,82 @@
+GeodomDesk CLI：连接复用、故障恢复与实践说明
+
+适用范围
+本说明描述会话协议 session_protocol=2。以当前安装版 --help 和 ready 返回值为准。只有版本号 1.5.1 不足以判断能力；旧构建可能不支持控制操作。此功能复用加密连接，每条脚本仍使用独立进程。
+
+一、日常操作
+1. 找到完整安装目录中的 geodomdesk-cli.exe（Windows）或 geodomdesk-cli（Linux）。不要单独复制启动器。
+2. 先 probe 确认设备 ID、hostname、platform、terminal 能力和连接方式。probe 不运行远端 Shell。
+3. 偶尔运行命令使用 exec；每次 exec 都创建独立连接。连续操作启动一次 session 并保留三个管道。
+4. 等待 ready，再写一行 JSON 并 flush。推荐一问一答，读取对应 id 的结果再提交下一条。
+5. 始终排空 stdout 和 stderr。stdout 是 JSON Lines，结果中的 stdout/stderr 字段是 Base64 字节。
+
+Windows 示例（DEVICE_ID、EXPECTED_HOST 请替换为实际值）：
+$cli = 'C:\Program Files\GeodomDesk\geodomdesk-cli.exe'
+& $cli probe --id DEVICE_ID --non-interactive --connect-timeout 30
+& $cli exec --id DEVICE_ID --shell bash --command 'pwd' --json --non-interactive --timeout 15 --expect-platform Linux --expect-hostname EXPECTED_HOST
+& $cli session --id DEVICE_ID --shell bash --non-interactive --timeout 15 --connect-timeout 30 --expect-platform Linux --expect-hostname EXPECTED_HOST
+
+向 session 的标准输入逐行发送：
+{"id":"check-1","script":"pwd"}
+{"id":"check-2","script_file":"C:\\work\\check.sh","timeout":60}
+{"id":"check-3","connection":"fresh","script":"pwd"}
+{"id":"status-1","op":"status"}
+{"id":"reset-1","op":"reconnect"}
+{"id":"stop-1","op":"cancel"}
+{"id":"close-1","op":"close"}
+
+script_file 是发起端本机路径；script 和 script_file 二选一。script_file 不能为 -。脚本以 UTF-8 编码，shell 按目标选择 bash、powershell 或已安装的 pwsh。Windows 管理员终端保留原有 --admin-user 验证流程。
+
+二、三个容易混淆的动作
+connection=fresh：给这条新请求创建新连接，在轮到它执行时替换旧连接；不会抢占已经在执行的请求。
+op=reconnect：立即停止等待当前请求，丢弃旧连接，取消尚未发送的队列，再重新认证。适合旧请求卡住时恢复。等待带相应 id 的 ready 后再发命令。
+op=cancel：立即停止等待当前请求并丢弃连接，取消尚未发送的队列，保留 CLI 进程。下一条新请求会重新连接。
+op=close：释放连接、取消当前及排队请求，保留 CLI 进程。结束整个会话应关闭 stdin 并等待进程退出。
+
+cancel/reconnect/close 是客户端控制动作，不保证远端业务进程停止，更不表示撤销已发生的修改。旧连接晚到的结果不能混入新连接：新连接有独立 connection_id，旧传输被丢弃，每次旧协议执行也有独立终端编号。
+
+三、结果判断及安全重试
+ok=true：CLI 收到了完整结果，远端退出码为 0 且未报告执行错误。
+execution_state=finished：收到了远端结果；可能成功，也可能是脚本退出码非零。修改可能已经部分发生。
+execution_state=not_started：此请求未发送执行。修正参数、确认目标或恢复连接后可以重新提交。
+execution_state=unknown：无法确认远端最终状态。超时、取消、断线、执行期间输入损坏都可能产生此状态。先运行只读检查核对状态，不能直接重放有副作用的命令。
+retry_safe=true 仅表示本次请求没有执行，不表示脚本本身安全，也不等于授权重试。
+id 只是结果关联标签，不是幂等键。CLI 不提供跨请求、跨连接的去重或“恰好执行一次”保证。
+
+失败结果带 code、phase、execution_state、retry_safe。阶段包括 request、connect、target、prepare、upload、start、execution、input、queue。不要按自然语言错误文本决定自动重试。
+fatal=false 表示 CLI 会话还可接收输入；不代表旧连接仍可用。connection_lost=true 表示已丢弃旧连接。
+fatal=true 表示当前 CLI 进程不能继续；正常关闭并等待退出，然后按结果状态决定后续动作。
+
+四、防呆规则
+- 每次只允许一个执行请求占用连接，最多另有 16 条未开始的请求。队列满返回 busy，不执行超出的请求。控制请求不进入该队列，可以处理卡住的执行。
+- 推荐一次提交一条，等结果再提交下一条。批处理默认在一个已执行命令失败后取消尚未执行的队列，避免前置步骤失败后继续修改。
+- 只有相互独立的批量检查才使用 session --continue-on-error；连接或传输失败仍取消未发送队列。
+- 活跃请求与排队请求不能重复使用相同的非空 id。重复请求被拒绝，原请求继续处理。控制请求可省略 id，或使用新的唯一 id。
+- 控制操作只能包含 op 和 id；不会悄悄忽略附带的脚本。拼错字段、非法 Shell、超出时限、脚本与文件同时出现都会在执行前拒绝。
+- --id、--script、--command 不能重复指定。--expect-platform 与 --expect-hostname 在每次连接认证后校验目标，不匹配就拒绝执行。hostname 是防误操作条件，不代替加密身份验证。
+- 默认执行时限 15 秒，连接认证默认 60 秒；均接受 1–300 秒。旧协议终端启动、上传、启动确认与执行分阶段计时。上传的逐批进展时限不占执行预算。
+- 脚本上限 64 KiB；新协议每路输出最多 256 KiB，旧协议合并输出最多 256 KiB。会话输入行也有上限；单行过长或输入读取失败会终止会话，活跃执行记为 unknown。
+- 关闭 stdin 后处理已接受的队列再退出。发生过拒绝、执行失败或连接失败的会话最终返回 1；全部成功返回 0。必须同时查看每条结果和进程退出码。
+
+五、恢复流程
+参数错误、目标不符、队列满：请求未执行；修正问题后提交新请求。队列满时先等已有结果，避免忙循环。
+命令退出非零：检查 stdout/stderr 和退出码；默认排队命令已取消。确认业务状态后提交下一条新命令。
+执行超时或中途断线：旧连接丢弃，活跃请求结果 unknown，未发送队列取消。先检查远端任务/文件/服务状态，再决定继续、人工处理或安全重试。
+旧连接卡住：发送 op=reconnect。取消确认应快速返回；新连接的认证还受 connect-timeout 约束，不能把网络认证时间当作取消响应时间。
+CLI 本身无响应：调用方设置总等待上限（连接、分阶段上传和执行预算加合理余量），先尝试控制操作。仍无响应时只结束由本次调用启动的进程树，然后开新实例。不要终止其他远控窗口或所有同名进程。
+恢复失败：保留结构化错误和连接编号；必要时 probe 或用 --relay 做一次有目的的对比。不要无限重连，也不要循环重放未知结果的命令。
+
+六、设计依据与边界
+采用明确状态转换：ready → busy → ready；传输异常 → disconnected；显式新请求或 reconnect → 重新认证 → ready。连接由单个执行任务独占，控制通道仍可读取，避免对同一传输并发读写。队列与输出都设置容量限制，避免无限积压。
+参考 OpenSSH 的连接复用与独立新连接、Paramiko 的每命令独立通道、PowerShell 的会话生命周期管理。这里没有引入跨进程守护服务，减少共享状态和故障传播。
+旧终端兼容修复：先用短握手关闭输入回显，再发送引导程序；脚本分批确认；输出分段且按窗口确认，避免有界输出队列因回显/突发数据丢失而卡住。
+能力边界：断网时客户端无法证明远端进程已经停止；操作系统进程树和网络认证有自身时延；目标机异常、重启或权限变化仍会导致失败。可靠性来自可识别的结果、有限等待、连接隔离和不盲目重放，不承诺所有环境下永不失败。
+
+参考官方资料：
+OpenSSH：https://man.openbsd.org/ssh_config （ControlMaster、ControlPath、ConnectTimeout、ServerAliveInterval）
+Paramiko：https://docs.paramiko.org/en/stable/api/client.html （exec_command、close）
+PowerShell：https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_pssessions
+
+七、验证与发布
+先通过本地编译、模块回归、打包检查、Windows PowerShell 兼容脚本和真实设备故障场景，再提交触发远端构建。发布包与测试提交必须对应。测试覆盖与未覆盖平台写入独立验证报告。
+不要从“一个目标通过”推断所有设备和网络环境都通过。不要自动升级目标机或覆盖本机客户端来掩盖兼容问题。

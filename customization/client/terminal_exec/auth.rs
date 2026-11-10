@@ -16,6 +16,7 @@ const DEVICE_PASSWORD: &str = "GEODOMDESK_DEVICE_PASSWORD";
 const ADMIN_PASSWORD: &str = "GEODOMDESK_ADMIN_PASSWORD";
 const DEVICE_CODE: &str = "GEODOMDESK_DEVICE_CODE";
 
+#[derive(Clone)]
 pub(super) struct Credentials {
     pub(super) username: String,
     pub(super) password: String,

@@ -42,7 +42,7 @@ geodomdesk-cli session --id DEVICE_ID --non-interactive --timeout 120
 
 先返回 `event: ready`，之后每条命令返回一行 `event: result`。`stdout`、`stderr` 使用 Base64 编码，`exit_code` 是远端退出码；旧终端的错误输出合并到 `stdout`。逐条提交并等待结果即可复用连接，命令使用独立进程，不保留上一条命令的工作目录和变量。关闭标准输入会在已提交命令执行完成后退出。分别启动的 `exec` 进程仍各自建立连接。
 
-参数或脚本无效时返回 `fatal: false`，可以修正后继续；连接中断、传输或等待结果超时时返回 `fatal: true` 并结束会话，不自动重跑命令。此时命令可能已执行，应先核对远端状态。启动、分批上传和执行分别计时；旧终端上传每批最多等待 15 秒进展，`timeout` 仅从脚本开始执行后计时，范围为 1–300 秒。脚本上限为 64 KiB，单个输出通道上限为 256 KiB；旧终端合并输出上限为 256 KiB。
+会话协议 `session_protocol: 2` 将连接与 CLI 进程分开管理：参数错误可修正后继续；连接、传输或执行等待失败时丢弃旧连接、取消尚未发送的队列，返回 `fatal: false`，下一条新请求可重新建连。执行结果未知时先核对远端状态，不自动重跑命令。只有致命输入错误等无法继续处理时返回 `fatal: true` 并退出进程。启动、分批上传和执行分别计时；旧终端上传每批最多等待 15 秒进展，`timeout` 仅从脚本开始执行后计时，范围为 1–300 秒。脚本上限为 64 KiB，单个输出通道上限为 256 KiB；旧终端合并输出上限为 256 KiB。
 
 ### Agent 常用增强参数
 
@@ -104,3 +104,26 @@ Ubuntu 和 Android 不展示 Windows 专用的打印机驱动安装入口。
 ## 源代码与许可
 
 定制代码和构建流程在本仓库维护，软件沿用 RustDesk 的开源许可。参见 [LICENSE](LICENSE)。
+
+
+### 新建连接与故障恢复
+
+以下控制要求 `ready.session_protocol >= 2`。`connection: fresh` 在轮到该请求执行时替换连接；卡住时使用 `reconnect` 立即停止当前等待、取消未发送的队列并重新认证。每条控制使用新的 id 或省略 id，等待其确认后继续。
+
+```json
+{"id":"new-check","connection":"fresh","script":"pwd"}
+{"id":"state","op":"status"}
+{"id":"reset","op":"reconnect"}
+{"id":"stop","op":"cancel"}
+{"id":"release","op":"close"}
+```
+
+`cancel`、`close` 都释放连接并保留 CLI 进程，下一条新请求重新连接。关闭 stdin 才结束整个会话。控制操作只接受 op 和 id，附带脚本等字段会被拒绝。
+
+默认一次执行一条，最多再排队 16 条。命令失败会取消未开始的队列，防止依赖步骤继续执行；只有相互独立的批处理才加 `--continue-on-error`。发生过失败或拒绝时会话最终返回 1，全成功返回 0。推荐逐条发送、等待结果，避免排队依赖步骤。
+
+可使用 `--expect-platform Linux`、`--expect-hostname EXPECTED_HOST` 在每次认证后核对目标，不匹配则拒绝执行。连接编号 `connection_id` 可用于确认是否已经换新连接。重复指定目标和脚本参数、重复使用活跃/排队请求 id 都会被拒绝。
+
+恢复判断应读取 `code`、`phase` 和 `execution_state`：`not_started` 表示没有执行；`finished` 表示收到结果但可能业务失败；`unknown` 表示无法确认远端状态，不能盲目重试。`retry_safe` 仅反映本次请求是否开始。取消或重连不保证远端业务进程终止，也不撤销已发生的修改。id 仅关联结果，不提供幂等去重。
+
+完整的操作示例、超时预算、故障恢复步骤、兼容边界和设计依据见 [CLI 实践说明](docs/CLI_RELIABILITY.txt)。
