@@ -1,0 +1,148 @@
+name: Build standalone GeodomDesk CLI
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_number:
+        description: Build revision recorded in the CLI
+        type: number
+        default: 1
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-standalone-cli.yml'
+      - 'customization/standalone/**'
+      - 'customization/prepare_client.py'
+      - 'customization/customizations/**'
+      - 'customization/client/terminal_exec*'
+      - 'customization/client/terminal_exec/**'
+      - 'customization/config/client-channel.json'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: standalone-cli-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CLI_RUST_VERSION: '1.89.0'
+  VCPKG_COMMIT: 9e593bb18ea69cc5095e012465dcd675a822ed0d
+  BUILD_NUMBER: ${{ inputs.build_number || 1 }}
+
+jobs:
+  source:
+    name: Resolve reviewed upstream
+    runs-on: ubuntu-22.04
+    outputs:
+      revision: ${{ steps.revision.outputs.commit }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - id: revision
+        shell: bash
+        run: |
+          commit=$(python3 -c 'import json; print(json.load(open("customization/config/client-channel.json"))["upstream_commit"])')
+          [[ "$commit" =~ ^[0-9a-f]{40}$ ]]
+          printf 'commit=%s\n' "$commit" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: CLI · ${{ matrix.platform }}
+    needs: source
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-x64
+            native_cache: windows-x64
+            runner: windows-2022
+            triplet: x64-windows-static
+            vcpkg: C:\vcpkg
+            executable: geodomdesk-cli.exe
+          - platform: ubuntu-amd64
+            native_cache: ubuntu-x64
+            runner: ubuntu-22.04
+            triplet: x64-linux
+            vcpkg: /opt/artifacts/vcpkg
+            executable: geodomdesk-cli
+    env:
+      VCPKG_DEFAULT_TRIPLET: ${{ matrix.triplet }}
+      VCPKG_DEFAULT_HOST_TRIPLET: ${{ matrix.triplet }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: client
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          repository: rustdesk/rustdesk
+          ref: ${{ needs.source.outputs.revision }}
+          submodules: recursive
+          path: client
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
+        with:
+          toolchain: ${{ env.CLI_RUST_VERSION }}
+      - uses: KyleMayes/install-llvm-action@ebc0426251bc40c7cd31162802432c68818ab8f0
+        if: runner.os == 'Windows'
+        with:
+          version: '15.0.6'
+      - name: Install Ubuntu native build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y build-essential clang cmake curl git libayatana-appindicator3-dev libasound2-dev libclang-dev libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgtk-3-dev libpulse-dev libva-dev libxcb-randr0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxdo-dev libxfixes-dev libxtst-dev libxrandr-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev wayland-protocols libdbus-1-dev libpam0g-dev nasm ninja-build pkg-config unzip xz-utils libssl-dev autoconf automake libtool
+      - name: Prepare standalone CLI sources
+        run: |
+          python -m pip install cmake==4.3.0
+          python -c "import sysconfig; print(sysconfig.get_path('scripts'))" >> "$GITHUB_PATH"
+          version=$(python -c 'import re; print(re.search(r"(?m)^version\s*=\s*\x22([^\x22]+)\x22", open("Cargo.toml").read()).group(1))')
+          python ../customization/prepare_client.py --source . --version "$version" --build-number "$BUILD_NUMBER" --standalone-cli
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          workspaces: client
+          prefix-key: geodomdesk-standalone-cli
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ${{ runner.temp }}/vcpkg-binary-cache
+          key: geodomdesk-vcpkg-${{ matrix.native_cache }}-${{ env.VCPKG_COMMIT }}-${{ hashFiles('client/vcpkg.json', 'client/res/vcpkg/**') }}
+      - uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2
+        with:
+          vcpkgDirectory: ${{ matrix.vcpkg }}
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT }}
+          doNotCache: false
+      - name: Build native libraries
+        env:
+          VCPKG_BINARY_SOURCES: clear;files,${{ runner.temp }}/vcpkg-binary-cache,readwrite
+        run: |
+          mkdir -p "$RUNNER_TEMP/vcpkg-binary-cache"
+          "$VCPKG_ROOT/vcpkg" install --triplet "$VCPKG_DEFAULT_TRIPLET" --x-install-root="$VCPKG_ROOT/installed"
+      - name: Check authentication, SSH and terminal behavior
+        run: |
+          cargo test --locked --release --features embedded-ssh --lib terminal_exec::
+          cargo test --locked --release --features embedded-ssh --lib port_forward::
+          cargo build --locked --release --features embedded-ssh --bin geodomdesk-cli
+      - name: Package and run without a desktop installation
+        env:
+          EXECUTABLE: ${{ matrix.executable }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          mkdir -p ../cli-artifact
+          cp "target/release/$EXECUTABLE" ../cli-artifact/
+          cp ../LICENSE ../docs/standalone-cli.md ../cli-artifact/
+          cd ../cli-artifact
+          "./$EXECUTABLE" --help > "$RUNNER_TEMP/standalone-help.txt"
+          grep -F 'embedded SSH over TCP' "$RUNNER_TEMP/standalone-help.txt"
+          grep -F -- '--ssh-host-fingerprint' "$RUNNER_TEMP/standalone-help.txt"
+          python -c 'import hashlib, os, pathlib; name=os.environ["EXECUTABLE"]; print(hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest()+"  "+name)' > SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: geodomdesk-cli-${{ matrix.platform }}
+          path: cli-artifact
+          if-no-files-found: error

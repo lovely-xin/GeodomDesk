@@ -82,11 +82,11 @@ impl Record {
     fn public(&self, state: &State) -> Value {
         let active = state.active.load(Ordering::Relaxed);
         json!({"tunnel_id":self.tunnel_id,"device_id":self.device_id,
-            "local_host":"127.0.0.1","local_port":self.local_port,
+            "local_host":"127.0.0.1","local_port":self.local_port,"private_stream":self.local_port == 0,
             "remote_host":self.remote_host,"remote_port":self.remote_port,
             "owner":"cli","owner_pid":self.owner_pid,"purpose":self.purpose,
             "state":if state.closed.load(Ordering::Relaxed){"closed"}else if active>0{"active"}else{"listening"},
-            "active_connections":active,"max_connections":MAX_CHANNELS,
+            "active_connections":active,"max_connections":if self.local_port == 0 {1} else {MAX_CHANNELS},
             "last_error":*state.last_error.lock().unwrap_or_else(|poison| poison.into_inner()),"relay":true,
             "payload_encryption":"provided by the forwarded protocol (SSH/HTTPS)"})
     }
@@ -352,6 +352,33 @@ impl Managed {
         remote_port: u16,
         purpose: &str,
     ) -> ResultType<Self> {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))
+            .await
+            .context(
+                "Local tunnel port is unavailable; use --local-port 0 to allocate a free port",
+            )?;
+        Self::start_inner(options, Some(listener), None, host, remote_port, purpose).await
+    }
+
+    #[cfg(feature = "embedded-ssh")]
+    pub(super) async fn start_stream(
+        options: &cli::ConnectOptions,
+        host: String,
+        remote_port: u16,
+    ) -> ResultType<(Self, tokio::io::DuplexStream)> {
+        let (client, relay) = tokio::io::duplex(128 * 1024);
+        let owner = Self::start_inner(options, None, Some(relay), host, remote_port, "Embedded SSH").await?;
+        Ok((owner, client))
+    }
+
+    async fn start_inner(
+        options: &cli::ConnectOptions,
+        listener: Option<TcpListener>,
+        private_stream: Option<tokio::io::DuplexStream>,
+        host: String,
+        remote_port: u16,
+        purpose: &str,
+    ) -> ResultType<Self> {
         if remote_port == 0
             || host.trim().is_empty()
             || host.len() > 253
@@ -359,11 +386,6 @@ impl Managed {
         {
             bail!("Specify a valid remote host and port (1-65535)");
         }
-        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))
-            .await
-            .context(
-                "Local tunnel port is unavailable; use --local-port 0 to allocate a free port",
-            )?;
         let control = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
         let mut options = options.clone();
         options.relay = true;
@@ -374,7 +396,7 @@ impl Managed {
         let record = Record {
             tunnel_id: uuid::Uuid::new_v4().to_string(),
             device_id: options.id.clone(),
-            local_port: listener.local_addr()?.port(),
+            local_port: listener.as_ref().map(TcpListener::local_addr).transpose()?.map_or(0, |address| address.port()),
             remote_host: host,
             remote_port,
             owner_pid: std::process::id(),
@@ -404,6 +426,18 @@ impl Managed {
             let mut first = Some((first, Instant::now()));
             let mut channels = JoinSet::new();
             let mut controls = JoinSet::new();
+            let private = private_stream.is_some();
+            if let (Some(stream), Some((connection, _))) = (private_stream, first.take_if(|_| private)) {
+                status.active.store(1, Ordering::Relaxed);
+                let status = status.clone();
+                channels.spawn(async move {
+                    if let Err(error) = forward(stream, connection).await {
+                        *status.last_error.lock().unwrap_or_else(|poison| poison.into_inner()) =
+                            format!("{error:#}").chars().take(512).collect();
+                    }
+                    status.active.store(0, Ordering::Relaxed);
+                });
+            }
             let (close_tx, mut close_rx) = tokio::sync::mpsc::channel::<()>(1);
             loop {
                 tokio::select! {
@@ -411,7 +445,12 @@ impl Managed {
                         let deadline=first.as_ref().map(|(_,at)|*at+Duration::from_secs(5));
                         if let Some(deadline)=deadline {tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;}else{std::future::pending::<()>().await;}
                     }=>{first=None;},
-                    accepted=listener.accept()=>{
+                    accepted=async {
+                        match &listener {
+                            Some(listener) => listener.accept().await,
+                            None => std::future::pending().await,
+                        }
+                    }=>{
                         let (socket,_)=match accepted {Ok(value)=>value,Err(error)=>{*status.last_error.lock().unwrap_or_else(|poison| poison.into_inner())=error.to_string();break;}};
                         if status.closed.load(Ordering::Relaxed) || status.active.load(Ordering::Relaxed)>=MAX_CHANNELS {drop(socket);continue;}
                         let saved=first.take().filter(|(_,at)|at.elapsed()<Duration::from_secs(5)).map(|(c,_)|c);
@@ -450,7 +489,7 @@ impl Managed {
                         });
                     },
                     _=close_rx.recv()=>break,
-                    _=channels.join_next(),if !channels.is_empty()=>{},
+                    _=channels.join_next(),if !channels.is_empty()=>{if private {break;}},
                     _=controls.join_next(),if !controls.is_empty()=>{},
                 }
             }
@@ -533,7 +572,10 @@ impl Managed {
     }
 }
 
-async fn forward(mut local: TcpStream, mut connection: cli::Connection) -> ResultType<()> {
+async fn forward(
+    mut local: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    mut connection: cli::Connection,
+) -> ResultType<()> {
     connection.terminal_stream()?.set_raw();
     let mut bytes = vec![0u8; 32 * 1024];
     loop {

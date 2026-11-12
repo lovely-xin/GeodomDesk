@@ -21,6 +21,7 @@ from . import (
     printer,
     server_config,
     settings_cleanup,
+    standalone_cli,
     terminal_exec,
     update_channel,
     upstream,
@@ -31,7 +32,7 @@ from .edits import SourceEdits, replace_once
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def prepare(source, version, build_number=1):
+def prepare(source, version, build_number=1, *, standalone=False):
     source = source.resolve()
     release_id = make_release_id(version, build_number)
     cfg = json.loads((ROOT / "config/client-channel.json").read_text(encoding="utf-8"))
@@ -95,6 +96,8 @@ def prepare(source, version, build_number=1):
         "const BUILD_NUMBER: u64 = " + str(build_number) + ";",
     ).encode()
     dependencies.apply(merged, cfg["webrtc_commit"])
+    if standalone:
+        standalone_cli.apply(merged, ROOT)
     upstream_commit = cfg["upstream_commit"]
     if (source / ".git").exists():
         upstream_commit = subprocess.check_output(
