@@ -1,14 +1,19 @@
-name: Sync RustDesk stable release
+name: Sync RustDesk Upstream
+run-name: RustDesk upstream sync · ${{ inputs.upstream_version || 'latest stable' }}
 
 on:
   schedule:
-    - cron: '35 */6 * * *'
+    - cron: '35 */12 * * *'
   workflow_dispatch:
     inputs:
       upstream_version:
         description: 'Official stable RustDesk release tag. Leave blank to select the latest stable release.'
         type: string
         default: ''
+      retry_codex:
+        description: 'Recheck the reviewed release and allow another Codex attempt for the same source pair.'
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -17,11 +22,13 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  generate:
+  prepare_update:
+    name: Prepare upstream update
     if: github.repository == 'lovely-xin/GeodomDesk' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
+      actions: read
       contents: read
     outputs:
       version: ${{ steps.release.outputs.version }}
@@ -32,28 +39,59 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           persist-credentials: false
-      - name: Install preparation dependencies
-        run: python3 -m pip install -r customization/requirements.txt
       - name: Resolve the official stable release
         id: release
         env:
           REQUESTED_VERSION: ${{ inputs.upstream_version }}
+          RETRY_CODEX: ${{ inputs.retry_codex }}
           GITHUB_TOKEN: ${{ github.token }}
-        run: python3 .github/scripts/rustdesk_repair.py resolve --version "$REQUESTED_VERSION"
+        run: |
+          args=(--version "$REQUESTED_VERSION")
+          if [[ "$RETRY_CODEX" == 'true' ]]; then
+            args+=(--recheck)
+          fi
+          python3 .github/scripts/rustdesk_sync.py resolve "${args[@]}"
+      - name: Check for an existing conflict repair attempt
+        id: attempt
+        if: steps.release.outputs.check_required == 'true' && !inputs.retry_codex
+        env:
+          ATTEMPT_NAME: ${{ steps.release.outputs.attempt_name }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/rustdesk_sync.py check-attempt --name "$ATTEMPT_NAME"
+      - name: Install preparation dependencies
+        if: steps.release.outputs.check_required == 'true' && steps.attempt.outputs.already_attempted != 'true'
+        run: python3 -m pip install -r customization/requirements.txt
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        if: steps.release.outputs.check_required == 'true' && steps.attempt.outputs.already_attempted != 'true'
         with:
           repository: rustdesk/rustdesk
           ref: ${{ steps.release.outputs.upstream_commit }}
           submodules: recursive
           path: client
           persist-credentials: false
-      - name: Check whether the reviewed baseline already works
+      - name: Try deterministic customization merge
         id: preflight
+        if: steps.release.outputs.check_required == 'true' && steps.attempt.outputs.already_attempted != 'true'
+        shell: bash
         env:
           VERSION: ${{ steps.release.outputs.version }}
           UPSTREAM_COMMIT: ${{ steps.release.outputs.upstream_commit }}
-        run: python3 .github/scripts/rustdesk_repair.py preflight --source client --version "$VERSION" --commit "$UPSTREAM_COMMIT"
-      - name: Generate the repair with Codex
+        run: |
+          python3 .github/scripts/rustdesk_sync.py preflight --source client --version "$VERSION" --commit "$UPSTREAM_COMMIT" \
+            2>&1 | tee "$RUNNER_TEMP/rustdesk-preflight.log"
+      - name: Record the conflict repair attempt
+        if: steps.preflight.outputs.use_codex == 'true'
+        run: printf '%s\n' "$GITHUB_RUN_ID" > "$RUNNER_TEMP/rustdesk-repair-attempt.txt"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        name: Save the conflict repair attempt
+        if: steps.preflight.outputs.use_codex == 'true'
+        with:
+          name: ${{ steps.release.outputs.attempt_name }}
+          path: ${{ runner.temp }}/rustdesk-repair-attempt.txt
+          retention-days: 7
+          overwrite: true
+          if-no-files-found: error
+      - name: Repair customization conflicts with Codex
         if: steps.preflight.outputs.use_codex == 'true'
         uses: openai/codex-action@bdf19a4a223ec2549a3e2274a0cf61556bc07675 # v1
         with:
@@ -62,39 +100,40 @@ jobs:
           safety-strategy: drop-sudo
           prompt: |
             Prepare GeodomDesk for official RustDesk ${{ steps.release.outputs.version }} at commit ${{ steps.release.outputs.upstream_commit }}.
-            The pristine upstream checkout, including submodules, is in client/. Reproduce the issue with customization/prepare_client.py against a disposable copy of client/.
+            Start with the final 30 lines of ${{ runner.temp }}/rustdesk-preflight.log. Use the pristine upstream checkout in client/ and inspect the affected files. If needed, run customization/prepare_client.py against a disposable copy of client/.
             Refresh customization/reference and source-lock.json from the official source, including files removed upstream. Set only upstream_commit in customization/config/client-channel.json to the requested commit. Adapt the existing customization code and client overlays with the smallest changes needed.
             Keep installation signature, hash and path checks intact. Preserve Windows/Linux CLI, TCP tunnel ownership, closure and reconnect behavior. Preserve existing tests, validation code, GitHub workflows, dependencies, release credentials and publication settings.
-            Changes may only affect customization/reference, client overlays, customization adapters other than customizations/upstream.py, and the upstream commit pin. Leave client/ pristine. Finish with a local patch for the validation job.
-      - name: Save the proposed patch
+            Changes may only affect customization/reference, client overlays, customization adapters other than customizations/upstream.py, and the upstream commit pin. Leave client/ pristine. Apply the edits and summarize the affected files. Later jobs run the full regression suite.
+      - name: Create customization patch
         id: patch
         if: steps.preflight.outputs.repair_needed == 'true'
         run: |
           git add -N --all
-          git diff --binary "$GITHUB_SHA" > "$RUNNER_TEMP/codex.patch"
-          if [[ ! -s "$RUNNER_TEMP/codex.patch" ]]; then
-            echo '::error::Codex did not produce a repair patch. Review its output before retrying.'
+          git diff --binary "$GITHUB_SHA" > "$RUNNER_TEMP/rustdesk-customization.patch"
+          if [[ ! -s "$RUNNER_TEMP/rustdesk-customization.patch" ]]; then
+            echo '::error::The upstream update produced an empty customization patch.'
             exit 1
           fi
-          echo "sha256=$(sha256sum "$RUNNER_TEMP/codex.patch" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(sha256sum "$RUNNER_TEMP/rustdesk-customization.patch" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: steps.preflight.outputs.repair_needed == 'true'
         with:
-          name: proposed-rustdesk-repair
-          path: ${{ runner.temp }}/codex.patch
+          name: rustdesk-customization-patch
+          path: ${{ runner.temp }}/rustdesk-customization.patch
           if-no-files-found: error
 
-  validate:
-    needs: generate
-    if: needs.generate.outputs.repair_needed == 'true'
+  validate_patch:
+    name: Validate customization patch
+    needs: prepare_update
+    if: needs.prepare_update.outputs.repair_needed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: read
     env:
-      VERSION: ${{ needs.generate.outputs.version }}
-      UPSTREAM_COMMIT: ${{ needs.generate.outputs.upstream_commit }}
-      PATCH_SHA256: ${{ needs.generate.outputs.patch_sha256 }}
+      VERSION: ${{ needs.prepare_update.outputs.version }}
+      UPSTREAM_COMMIT: ${{ needs.prepare_update.outputs.upstream_commit }}
+      PATCH_SHA256: ${{ needs.prepare_update.outputs.patch_sha256 }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -108,22 +147,24 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          name: proposed-rustdesk-repair
-          path: ${{ runner.temp }}/repair
+          name: rustdesk-customization-patch
+          path: ${{ runner.temp }}/upstream-sync
       - name: Validate the exact upstream baseline and run project checks
         env:
           PYTHONPATH: customization
         run: |
           python3 -m pip install -r customization/requirements.txt
-          printf '%s  %s\n' "$PATCH_SHA256" "$RUNNER_TEMP/repair/codex.patch" | sha256sum --check
-          cp .github/scripts/rustdesk_repair.py "$RUNNER_TEMP/validate-repair.py"
-          git apply --index "$RUNNER_TEMP/repair/codex.patch"
+          patch="$RUNNER_TEMP/upstream-sync/rustdesk-customization.patch"
+          printf '%s  %s\n' "$PATCH_SHA256" "$patch" | sha256sum --check
+          cp .github/scripts/rustdesk_sync.py "$RUNNER_TEMP/validate-upstream-sync.py"
+          git apply --index "$patch"
           git diff --cached --check
-          python3 -I "$RUNNER_TEMP/validate-repair.py" validate --source client --version "$VERSION" --commit "$UPSTREAM_COMMIT"
+          python3 -I "$RUNNER_TEMP/validate-upstream-sync.py" validate --source client --version "$VERSION" --commit "$UPSTREAM_COMMIT"
           python3 -m unittest discover -s customization/tests
 
-  stage:
-    needs: [generate, validate]
+  stage_candidate:
+    name: Stage release candidate
+    needs: [prepare_update, validate_patch]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -132,15 +173,14 @@ jobs:
       branch: ${{ steps.candidate.outputs.branch }}
       commit: ${{ steps.candidate.outputs.commit }}
     env:
-      VERSION: ${{ needs.generate.outputs.version }}
-      UPSTREAM_COMMIT: ${{ needs.generate.outputs.upstream_commit }}
-      PATCH_SHA256: ${{ needs.generate.outputs.patch_sha256 }}
+      VERSION: ${{ needs.prepare_update.outputs.version }}
+      PATCH_SHA256: ${{ needs.prepare_update.outputs.patch_sha256 }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          name: proposed-rustdesk-repair
-          path: ${{ runner.temp }}/repair
+          name: rustdesk-customization-patch
+          path: ${{ runner.temp }}/upstream-sync
       - name: Push the validated patch to an isolated branch
         id: candidate
         env:
@@ -150,11 +190,12 @@ jobs:
             echo '::error::Main moved during this run. Rerun the repair against the latest main.'
             exit 1
           fi
-          printf '%s  %s\n' "$PATCH_SHA256" "$RUNNER_TEMP/repair/codex.patch" | sha256sum --check
-          cp .github/scripts/rustdesk_repair.py "$RUNNER_TEMP/validate-repair.py"
-          git apply --index "$RUNNER_TEMP/repair/codex.patch"
-          python3 -I "$RUNNER_TEMP/validate-repair.py" scope
-          branch="codex/rustdesk-${VERSION}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          patch="$RUNNER_TEMP/upstream-sync/rustdesk-customization.patch"
+          printf '%s  %s\n' "$PATCH_SHA256" "$patch" | sha256sum --check
+          cp .github/scripts/rustdesk_sync.py "$RUNNER_TEMP/validate-upstream-sync.py"
+          git apply --index "$patch"
+          python3 -I "$RUNNER_TEMP/validate-upstream-sync.py" scope
+          branch="upstream/rustdesk-${VERSION}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           git switch -c "$branch"
           git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
             commit -m "Adapt GeodomDesk to RustDesk $VERSION"
@@ -163,7 +204,8 @@ jobs:
           echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
   verify_native:
-    needs: stage
+    name: Verify Windows and Ubuntu builds
+    needs: stage_candidate
     runs-on: ubuntu-latest
     timeout-minutes: 265
     permissions:
@@ -177,12 +219,13 @@ jobs:
       - name: Require a successful Windows and Ubuntu build for the candidate
         env:
           GH_TOKEN: ${{ github.token }}
-          BRANCH: ${{ needs.stage.outputs.branch }}
-          COMMIT: ${{ needs.stage.outputs.commit }}
-        run: python3 .github/scripts/run_native_build.py "$BRANCH" "$COMMIT" --validation-only
+          BRANCH: ${{ needs.stage_candidate.outputs.branch }}
+          COMMIT: ${{ needs.stage_candidate.outputs.commit }}
+        run: python3 .github/scripts/dispatch_geodomdesk_build.py "$BRANCH" "$COMMIT" --validation-only
 
-  merge:
-    needs: [generate, stage, verify_native]
+  merge_update:
+    name: Merge verified upstream update
+    needs: [prepare_update, stage_candidate, verify_native]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -195,10 +238,10 @@ jobs:
         id: merge
         env:
           GH_TOKEN: ${{ github.token }}
-          BRANCH: ${{ needs.stage.outputs.branch }}
-          COMMIT: ${{ needs.stage.outputs.commit }}
-          VERSION: ${{ needs.generate.outputs.version }}
-          UPSTREAM_COMMIT: ${{ needs.generate.outputs.upstream_commit }}
+          BRANCH: ${{ needs.stage_candidate.outputs.branch }}
+          COMMIT: ${{ needs.stage_candidate.outputs.commit }}
+          VERSION: ${{ needs.prepare_update.outputs.version }}
+          UPSTREAM_COMMIT: ${{ needs.prepare_update.outputs.upstream_commit }}
         run: |
           endpoint="repos/$GITHUB_REPOSITORY"
           if [[ "$(gh api "$endpoint/git/ref/heads/main" --jq .object.sha)" != "$GITHUB_SHA" ]]; then
@@ -224,8 +267,9 @@ jobs:
           echo "commit=$merged" >> "$GITHUB_OUTPUT"
           echo "Merged $pr at \`$merged\`." >> "$GITHUB_STEP_SUMMARY"
 
-  release:
-    needs: merge
+  publish_release:
+    name: Publish GeodomDesk release
+    needs: merge_update
     runs-on: ubuntu-latest
     timeout-minutes: 275
     permissions:
@@ -239,5 +283,5 @@ jobs:
       - name: Build and publish the merged commit
         env:
           GH_TOKEN: ${{ github.token }}
-          COMMIT: ${{ needs.merge.outputs.commit }}
-        run: python3 .github/scripts/run_native_build.py main "$COMMIT"
+          COMMIT: ${{ needs.merge_update.outputs.commit }}
+        run: python3 .github/scripts/dispatch_geodomdesk_build.py main "$COMMIT"
