@@ -19,6 +19,7 @@ from . import (
     native_test_compat,
     p2p,
     printer,
+    recent_sync,
     server_config,
     settings_cleanup,
     standalone_cli,
@@ -52,6 +53,7 @@ def prepare(source, version, build_number=1, *, standalone=False):
     user_data.apply(changes, ROOT)
     settings_cleanup.apply(changes)
     terminal_exec.apply(changes, ROOT)
+    recent_sync.apply(changes, ROOT)
     changes["src/geodomdesk_update.rs"] = (ROOT / "client/geodomdesk_update.rs").read_text(
         encoding="utf-8"
     )

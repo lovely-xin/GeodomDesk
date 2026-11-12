@@ -62,5 +62,10 @@
   "libs/base/protos/message.proto": "03646089840bb5189003aee547d51cd5afd3ccc3843f0e18436b6ef8e134ba0c",
   "src/server/connection.rs": "2968c0f2d3e4575d0da1a40f1be1684880af8db0e6e360be2ce6b1e397cdfaa1",
   "src/server/terminal_helper.rs": "9934fefa00821d9d8cd4314d66396e8ddac7b2457a046566046d2826a3de5ce8",
-  "flutter/lib/desktop/pages/port_forward_page.dart": "4d68e1e8a6c9640d31b278c72a32c8bc2305278724f24a9784a1d3af62b2a275"
+  "flutter/lib/desktop/pages/port_forward_page.dart": "4d68e1e8a6c9640d31b278c72a32c8bc2305278724f24a9784a1d3af62b2a275",
+  "flutter/lib/models/peer_model.dart": "4eae9664abaa10f72f7af8d8ea37c0330a6e358bb58cb54002a57a985da31c82",
+  "flutter/lib/models/ab_model.dart": "2c0a08778636375c5e82a85c9cd106c3934478f7b5a883b008a1484b05f2a6fa",
+  "flutter/lib/common/widgets/address_book.dart": "dfb0ae8f0f69be17cfe7500e5f1515af52b34349cf34adb2e42251c9289c070b",
+  "flutter/lib/common/widgets/peer_card.dart": "99e22b4b4c023d681aa76e3056626c471c4f3acb02e6af9f67717fcee11ea2ef",
+  "flutter/lib/utils/http_service.dart": "8e1142b1d25c8287b317438b815a2b309c1d71e95615ba7e5123ab4794279bd5"
 }
