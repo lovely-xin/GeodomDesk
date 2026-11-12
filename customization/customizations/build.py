@@ -16,6 +16,7 @@ from . import (
     identity,
     id_controls,
     localization,
+    native_test_compat,
     p2p,
     printer,
     server_config,
@@ -67,6 +68,7 @@ def prepare(source, version, build_number=1):
     files.update(branding.assets(ROOT))
     merged = upstream.merge(source, baseline, files)
     localization.complete_catalog(source, baseline, merged)
+    native_test_compat.apply(source, merged)
     cargo = merged["Cargo.toml"].decode()
     actual = re.search(r'(?m)^version\s*=\s*"([^"]+)"', cargo).group(1)
     if actual != version:

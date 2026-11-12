@@ -11,6 +11,8 @@ use std::{time::Duration, vec};
 
 const LINE_BYTES: usize = 512;
 const BATCH_LINES: usize = 16;
+const WINDOWS_BOOTSTRAP_BATCH_LINES: usize = 8;
+const WINDOWS_POWERSHELL: &str = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe";
 const PREPARE_TIMEOUT: Duration = Duration::from_secs(15);
 
 fn input_line_bytes(platform: &str) -> usize {
@@ -78,19 +80,51 @@ fn command(
                 "$false"
             },
         );
-    let launcher = if platform == "Windows" {
-        // The old Windows peer uses this system path even when PowerShell is absent from PATH.
-        format!(
-            "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand {}",
-            encode_powershell(&bootstrap)
-        )
-    } else {
-        format!(
-            "env -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS bash --noprofile --norc -c 'eval \"$(printf %s {} | base64 -d)\"'",
-            crate::encode64(bootstrap)
-        )
-    };
-    Ok((launcher, payload))
+    Ok((bootstrap, payload))
+}
+
+fn bash_launcher(bootstrap: &str) -> String {
+    format!(
+        "env -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS bash --noprofile --norc -c 'eval \"$(printf %s {} | base64 -d)\"'",
+        crate::encode64(bootstrap)
+    )
+}
+
+struct WindowsBootstrap {
+    loader: String,
+    upload: String,
+    encoded: String,
+    verify: String,
+}
+
+fn windows_bootstrap(bootstrap: &str, marker: &str) -> WindowsBootstrap {
+    // Split the marker so echoed input cannot contain a complete protocol record.
+    let (prefix, suffix) = marker.split_at(2);
+    let encoded = crate::encode64(bootstrap);
+    let lines = encoded.len().div_ceil(input_line_bytes("Windows"));
+    let batch = WINDOWS_BOOTSTRAP_BATCH_LINES;
+    let digest = crate::encode64(sha256::hash(bootstrap.as_bytes()).0);
+    WindowsBootstrap {
+        loader: format!(
+            "[Console]::WriteLine();[Console]::WriteLine('{prefix}'+'{suffix}:LOADER');iex([Console]::ReadLine())"
+        ),
+        upload: format!(
+            "$b='';1..{lines}|%{{$b+=[Console]::ReadLine();if($_%{batch} -eq 0){{[Console]::WriteLine();[Console]::WriteLine('{prefix}'+'{suffix}:LOADACK')}}}};iex([Console]::ReadLine())"
+        ),
+        encoded,
+        verify: format!(
+            "$s=[Convert]::FromBase64String($b);if([Convert]::ToBase64String([Security.Cryptography.SHA256]::Create().ComputeHash($s)) -ne '{digest}'){{exit 1}};iex([Text.Encoding]::UTF8.GetString($s))"
+        ),
+    }
+}
+
+fn terminal_lines(data: &[u8], width: usize) -> Vec<u8> {
+    let mut input = Vec::with_capacity(data.len() + data.len().div_ceil(width));
+    for line in data.chunks(width) {
+        input.extend_from_slice(line);
+        input.push(b'\r');
+    }
+    input
 }
 
 async fn send_input(stream: &mut Stream, terminal_id: i32, data: Vec<u8>) -> ResultType<()> {
@@ -110,7 +144,7 @@ pub(super) async fn exchange(
     terminal_id: i32,
 ) -> ResultType<TerminalExecResult> {
     let marker = format!("GD{}", uuid::Uuid::new_v4().simple());
-    let (launcher, payload) = command(platform, &request, &marker)?;
+    let (bootstrap, payload) = command(platform, &request, &marker)?;
     let line_bytes = input_line_bytes(platform);
     let mut terminal = Transcript {
         terminal_id,
@@ -118,6 +152,7 @@ pub(super) async fn exchange(
         ..Default::default()
     };
     let result: ResultType<TerminalExecResult> = async {
+        let mut preparing = "opening legacy terminal";
         tokio::time::timeout(PREPARE_TIMEOUT, async {
             let mut open = TerminalAction::new();
             open.set_open(OpenTerminal {
@@ -140,6 +175,7 @@ pub(super) async fn exchange(
                 }
             }
             if platform == "Linux" {
+                preparing = "disabling legacy terminal echo";
                 // Old PTY services drop output when echoed input fills their bounded queue.
                 send_input(
                     stream,
@@ -148,24 +184,55 @@ pub(super) async fn exchange(
                 )
                 .await?;
                 terminal.until(stream, "GDINIT", "", None).await?;
+                preparing = "starting legacy Bash bootstrap";
+                let launcher = bash_launcher(&bootstrap);
+                send_input(stream, terminal_id, format!("{launcher}\r").into_bytes()).await?;
+            } else {
+                preparing = "starting legacy Windows loader";
+                let loader = windows_bootstrap(&bootstrap, &marker);
+                let launcher = format!(
+                    "{WINDOWS_POWERSHELL} -NoLogo -NoProfile -NonInteractive -Command \"{}\"\r",
+                    loader.loader
+                );
+                send_input(stream, terminal_id, launcher.into_bytes()).await?;
+                terminal.until(stream, &marker, ":LOADER", None).await?;
+
+                preparing = "uploading legacy Windows bootstrap";
+                send_input(
+                    stream,
+                    terminal_id,
+                    format!("{}\r", loader.upload).into_bytes(),
+                )
+                .await?;
+                for batch in loader
+                    .encoded
+                    .as_bytes()
+                    .chunks(line_bytes * WINDOWS_BOOTSTRAP_BATCH_LINES)
+                {
+                    send_input(stream, terminal_id, terminal_lines(batch, line_bytes)).await?;
+                    if batch.len() > line_bytes * (WINDOWS_BOOTSTRAP_BATCH_LINES - 1) {
+                        terminal.until(stream, &marker, ":LOADACK", None).await?;
+                    }
+                }
+                preparing = "starting legacy Windows bootstrap";
+                send_input(
+                    stream,
+                    terminal_id,
+                    format!("{}\r", loader.verify).into_bytes(),
+                )
+                .await?;
             }
-            send_input(stream, terminal_id, format!("{launcher}\r").into_bytes()).await?;
             terminal.until(stream, &marker, ":READY", None).await?;
             Ok::<(), hbb_common::anyhow::Error>(())
         })
         .await
-        .context("Timed out preparing legacy terminal")
+        .with_context(|| format!("Timed out {preparing}"))
         .and_then(|result| result)
         .map_err(|error| super::stage::wrap(error, "prepare", "not_started"))?;
 
         for batch in payload.as_bytes().chunks(line_bytes * BATCH_LINES) {
             tokio::time::timeout(PREPARE_TIMEOUT, async {
-                let mut input = Vec::with_capacity(batch.len() + BATCH_LINES);
-                for line in batch.chunks(line_bytes) {
-                    input.extend_from_slice(line);
-                    input.push(b'\r');
-                }
-                send_input(stream, terminal_id, input).await?;
+                send_input(stream, terminal_id, terminal_lines(batch, line_bytes)).await?;
                 if batch.len() > line_bytes * (BATCH_LINES - 1) {
                     terminal.until(stream, &marker, ":ACK", None).await?;
                 }
@@ -366,7 +433,8 @@ mod tests {
             timeout_seconds: 15,
             ..Default::default()
         };
-        let (launcher, payload) = command("Linux", &request, "GDSTRICT").unwrap();
+        let (bootstrap, payload) = command("Linux", &request, "GDSTRICT").unwrap();
+        let launcher = bash_launcher(&bootstrap);
         let mut child = Command::new("bash")
             .args(["--noprofile", "--norc", "-c", &launcher])
             .env("SHELLOPTS", "errexit:nounset:pipefail:posix")
@@ -393,7 +461,7 @@ mod tests {
     #[test]
     fn regression_legacy_windows_output_records_fit_terminal_width() {
         use std::{
-            io::Write,
+            io::{BufRead, BufReader, Read, Write},
             process::{Command, Stdio},
         };
         let marker = format!("GD{}", uuid::Uuid::new_v4().simple());
@@ -403,11 +471,10 @@ mod tests {
             timeout_seconds: 15,
             ..Default::default()
         };
-        let (launcher, payload) = command("Windows", &request, &marker).unwrap();
-        let encoded = launcher.rsplit_once(' ').unwrap().1;
-        let executable = launcher.split_once(" -NoLogo").unwrap().0;
-        let mut child = Command::new(executable)
-            .args(["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded])
+        let (bootstrap, payload) = command("Windows", &request, &marker).unwrap();
+        let loader = windows_bootstrap(&bootstrap, &marker);
+        let mut child = Command::new(WINDOWS_POWERSHELL)
+            .args(["-NoProfile", "-NonInteractive", "-Command", &loader.loader])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -419,11 +486,40 @@ mod tests {
             .flat_map(|chunk| chunk.iter().copied().chain(std::iter::once(b'\n')))
             .collect::<Vec<_>>();
         let mut input = child.stdin.take().unwrap();
+        writeln!(input, "{}", loader.upload).unwrap();
+        for line in loader
+            .encoded
+            .as_bytes()
+            .chunks(input_line_bytes("Windows"))
+        {
+            input.write_all(line).unwrap();
+            input.write_all(b"\n").unwrap();
+        }
+        writeln!(input, "{}", loader.verify).unwrap();
+        input.flush().unwrap();
+        let mut stdout = BufReader::new(child.stdout.take().unwrap());
+        let mut output = String::new();
+        loop {
+            let mut line = String::new();
+            assert_ne!(stdout.read_line(&mut line).unwrap(), 0, "{output}");
+            output.push_str(&line);
+            if line.trim_end() == format!("{marker}:READY") {
+                break;
+            }
+        }
         input.write_all(&data).unwrap();
         input.write_all(b"GDOUTPUT\n").unwrap();
         drop(input);
+        stdout.read_to_string(&mut output).unwrap();
         let result = child.wait_with_output().unwrap();
-        let output = String::from_utf8(result.stdout).unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(output.contains(&format!("{marker}:LOADER")));
+        assert!(output.contains(&format!("{marker}:LOADACK")));
+        assert!(output.contains(&format!("{marker}:READY")));
         let records = output
             .lines()
             .filter(|line| line.starts_with(&format!("{marker}:DATA:")))
@@ -454,7 +550,19 @@ mod tests {
             timeout_seconds: 15,
             ..Default::default()
         };
-        let (_, payload) = command("Windows", &request, "GDUPLOAD").unwrap();
+        let marker = "GD0123456789abcdef0123456789abcdef";
+        let (bootstrap, payload) = command("Windows", &request, marker).unwrap();
+        let loader = windows_bootstrap(&bootstrap, marker);
+        let launcher = format!(
+            "{WINDOWS_POWERSHELL} -NoLogo -NoProfile -NonInteractive -Command \"{}\"",
+            loader.loader
+        );
+        assert!(launcher.len() < 254 && loader.upload.len() < 254 && loader.verify.len() < 254);
+        assert!(!launcher.contains(marker) && !loader.upload.contains(marker));
+        assert_eq!(
+            crate::decode64(&loader.encoded).unwrap(),
+            bootstrap.as_bytes()
+        );
         let received = payload
             .as_bytes()
             .chunks(input_line_bytes("Windows"))
