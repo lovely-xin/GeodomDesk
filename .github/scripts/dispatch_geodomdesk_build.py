@@ -1,4 +1,4 @@
-"""Dispatch an exact GeodomDesk commit and require its native build checks."""
+"""Dispatch a native GeodomDesk build for an exact commit and verify its jobs."""
 
 import argparse
 import json

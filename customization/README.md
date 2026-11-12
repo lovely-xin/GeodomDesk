@@ -76,9 +76,9 @@ Windows、Ubuntu 新安装首次启动时自动导入一次，中断后下次启
 
 将 OpenAI 项目密钥保存到仓库 Actions Secret `OPENAI_API_KEY`，并启用 Actions 创建 PR 的仓库权限。
 
-1. **Sync RustDesk stable release** 每 6 小时检查官方稳定版并解析提交。也可在 **Actions** 手动运行，输入官方稳定版标签，支持带或省略 `v` 前缀。留空时选择最新稳定版。
-2. 工作流先尝试三方合并，遇到冲突或上游移除定制文件时由 Codex 生成修复。独立任务核对基线、执行源码定制及回归测试。
-3. 候选提交通过 Windows 和 Ubuntu 原生构建、CLI、TCP 隧道和安装校验后，工作流创建并合并 PR。
+1. **Sync RustDesk Upstream** 每 12 小时解析官方稳定版对应的提交。已审查的提交直接结束本次同步。也可在 **Actions** 手动运行，输入带或省略 `v` 前缀的官方稳定版标签，留空选择最新稳定版。
+2. 工作流先尝试三方合并，遇到定制冲突或上游移除定制文件时由 Codex 生成修复。工作流记录近 7 天的冲突修复尝试，同一主分支提交和上游提交组合只自动调用一次。勾选 `retry_codex` 可主动复查并重新尝试。
+3. 独立任务核对定制补丁和官方基线，再运行 Windows、Ubuntu 原生构建及 CLI、TCP 隧道、安装校验。通过后创建并合并 PR。构建阶段遇到临时故障时，可重跑失败任务并沿用本次补丁。
 4. 正式构建从合并提交生成 Windows、Ubuntu 和 Android Release 产物。云端发布程序验证摘要、签署更新清单并切换发布指针。
 
 显示版本和 Release 标签与官方版本一致。内部发布标识采用 `VERSION-rBUILD_NUMBER`，Ubuntu 包版本采用 `VERSION+geodom.BUILD_NUMBER`。内部构建号递增，支持同一官方版本的定制更新。

@@ -1,4 +1,4 @@
-"""Resolve and verify the upstream inputs to the manual RustDesk repair workflow."""
+"""Resolve and verify the upstream inputs to the RustDesk sync workflow."""
 
 import argparse
 import hashlib
@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from urllib.parse import urlencode
 
 
 ROOT = Path.cwd().resolve()
@@ -16,6 +17,17 @@ CUSTOMIZATION = ROOT / "customization"
 CHANNEL = "customization/config/client-channel.json"
 REFERENCE = "customization/reference/"
 LOCK = REFERENCE + "source-lock.json"
+COMPATIBILITY_ERRORS = (
+    "ValueError: Upstream changed",
+    "ValueError: Upstream removed",
+    "ValueError: Upstream added a conflicting",
+    "ValueError: Upstream/customization conflict:",
+    "ValueError: Upstream TCP proxy calls changed",
+    "ValueError: Rendezvous attempt signatures changed",
+    "ValueError: Transport race call sites changed",
+    "ValueError: Peer handshake branch changed:",
+    "ValueError: Trusted key block changed",
+)
 sys.path.insert(0, str(CUSTOMIZATION))
 
 
@@ -29,31 +41,82 @@ def action_output(**values):
             output.write(f"{key}={value}\n")
 
 
-def resolve(requested_version):
+def resolve(requested_version, recheck=False):
     from plan_upstream import official_release, reviewed_version, version_tuple
 
     version, _, commit = official_release(requested_version)
     current = reviewed_version(CUSTOMIZATION)
     if version_tuple(version) < version_tuple(current):
         raise ValueError(f"Select RustDesk {current} or a later stable release")
-    action_output(version=version, upstream_commit=commit)
+    reviewed = json.loads((ROOT / CHANNEL).read_bytes())["upstream_commit"]
+    check_required = recheck or commit != reviewed
+    action_output(
+        version=version,
+        upstream_commit=commit,
+        check_required="true" if check_required else "false",
+        attempt_name=f"rustdesk-repair-attempt-{os.environ['GITHUB_SHA']}-{commit}",
+    )
+    if not check_required:
+        print(f"RustDesk {version} is already reviewed. Source preparation and Codex were skipped.")
+
+
+def check_attempt(name):
+    from plan_upstream import get
+
+    repository = os.environ["GITHUB_REPOSITORY"]
+    repository_id = int(os.environ["GITHUB_REPOSITORY_ID"])
+    head = os.environ["GITHUB_SHA"]
+    endpoint = f"/repos/{repository}/actions/artifacts?" + urlencode({"name": name})
+    for artifact in get(endpoint)["artifacts"]:
+        run = artifact.get("workflow_run") or {}
+        if (
+            artifact["name"] == name
+            and not artifact["expired"]
+            and run.get("repository_id") == repository_id
+            and run.get("head_repository_id") == repository_id
+            and run.get("head_branch") == "main"
+            and run.get("head_sha") == head
+        ):
+            action_output(already_attempted="true")
+            print(f"Codex already attempted this source pair in run {run['id']}.")
+            return
+    action_output(already_attempted="false")
 
 
 def source_commit(source):
     return subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
 
 
-def prepare(source, version, customization=CUSTOMIZATION):
-    subprocess.run(
+def prepare(source, version, customization=CUSTOMIZATION, *, detect_conflict=False):
+    result = subprocess.run(
         [sys.executable, str(customization / "prepare_client.py"), "--source", str(source), "--version", version],
         cwd=ROOT,
-        check=True,
+        capture_output=detect_conflict,
+        text=detect_conflict,
+        encoding="utf-8" if detect_conflict else None,
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"} if detect_conflict else None,
     )
+    if detect_conflict:
+        sys.stdout.write(result.stdout)
+        sys.stderr.write(result.stderr)
+        lines = result.stderr.splitlines()
+        if result.returncode and lines and (
+            lines[-1].startswith(COMPATIBILITY_ERRORS)
+            or (
+                lines[-1].startswith("subprocess.CalledProcessError:")
+                and any(line.startswith("error: patch failed:") for line in lines)
+            )
+        ):
+            return False
+    result.check_returncode()
+    return True
 
 
 def clean_upgrade(source, version, commit, channel):
     old_lock = json.loads((ROOT / LOCK).read_bytes())
-    if any(not (source / name).is_file() for name in old_lock):
+    missing = sorted(name for name in old_lock if not (source / name).is_file())
+    if missing:
+        print("Upstream removed customized files: " + ", ".join(missing))
         return False
     with tempfile.TemporaryDirectory(prefix="geodomdesk-clean-upgrade-") as temporary:
         temporary = Path(temporary)
@@ -71,10 +134,9 @@ def clean_upgrade(source, version, commit, channel):
         channel["upstream_commit"] = commit
         for file, value in (("reference/source-lock.json", new_lock), ("config/client-channel.json", channel)):
             (customization / file).write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
-        try:
-            prepare(original, version)
-            prepare(refreshed, version, customization)
-        except subprocess.CalledProcessError:
+        if not prepare(original, version, detect_conflict=True) or not prepare(
+            refreshed, version, customization, detect_conflict=True
+        ):
             return False
         generated = set()
         for checkout in (original, refreshed):
@@ -83,6 +145,7 @@ def clean_upgrade(source, version, commit, channel):
         for name in set(old_lock) | generated:
             left, right = original / name, refreshed / name
             if not left.is_file() or not right.is_file() or left.read_bytes() != right.read_bytes():
+                print(f"The refreshed customization changes the prepared output for {name}.")
                 return False
         for file in [*("reference/" + name for name in old_lock), "reference/source-lock.json", "config/client-channel.json"]:
             candidate = (customization / file).read_bytes()
@@ -104,9 +167,7 @@ def preflight(source, version, commit):
     with tempfile.TemporaryDirectory(prefix="geodomdesk-repair-") as temporary:
         probe = Path(temporary) / "client"
         shutil.copytree(source, probe, symlinks=True, ignore=shutil.ignore_patterns(".git"))
-        try:
-            prepare(probe, version)
-        except subprocess.CalledProcessError:
+        if not prepare(probe, version, detect_conflict=True):
             action_output(repair_needed="true", use_codex="true")
             return
     action_output(repair_needed="false")
@@ -174,7 +235,10 @@ def validate(source, version, commit):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("resolve").add_argument("--version", default="")
+    resolution = commands.add_parser("resolve")
+    resolution.add_argument("--version", default="")
+    resolution.add_argument("--recheck", action="store_true")
+    commands.add_parser("check-attempt").add_argument("--name", required=True)
     for name in ("preflight", "validate"):
         command = commands.add_parser(name)
         command.add_argument("--source", required=True, type=Path)
@@ -183,7 +247,9 @@ def main():
     commands.add_parser("scope")
     args = parser.parse_args()
     if args.command == "resolve":
-        resolve(args.version)
+        resolve(args.version, args.recheck)
+    elif args.command == "check-attempt":
+        check_attempt(args.name)
     elif args.command == "scope":
         validate_scope()
     else:

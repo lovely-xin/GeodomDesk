@@ -17,7 +17,7 @@
 
 ## 构建与发布
 
-**Sync RustDesk stable release** 每 6 小时检查官方稳定版。新版本通过 Windows 和 Ubuntu 原生检查后自动合并。**Build GeodomDesk** 从合并后的提交构建 Windows、Ubuntu 和 Android。
+**Sync RustDesk Upstream** 每 12 小时检查官方稳定版。新版本通过 Windows 和 Ubuntu 原生检查后自动合并。**Build GeodomDesk** 从合并后的提交构建 Windows、Ubuntu 和 Android。
 
 三种平台通过构建和产物校验后发布 Release。云端核对原生安装文件的来源和摘要，生成签名更新清单，再切换下载和更新指针。
 
