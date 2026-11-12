@@ -45,6 +45,38 @@ def apply(files, root):
         ('rpassword = "=7.3.1"\n', 'rpassword = "=7.3.1"\n'
          'russh = { version = "=0.65.1", default-features = false, features = ["ring", "rsa"] }\n'),
     ])
+    edit(files, f"{terminal}/auth.rs", [
+        ("fn environment_password(", "pub(super) fn environment_password("),
+        ("fn prompt_password(", "pub(super) fn prompt_password("),
+        ('''    let Some(username) = username else {
+        let token = LocalConfig::get_option("access_token");
+        if token.is_empty() {
+            bail!("Sign in to GeodomDesk first or supply --account-user");
+        }
+        return Ok(token);
+    };
+    let account = credentials(''',
+         '''    if let Some(username) = username {
+        return request_account_token(username, non_interactive, false).await;
+    }
+    if let Some((_, token)) = saved_cli_account()? {
+        return Ok(token);
+    }
+    let token = LocalConfig::get_option("access_token");
+    if token.is_empty() {
+        bail!("Run geodomdesk-cli account login --user USER or supply --account-user");
+    }
+    Ok(token)
+}
+
+async fn request_account_token(
+    username: String,
+    non_interactive: bool,
+    remember: bool,
+) -> ResultType<String> {
+    let account = credentials('''),
+        ('        "autoLogin": false,', '        "autoLogin": remember,'),
+    ])
     edit(files, "src/common.rs", [
         ('''pub(crate) async fn post_terminal_login(body: String) -> ResultType<(u16, String)> {
     let server = ui_get_api_server();
@@ -105,6 +137,21 @@ pub fn run_standalone_cli() -> ResultType<i32> {
 """
 
     edit(files, f"{terminal}/cli.rs", [
+        ('       geodomdesk-cli probe --id ID [authentication options]\n',
+         '       geodomdesk-cli probe --id ID [authentication options]\n'
+         '       geodomdesk-cli account login --user USER [--non-interactive]\n'
+         '       geodomdesk-cli account logout\n'),
+        ('    let tunnel=first.as_deref()==Some("tunnel");',
+         '    if first.as_deref() == Some("account") { return auth::manage_account(args).await; }\n'
+         '    let tunnel=first.as_deref()==Some("tunnel");'),
+        ('    let admin = auth::admin_credentials(admin_user, non_interactive)?;',
+         '''    let admin = auth::admin_credentials(admin_user, non_interactive)?;
+    // Read interactive SSH credentials once before establishing a connection or
+    // starting session workers. Fresh connections reuse this process's credentials.
+    if use_ssh && !non_interactive && (ask_ssh_password || ssh_identity.is_some()) {
+        auth::verify_ssh_account(&token).await?;
+    }
+    let ssh = prepare_ssh().map_err(|error| super::stage::wrap(error, "ssh", "not_started"))?;'''),
         ("""  --transport MODE        auto (default): Bash uses SSH over a managed TCP relay
                           terminal: use GeodomDesk terminal; ssh: require SSH Bash
                           Session without --shell keeps the terminal transport
@@ -245,27 +292,29 @@ async fn connect_for(
     if use_ssh && shell.is_none() {
         shell = Some(ExecShell::BASH);
     }
-    let ssh = if use_ssh {
+    let prepare_ssh = || -> ResultType<Option<super::ssh::Options>> {
+        if !use_ssh {
+            return Ok(None);
+        }
         let allow_fallback = command_transport == "auto" && ssh_host.is_none() && ssh_user.is_none()
             && ssh_port == 22 && ssh_identity.is_none() && ssh_known_hosts.is_none()
             && ssh_fingerprint.is_none() && !ssh_strict && !ask_ssh_password;
         let strict_host_key = ssh_strict || ssh_host.is_some();
-        Some(super::ssh::Options {
+        let authentication = super::ssh::Authentication::prepare(
+            ssh_identity.as_deref(), ask_ssh_password, non_interactive,
+        )?;
+        Ok(Some(super::ssh::Options {
             username: ssh_user,
             allow_fallback,
             host: ssh_host,
             port: ssh_port,
-            identity: ssh_identity,
+            authentication,
             known_hosts: ssh_known_hosts
                 .unwrap_or_else(|| hbb_common::config::Config::path("cli-ssh-known_hosts")),
             strict_host_key,
             fingerprint: ssh_fingerprint,
-            ask_password: ask_ssh_password,
-            non_interactive,
             shell: shell.context("Select an SSH shell")?,
-        })
-    } else {
-        None
+        }))
     };'''),
         ('''            (vec!["exec","--id","1","--transport","ssh","--shell","powershell"],"SSH transport requires Bash"),''',
          '''            (vec!["exec","--id","1","--ssh-host","jump","--shell","powershell"],"--ssh-host requires an explicit --ssh-user and --shell"),'''),
@@ -274,6 +323,17 @@ async fn connect_for(
         info["ssh_destination"]=session.destination();'''),
     ])
     edit(files, f"{terminal}/session.rs", [
+        ("    let error = match execute(connection, request.clone(), terminal_id).await {",
+         """    if matches!(&connection.backend, cli::Backend::Terminal(_)) {
+        super::auth::verify_ssh_account(&options.token).await?;
+    }
+    let error = match execute(connection, request.clone(), terminal_id).await {"""),
+        ("    execute(connection, request, terminal_id).await\n}",
+         """    if matches!(&connection.backend, cli::Backend::Terminal(_)) {
+        super::auth::verify_ssh_account(&options.token).await?;
+    }
+    execute(connection, request, terminal_id).await
+}"""),
         ("""                    if options.ssh.is_some() && request.shell.enum_value()!=Ok(ExecShell::BASH) {
                         had_failure=true;output::write(rejected(id,"invalid_request","An SSH Bash session accepts only shell bash"))?;continue;
                     }

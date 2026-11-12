@@ -32,12 +32,10 @@ pub(super) struct Options {
     pub username: Option<String>,
     pub host: Option<String>,
     pub port: u16,
-    pub identity: Option<PathBuf>,
+    pub authentication: Authentication,
     pub known_hosts: PathBuf,
     pub strict_host_key: bool,
     pub fingerprint: Option<String>,
-    pub ask_password: bool,
-    pub non_interactive: bool,
     pub allow_fallback: bool,
     pub shell: ExecShell,
 }
@@ -97,6 +95,22 @@ fn check_host_key(
     if expected_fingerprint.is_some_and(|expected| expected != fingerprint) {
         bail!("SSH host key fingerprint mismatch for {alias} ({fingerprint})");
     }
+    let matches_record = || -> ResultType<Option<bool>> {
+        let recorded = known_hosts::known_host_keys_path(alias, 22, file)?;
+        if recorded.is_empty() {
+            return Ok(None);
+        }
+        if recorded.iter().any(|(_, key)| key == received) {
+            return Ok(Some(true));
+        }
+        bail!("SSH host key changed for {alias} ({fingerprint})");
+    };
+    if let Some(trusted) = matches_record()? {
+        return Ok(trusted);
+    }
+    if strict && expected_fingerprint.is_none() {
+        bail!("SSH host key is not trusted for {alias} ({fingerprint})");
+    }
     if let Some(parent) = file.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -111,16 +125,19 @@ fn check_host_key(
         options.mode(0o600);
     }
     let lock = options.open(lock_path)?;
-    lock.lock()?;
-    let recorded = known_hosts::known_host_keys_path(alias, 22, file)?;
-    if !recorded.is_empty() {
-        if recorded.iter().any(|(_, key)| key == received) {
-            return Ok(true);
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        match lock.try_lock() {
+            Ok(()) => break,
+            Err(fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(fs::TryLockError::WouldBlock) => bail!("SSH host key store is busy"),
+            Err(fs::TryLockError::Error(error)) => return Err(error.into()),
         }
-        bail!("SSH host key changed for {alias} ({fingerprint})");
     }
-    if strict && expected_fingerprint.is_none() {
-        bail!("SSH host key is not trusted for {alias} ({fingerprint})");
+    if let Some(trusted) = matches_record()? {
+        return Ok(trusted);
     }
     options.open(file)?;
     known_hosts::learn_known_hosts_path(alias, 22, received, file)?;
@@ -131,7 +148,6 @@ pub(super) struct Session {
     handle: client::Handle<HostTrust>,
     pub tunnel: tunnel::Managed,
     token: String,
-    verified_at: Instant,
     shell: ExecShell,
     alias: String,
 }
@@ -174,10 +190,7 @@ impl Session {
                 "not_started",
             ));
         }
-        if self.verified_at.elapsed() >= Duration::from_secs(60) {
-            auth::verify_ssh_account(&self.token).await?;
-            self.verified_at = Instant::now();
-        }
+        auth::verify_ssh_account(&self.token).await?;
         let duration = Duration::from_secs(request.timeout_seconds.into());
         let deadline = tokio::time::Instant::now() + duration;
         let channel = tokio::time::timeout_at(deadline, self.handle.channel_open_session())
@@ -185,11 +198,11 @@ impl Session {
             .context("SSH channel setup timed out")
             .and_then(|result| result.context("SSH channel setup failed"))
             .map_err(|error| stage::wrap(error, "prepare", "not_started"))?;
-        let launcher = launcher(self.shell);
         let script = request
             .script
             .strip_prefix(b"\xef\xbb\xbf")
             .unwrap_or(&request.script);
+        let launcher = launcher(self.shell, script.len());
         let exchange = async {
             channel.exec(true, launcher).await?;
             let mut result = TerminalExecResult::new();
@@ -258,14 +271,39 @@ fn append(output: &mut Vec<u8>, data: &[u8]) -> ResultType<()> {
     Ok(())
 }
 
-fn launcher(shell: ExecShell) -> String {
+fn launcher(shell: ExecShell, script_len: usize) -> String {
     match shell {
-        ExecShell::BASH => r#"env -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS bash --noprofile --norc -c 'script=$(cat) || exit 1; exec bash --noprofile --norc -c "$script" </dev/null'"#.into(),
+        ExecShell::BASH => {
+            const BOOTSTRAP: &str = r#"umask 077
+script=$(mktemp) || exit 1
+trap 'rm -f -- "$script"' EXIT
+trap 'exit 1' HUP INT TERM
+cat >"$script" || exit 1
+bytes=$(wc -c <"$script") || exit 1
+if [ "$bytes" -ne "$1" ]; then
+    printf '%s\n' 'Incomplete Bash script' >&2
+    exit 1
+fi
+bash --noprofile --norc "$script" </dev/null"#;
+            format!(
+                "env -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS bash --noprofile --norc -c '{}' geodomdesk-bash {script_len}",
+                BOOTSTRAP.replace('\'', "'\\''")
+            )
+        }
         ExecShell::WINDOWS_POWERSHELL | ExecShell::POWERSHELL_CORE => {
-            let program = if shell == ExecShell::WINDOWS_POWERSHELL { "powershell.exe" } else { "pwsh.exe" };
+            let program = if shell == ExecShell::WINDOWS_POWERSHELL {
+                "powershell.exe"
+            } else {
+                "pwsh.exe"
+            };
             let code: Vec<u8> = include_str!("exec_bootstrap.ps1")
-                .encode_utf16().flat_map(u16::to_le_bytes).collect();
-            format!("{program} -NoLogo -NoProfile -NonInteractive -EncodedCommand {}", STANDARD.encode(code))
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect();
+            format!(
+                "{program} -NoLogo -NoProfile -NonInteractive -EncodedCommand {}",
+                STANDARD.encode(code)
+            )
         }
     }
 }
@@ -330,7 +368,6 @@ pub(super) async fn open(
 ) -> ResultType<cli::Connection> {
     let started = Instant::now();
     auth::verify_ssh_account(&options.token).await?;
-    let verified_at = Instant::now();
     let host = ssh.host.as_deref().unwrap_or("127.0.0.1");
     let (tunnel, stream) = tunnel::Managed::start_stream(options, host.into(), ssh.port)
         .await
@@ -418,13 +455,14 @@ pub(super) async fn open(
         }
         result => result.context("SSH handshake failed")?,
     };
-    authenticate(&mut handle, username, ssh).await?;
+    ssh.authentication
+        .authenticate(&mut handle, username)
+        .await?;
     Ok(cli::Connection::from_ssh(
         Session {
             handle,
             tunnel,
             token: options.token.clone(),
-            verified_at,
             shell: ssh.shell,
             alias,
         },
@@ -446,83 +484,140 @@ fn is_early_disconnect(error: &hbb_common::anyhow::Error) -> bool {
     }
 }
 
-async fn authenticate(
-    handle: &mut client::Handle<HostTrust>,
-    username: &str,
-    ssh: &Options,
-) -> ResultType<()> {
-    let password = match std::env::var("GEODOMDESK_SSH_PASSWORD") {
-        Ok(value) => Some(value),
-        Err(std::env::VarError::NotPresent) => None,
-        Err(std::env::VarError::NotUnicode(_)) => {
-            bail!("GEODOMDESK_SSH_PASSWORD must be valid Unicode")
-        }
-    };
-    let identity = ssh.identity.clone().or_else(|| {
-        let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })?;
-        ["id_ed25519", "id_ecdsa", "id_rsa"]
-            .into_iter()
-            .map(|file| PathBuf::from(&home).join(".ssh").join(file))
-            .find(|file| file.is_file())
-            .filter(|_| password.is_none() && !ssh.ask_password)
-    });
-    let used_identity = identity.is_some();
-    if let Some(identity) = identity {
-        if !fs::metadata(&identity)?.is_file() {
-            bail!("SSH identity must be a regular file");
-        }
-        let mut key = keys::load_secret_key(&identity, None);
-        if matches!(key, Err(keys::Error::KeyIsEncrypted)) {
-            let passphrase = std::env::var("GEODOMDESK_SSH_KEY_PASSPHRASE")
-                .ok()
-                .map(Ok)
-                .unwrap_or_else(|| {
-                    if ssh.non_interactive {
-                        return Err(std::io::Error::other("Set GEODOMDESK_SSH_KEY_PASSPHRASE"));
-                    }
-                    rpassword::prompt_password("SSH private-key passphrase: ")
-                })?;
-            key = keys::load_secret_key(&identity, Some(&passphrase));
-        }
-        let key = PrivateKeyWithHashAlg::new(
-            Arc::new(key?),
-            handle.best_supported_rsa_hash().await?.flatten(),
-        );
-        if handle
-            .authenticate_publickey(username, key)
-            .await?
-            .success()
-        {
-            return Ok(());
-        }
+#[derive(Clone)]
+pub(super) struct Authentication {
+    identity: Option<Arc<keys::PrivateKey>>,
+    password: Option<Arc<str>>,
+}
+
+impl Authentication {
+    pub(super) fn prepare(
+        identity: Option<&Path>,
+        ask_password: bool,
+        non_interactive: bool,
+    ) -> ResultType<Self> {
+        const PASSWORD: &str = "GEODOMDESK_SSH_PASSWORD";
+        let password = match auth::environment_password(PASSWORD)? {
+            Some(password) => Some(password),
+            None if ask_password => Some(auth::prompt_password(
+                PASSWORD,
+                "Target SSH password: ",
+                non_interactive,
+            )?),
+            None => None,
+        };
+        let identity = if let Some(path) = identity {
+            Some(Arc::new(load_identity(path, true, non_interactive)?))
+        } else if password.is_none() {
+            std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).and_then(|home| {
+                ["id_ed25519", "id_ecdsa", "id_rsa"]
+                    .into_iter()
+                    .find_map(|name| {
+                        let path = PathBuf::from(&home).join(".ssh").join(name);
+                        load_identity(&path, false, true).ok().map(Arc::new)
+                    })
+            })
+        } else {
+            None
+        };
+        Ok(Self {
+            identity,
+            password: password.map(Arc::from),
+        })
     }
-    let password = match password {
-        Some(password) => Some(password),
-        None if ssh.ask_password && !ssh.non_interactive => {
-            Some(rpassword::prompt_password("Target SSH password: ")?)
+
+    async fn authenticate(
+        &self,
+        handle: &mut client::Handle<HostTrust>,
+        username: &str,
+    ) -> ResultType<()> {
+        if let Some(identity) = &self.identity {
+            let key = PrivateKeyWithHashAlg::new(
+                Arc::clone(identity),
+                handle.best_supported_rsa_hash().await?.flatten(),
+            );
+            if handle
+                .authenticate_publickey(username, key)
+                .await?
+                .success()
+            {
+                return Ok(());
+            }
         }
-        None if ssh.ask_password => bail!("Set GEODOMDESK_SSH_PASSWORD for non-interactive use"),
-        None => None,
-    };
-    if let Some(password) = password {
-        if handle
-            .authenticate_password(username, password)
-            .await?
-            .success()
-        {
-            return Ok(());
+        if let Some(password) = &self.password {
+            if handle
+                .authenticate_password(username, password.to_string())
+                .await?
+                .success()
+            {
+                return Ok(());
+            }
+            bail!("SSH destination rejected the account credentials");
         }
-        bail!("SSH destination rejected the account credentials");
+        if self.identity.is_some() {
+            bail!("SSH destination rejected the private key");
+        }
+        Err(Unavailable::Credentials.into())
     }
-    if used_identity {
-        bail!("SSH destination rejected the private key");
+}
+
+fn load_identity(
+    path: &Path,
+    explicit: bool,
+    non_interactive: bool,
+) -> ResultType<keys::PrivateKey> {
+    const PASSPHRASE: &str = "GEODOMDESK_SSH_KEY_PASSPHRASE";
+    if !fs::metadata(path)?.is_file() {
+        bail!("SSH identity must be a regular file");
     }
-    Err(Unavailable::Credentials.into())
+    match keys::load_secret_key(path, None) {
+        Err(keys::Error::KeyIsEncrypted) => {
+            let passphrase = match auth::environment_password(PASSPHRASE)? {
+                Some(passphrase) => passphrase,
+                None if explicit => auth::prompt_password(
+                    PASSPHRASE,
+                    "SSH private-key passphrase: ",
+                    non_interactive,
+                )?,
+                None => bail!("Encrypted default SSH key requires a passphrase"),
+            };
+            Ok(keys::load_secret_key(path, Some(&passphrase))?)
+        }
+        result => Ok(result?),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bash_launcher_preserves_script_bytes_and_rejects_incomplete_input() {
+        use std::{
+            io::Write,
+            process::{Command, Stdio},
+        };
+
+        let script = b"printf '[%s]' tail\\\n";
+        let run = |bytes: &[u8]| {
+            let mut child = Command::new("/bin/sh")
+                .args(["-c", &launcher(ExecShell::BASH, script.len())])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(bytes).unwrap();
+            child.wait_with_output().unwrap()
+        };
+        let complete = run(script);
+        assert!(complete.status.success());
+        assert_eq!(complete.stdout, b"[tail]");
+        let incomplete = run(&script[..script.len() - 1]);
+        assert!(!incomplete.status.success());
+        assert!(incomplete.stdout.is_empty());
+    }
 
     fn test_key(byte: u8) -> keys::PublicKey {
         let mut wire = b"\0\0\0\x0bssh-ed25519\0\0\0\x20".to_vec();
@@ -544,6 +639,10 @@ mod tests {
         assert!(check_host_key(&file, &alias, &key, true, None).unwrap());
         assert!(check_host_key(&file, &alias, &changed, false, None).is_err());
         assert!(check_host_key(&file, &alias, &changed, true, Some(&fingerprint)).is_err());
+        assert!(check_host_key(&file, &alias, &key, true, None).unwrap());
+        let lock_path = root.join("known_hosts.lock");
+        fs::remove_file(&lock_path).unwrap();
+        fs::create_dir(&lock_path).unwrap();
         assert!(check_host_key(&file, &alias, &key, true, None).unwrap());
         fs::remove_dir_all(root).unwrap();
     }

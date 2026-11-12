@@ -9,7 +9,7 @@ on:
         default: 1
   pull_request:
     branches: [main]
-    paths:
+    paths: &cli-paths
       - '.github/workflows/build-standalone-cli.yml'
       - 'customization/standalone/**'
       - 'customization/prepare_client.py'
@@ -17,18 +17,22 @@ on:
       - 'customization/client/terminal_exec*'
       - 'customization/client/terminal_exec/**'
       - 'customization/config/client-channel.json'
+      - 'docs/standalone-cli.md'
+  push:
+    branches: [main]
+    paths: *cli-paths
 
 permissions:
   contents: read
 
 concurrency:
   group: standalone-cli-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CLI_RUST_VERSION: '1.89.0'
   VCPKG_COMMIT: 9e593bb18ea69cc5095e012465dcd675a822ed0d
-  BUILD_NUMBER: ${{ inputs.build_number || 1 }}
+  BUILD_NUMBER: ${{ inputs.build_number || github.run_number }}
 
 jobs:
   source:
@@ -136,16 +140,72 @@ jobs:
           EXECUTABLE: ${{ matrix.executable }}
           PLATFORM: ${{ matrix.platform }}
         run: |
-          mkdir -p ../cli-artifact
-          cp "target/release/$EXECUTABLE" ../cli-artifact/
-          cp ../LICENSE ../docs/standalone-cli.md ../cli-artifact/
-          cd ../cli-artifact
-          "./$EXECUTABLE" --help > "$RUNNER_TEMP/standalone-help.txt"
-          grep -F 'embedded SSH over TCP' "$RUNNER_TEMP/standalone-help.txt"
-          grep -F -- '--ssh-host-fingerprint' "$RUNNER_TEMP/standalone-help.txt"
-          python -c 'import hashlib, os, pathlib; name=os.environ["EXECUTABLE"]; print(hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest()+"  "+name)' > SHA256SUMS
+          version=$(python -c 'import json; print(json.load(open("geodomdesk-build-config.json"))["release_id"])')
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-r[0-9]+$ ]]
+          artifact=$(mkdir -p ../cli-artifact && cd ../cli-artifact && pwd)
+          stage=$(mktemp -d)
+          unpacked=$(mktemp -d)
+          cp "target/release/$EXECUTABLE" ../LICENSE ../docs/standalone-cli.md "$stage/"
+          cd "$stage"
+          sha256sum "$EXECUTABLE" > SHA256SUMS
+          name="geodomdesk-cli-$version-$PLATFORM"
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            archive="$name.tar.gz"
+            chmod 0755 "$EXECUTABLE"
+            tar -czf "$artifact/$archive" "$EXECUTABLE" LICENSE standalone-cli.md SHA256SUMS
+            tar -xzf "$artifact/$archive" -C "$unpacked"
+            test -x "$unpacked/$EXECUTABLE"
+          else
+            archive="$name.zip"
+            python -m zipfile -c "$artifact/$archive" "$EXECUTABLE" LICENSE standalone-cli.md SHA256SUMS
+            python -m zipfile -e "$artifact/$archive" "$unpacked"
+          fi
+          (
+            cd "$unpacked"
+            sha256sum --check SHA256SUMS
+            "./$EXECUTABLE" --help > "$RUNNER_TEMP/standalone-help.txt"
+            grep -F 'embedded SSH over TCP' "$RUNNER_TEMP/standalone-help.txt"
+            grep -F -- 'account login' "$RUNNER_TEMP/standalone-help.txt"
+          )
+          cd "$artifact"
+          sha256sum "$archive" > "$archive.sha256"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: geodomdesk-cli-${{ matrix.platform }}
           path: cli-artifact
           if-no-files-found: error
+
+  release:
+    name: Publish standalone CLI
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: geodomdesk-cli-*
+          path: cli-release
+      - name: Verify and publish packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          shopt -s nullglob
+          windows=(cli-release/geodomdesk-cli-windows-x64/geodomdesk-cli-*-windows-x64.zip)
+          ubuntu=(cli-release/geodomdesk-cli-ubuntu-amd64/geodomdesk-cli-*-ubuntu-amd64.tar.gz)
+          [[ ${#windows[@]} == 1 && ${#ubuntu[@]} == 1 ]]
+          version=${windows[0]##*/}
+          version=${version#geodomdesk-cli-}
+          version=${version%-windows-x64.zip}
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-r[0-9]+$ ]]
+          [[ ${ubuntu[0]##*/} == "geodomdesk-cli-$version-ubuntu-amd64.tar.gz" ]]
+          assets=()
+          for package in "${windows[0]}" "${ubuntu[0]}"; do
+            (cd "$(dirname "$package")"; sha256sum --check "$(basename "$package").sha256")
+            assets+=("$package" "$package.sha256")
+          done
+          gh release create "cli-v$version" "${assets[@]}" --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" --title "GeodomDesk CLI $version" --latest=false \
+            --notes 'Standalone GeodomDesk CLI for Windows and Ubuntu with embedded SSH.'
