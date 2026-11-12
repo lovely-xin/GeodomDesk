@@ -7,6 +7,14 @@ on:
         description: 'Optional failed run with successful, unpublished desktop builds; exact source/recipe checks required'
         type: string
         default: ''
+      validation_only:
+        description: 'Run Windows and Ubuntu checks for the selected branch'
+        type: boolean
+        default: false
+      expected_sha:
+        description: 'Exact source commit for an automated build'
+        type: string
+        default: ''
   push:
     branches: [main]
     paths: ['customization/**', '.github/workflows/build.yml', '!customization/**/*.md', '!customization/assets/DESIGN.txt']
@@ -21,7 +29,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: ${{ github.event_name == 'pull_request' && format('geodomdesk-native-validation-{0}', github.event.pull_request.number) || 'geodomdesk-native-build' }}
+  group: ${{ inputs.validation_only && format('geodomdesk-validation-{0}', github.sha) || github.event_name == 'pull_request' && format('geodomdesk-native-validation-{0}', github.event.pull_request.number) || 'geodomdesk-native-build' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -33,7 +41,7 @@ env:
 
 jobs:
   plan:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || inputs.validation_only))
     runs-on: ubuntu-22.04
     outputs:
       version: ${{ steps.plan.outputs.version }}
@@ -42,6 +50,20 @@ jobs:
       build: ${{ steps.plan.outputs.build }}
       reuse_run: ${{ steps.plan.outputs.reuse_run }}
     steps:
+      - name: Verify the requested build commit
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          VALIDATION_ONLY: ${{ inputs.validation_only }}
+          REUSE_RUN: ${{ inputs.reuse_desktop_run }}
+        run: |
+          if [[ -n "$EXPECTED_SHA" && "$GITHUB_SHA" != "$EXPECTED_SHA" ]]; then
+            echo '::error::The requested source commit differs from the workflow checkout.'
+            exit 1
+          fi
+          if [[ "$VALIDATION_ONLY" == "true" && -n "$REUSE_RUN" ]]; then
+            echo '::error::Native validation requires a fresh Windows and Ubuntu build.'
+            exit 1
+          fi
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         if: inputs.reuse_desktop_run != ''
@@ -380,7 +402,7 @@ jobs:
 
   android:
     needs: [plan, bridge]
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && !inputs.validation_only
     runs-on: ubuntu-22.04
     timeout-minutes: 180
     defaults:
@@ -535,7 +557,7 @@ jobs:
 
   release:
     needs: [plan, windows, ubuntu, android, reused_windows]
-    if: always() && github.ref == 'refs/heads/main' && needs.plan.result == 'success' && needs.android.result == 'success' && ((needs.plan.outputs.reuse_run != '' && needs.reused_windows.result == 'success') || (needs.windows.result == 'success' && needs.ubuntu.result == 'success'))
+    if: always() && github.ref == 'refs/heads/main' && !inputs.validation_only && needs.plan.result == 'success' && needs.android.result == 'success' && ((needs.plan.outputs.reuse_run != '' && needs.reused_windows.result == 'success') || (needs.windows.result == 'success' && needs.ubuntu.result == 'success'))
     env:
       VERSION: ${{ needs.plan.outputs.version }}
       UPSTREAM_COMMIT: ${{ needs.plan.outputs.upstream_commit }}

@@ -30,9 +30,12 @@ def action_output(**values):
 
 
 def resolve(requested_version):
-    from plan_upstream import official_release
+    from plan_upstream import official_release, reviewed_version, version_tuple
 
     version, _, commit = official_release(requested_version)
+    current = reviewed_version(CUSTOMIZATION)
+    if version_tuple(version) < version_tuple(current):
+        raise ValueError(f"Select RustDesk {current} or a later stable release")
     action_output(version=version, upstream_commit=commit)
 
 
@@ -40,12 +43,53 @@ def source_commit(source):
     return subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
 
 
-def prepare(source, version):
+def prepare(source, version, customization=CUSTOMIZATION):
     subprocess.run(
-        [sys.executable, str(CUSTOMIZATION / "prepare_client.py"), "--source", str(source), "--version", version],
+        [sys.executable, str(customization / "prepare_client.py"), "--source", str(source), "--version", version],
         cwd=ROOT,
         check=True,
     )
+
+
+def clean_upgrade(source, version, commit, channel):
+    old_lock = json.loads((ROOT / LOCK).read_bytes())
+    if any(not (source / name).is_file() for name in old_lock):
+        return False
+    with tempfile.TemporaryDirectory(prefix="geodomdesk-clean-upgrade-") as temporary:
+        temporary = Path(temporary)
+        original = temporary / "original"
+        refreshed = temporary / "refreshed"
+        customization = temporary / "customization"
+        for checkout in (original, refreshed):
+            shutil.copytree(source, checkout, symlinks=True, ignore=shutil.ignore_patterns(".git"))
+        shutil.copytree(CUSTOMIZATION, customization, ignore=shutil.ignore_patterns("__pycache__"))
+        new_lock = {}
+        for name in old_lock:
+            data = (source / name).read_bytes().replace(b"\r\n", b"\n")
+            (customization / "reference" / name).write_bytes(data)
+            new_lock[name] = hashlib.sha256(data).hexdigest()
+        channel["upstream_commit"] = commit
+        for file, value in (("reference/source-lock.json", new_lock), ("config/client-channel.json", channel)):
+            (customization / file).write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+        try:
+            prepare(original, version)
+            prepare(refreshed, version, customization)
+        except subprocess.CalledProcessError:
+            return False
+        generated = set()
+        for checkout in (original, refreshed):
+            config = json.loads((checkout / "geodomdesk-build-config.json").read_bytes())
+            generated.update(config["generated_source_files"])
+        for name in set(old_lock) | generated:
+            left, right = original / name, refreshed / name
+            if not left.is_file() or not right.is_file() or left.read_bytes() != right.read_bytes():
+                return False
+        for file in [*("reference/" + name for name in old_lock), "reference/source-lock.json", "config/client-channel.json"]:
+            candidate = (customization / file).read_bytes()
+            destination = CUSTOMIZATION / file
+            if destination.read_bytes().replace(b"\r\n", b"\n") != candidate.replace(b"\r\n", b"\n"):
+                destination.write_bytes(candidate)
+    return True
 
 
 def preflight(source, version, commit):
@@ -53,8 +97,9 @@ def preflight(source, version, commit):
         raise ValueError("The upstream checkout does not match the resolved release")
     channel = json.loads((ROOT / CHANNEL).read_bytes())
     if channel["upstream_commit"] != commit:
-        action_output(repair_needed="true")
-        print("Preparing a baseline change for the selected upstream commit.")
+        clean = clean_upgrade(source, version, commit, channel)
+        action_output(repair_needed="true", use_codex="false" if clean else "true")
+        print("Prepared a clean upstream merge." if clean else "Preparing an upstream conflict repair.")
         return
     with tempfile.TemporaryDirectory(prefix="geodomdesk-repair-") as temporary:
         probe = Path(temporary) / "client"
@@ -62,7 +107,7 @@ def preflight(source, version, commit):
         try:
             prepare(probe, version)
         except subprocess.CalledProcessError:
-            action_output(repair_needed="true")
+            action_output(repair_needed="true", use_codex="true")
             return
     action_output(repair_needed="false")
     print(f"The reviewed customization already prepares RustDesk {version}. No repair is needed.")

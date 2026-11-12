@@ -74,12 +74,12 @@ Windows、Ubuntu 新安装首次启动时自动导入一次，中断后下次启
 
 ## 上游同步与版本
 
-将项目密钥保存到仓库 Actions Secret `OPENAI_API_KEY`，并启用 Actions 创建 PR 的仓库权限。
+将 OpenAI 项目密钥保存到仓库 Actions Secret `OPENAI_API_KEY`，并启用 Actions 创建 PR 的仓库权限。
 
-1. 在 **Actions → Prepare RustDesk upgrade PR** 手动运行。输入官方稳定版标签，支持带或省略 `v` 前缀。留空时选择最新稳定版。
-2. 工作流解析官方标签对应的提交。需要更新时，Codex 生成定制修复，覆盖上游源码改动和文件移除。独立任务核对基线、执行源码定制及回归测试，然后创建 PR。
-3. 在 PR 中选择 **Approve workflows to run**，等待 Windows 和 Ubuntu 检查。核对定制差异、CLI、TCP 隧道和安装校验，通过后合并。正式构建使用 PR 审查过的官方提交。
-4. 核对三平台 Release 产物后，云端发布程序验证摘要、签署更新清单并切换发布指针。
+1. **Sync RustDesk stable release** 每 6 小时检查官方稳定版并解析提交。也可在 **Actions** 手动运行，输入官方稳定版标签，支持带或省略 `v` 前缀。留空时选择最新稳定版。
+2. 工作流先尝试三方合并，遇到冲突或上游移除定制文件时由 Codex 生成修复。独立任务核对基线、执行源码定制及回归测试。
+3. 候选提交通过 Windows 和 Ubuntu 原生构建、CLI、TCP 隧道和安装校验后，工作流创建并合并 PR。
+4. 正式构建从合并提交生成 Windows、Ubuntu 和 Android Release 产物。云端发布程序验证摘要、签署更新清单并切换发布指针。
 
 显示版本和 Release 标签与官方版本一致。内部发布标识采用 `VERSION-rBUILD_NUMBER`，Ubuntu 包版本采用 `VERSION+geodom.BUILD_NUMBER`。内部构建号递增，支持同一官方版本的定制更新。
 

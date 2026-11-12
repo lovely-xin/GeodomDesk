@@ -97,14 +97,19 @@ def official_release(requested_version=""):
     return version, tag, upstream
 
 
-def reviewed_release(root):
+def reviewed_version(root):
     manifest = (root / "reference/Cargo.toml").read_text(encoding="utf-8")
     package = re.search(r"(?ms)^\[package\][ \t]*\n(.*?)(?=^\[|\Z)", manifest)
     version = re.search(r'(?m)^version[ \t]*=[ \t]*"([^"]+)"', package[1]) if package else None
     if version is None:
         raise ValueError("The reviewed RustDesk manifest must specify a package version")
+    version_tuple(version[1])
+    return version[1]
+
+
+def reviewed_release(root):
     channel = json.loads((root / "config/client-channel.json").read_bytes())
-    release = official_release(version[1])
+    release = official_release(reviewed_version(root))
     if channel["upstream_commit"] != release[2]:
         raise ValueError("The reviewed upstream commit must match the official RustDesk release tag")
     return release
