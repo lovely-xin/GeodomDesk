@@ -147,6 +147,7 @@ impl Client {
         conn_type: ConnType,
         ipv4: bool,
     ) -> ResultType<Stream> {
+        crate::common::check_relay_uuid(&uuid)?;
         let conn = Self::connect_relay_socket(&relay_server, ipv4).await?;
         Self::join_relay_socket(conn, peer, uuid, key, conn_type).await
     }

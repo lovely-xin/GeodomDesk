@@ -49,14 +49,7 @@ def apply(changes, root):
         "    crate::load_custom_client();\n",
         "    crate::load_custom_client();\n" + """    #[cfg(any(windows, target_os = "linux"))]
     if std::env::args().nth(1).as_deref() == Some("--terminal-cli") {
-        use hbb_common::tokio::runtime::Builder;
-        let result = Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .map_err(hbb_common::anyhow::Error::from)
-            .and_then(|runtime| {
-                runtime.block_on(crate::terminal_exec::run_cli(std::env::args().skip(2)))
-            });
+        let result = crate::terminal_exec::run_cli_process();
         crate::common::global_clean();
         std::process::exit(match result {
             Ok(code) => code,

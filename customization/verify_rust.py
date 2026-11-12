@@ -6,6 +6,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -31,7 +32,9 @@ def verify(source=None, update_lock=False):
             (source / "res").mkdir(exist_ok=True)
             (source / "flutter/windows/runner/resources").mkdir(parents=True)
             with contextlib.redirect_stdout(io.StringIO()):
-                prepare_client.prepare(source, "1.5.1")
+                manifest = (source / "Cargo.toml").read_text(encoding="utf-8")
+                version = re.search(r'(?m)^version\s*=\s*"([^"]+)"', manifest).group(1)
+                prepare_client.prepare(source, version)
         crate = work / "crate"
         (crate / "src/update_metadata").mkdir(parents=True)
         (crate / "fixtures").mkdir()

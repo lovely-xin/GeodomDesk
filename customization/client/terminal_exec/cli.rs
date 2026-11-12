@@ -300,7 +300,7 @@ async fn connect_for(
 ) -> ResultType<Connection> {
     let conn_type=if forward.is_some(){ConnType::PORT_FORWARD}else{ConnType::TERMINAL};
     let mut login = LoginConfigHandler::default();
-    login.initialize(id, conn_type, None, relay, None, None, None);
+    login.initialize(id, conn_type, None, relay, None, None, None, "");
     if let Some((host,port))=forward {login.port_forward=(host.to_owned(),i32::from(port));}
     login.terminal_one_shot = true;
     login.is_terminal_admin = admin.is_some();
@@ -803,6 +803,7 @@ mod tests {
             None,
             None,
             None,
+            "",
         );
         login.is_terminal_admin = true;
         login.terminal_one_shot = true;

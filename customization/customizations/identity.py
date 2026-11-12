@@ -45,11 +45,11 @@ def apply(changes):
             'file_name.starts_with("geodomdesk_install_")',
         )
     )
-    for name in [
+    change(
         "src/platform/windows/installer_handoff/directory.rs",
-        "src/platform/windows/installer_handoff/gate.rs",
-    ]:
-        changes[name] = changes[name].replace("rustdesk-install-", "geodomdesk-install-")
+        '"rustdesk-install-{}"',
+        '"geodomdesk-install-{}"',
+    )
     changes["src/server/terminal_service.rs"] = changes["src/server/terminal_service.rs"].replace(
         "pipe\\rustdesk_term_", "pipe\\geodomdesk_term_"
     )

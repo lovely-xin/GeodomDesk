@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -163,16 +164,17 @@ class ChannelTests(unittest.TestCase):
             german = source / "src/lang/de.rs"
             german.write_text('lazy_static! { pub static ref T = [\n        ("Restore default ID", "Bestehende Übersetzung"),\n    ].iter().cloned().collect();\n}\n', encoding="utf-8")
             cargo = source / "Cargo.toml"
-            cargo.write_bytes(
-                cargo.read_bytes().replace(b'version = "1.5.1"', b'version = "1.5.2"', 1)
-            )
+            manifest = cargo.read_bytes()
+            original_version = re.search(rb'(?m)^version\s*=\s*"([^"]+)"', manifest)[1]
+            major, minor, patch = channel.version_tuple(original_version.decode())
+            new_version = f"{major}.{minor}.{patch + 1}"
+            version_line = b'version = "' + new_version.encode() + b'"'
+            original_line = b'version = "' + original_version + b'"'
+            cargo.write_bytes(manifest.replace(original_line, version_line, 1))
             cargo_lock = source / "Cargo.lock"
+            rustdesk_package = b'name = "rustdesk"\n'
             cargo_lock.write_bytes(
-                cargo_lock.read_bytes().replace(
-                    b'name = "rustdesk"\nversion = "1.5.1"',
-                    b'name = "rustdesk"\nversion = "1.5.2"',
-                    1,
-                )
+                cargo_lock.read_bytes().replace(rustdesk_package + original_line, rustdesk_package + version_line, 1)
             )
             bad = source / "src/common.rs"
             original = bad.read_bytes()
@@ -182,8 +184,8 @@ class ChannelTests(unittest.TestCase):
                 )
             )
             with self.assertRaises(ValueError):
-                prepare_client.prepare(source, "1.5.2")
-            self.assertIn(b'version = "1.5.2"', cargo.read_bytes())
+                prepare_client.prepare(source, new_version)
+            self.assertIn(version_line, cargo.read_bytes())
             self.assertNotIn(b"GeodomDesk", (source / "libs/hbb_common/src/config.rs").read_bytes())
             bad.write_bytes(original + b"// upstream change outside the customization\n")
             # Match a Windows checkout while retaining real upstream changes to merge.
@@ -191,7 +193,7 @@ class ChannelTests(unittest.TestCase):
                 path = source / name
                 path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
             with contextlib.redirect_stdout(io.StringIO()):
-                prepare_client.prepare(source, "1.5.2")
+                prepare_client.prepare(source, new_version)
             config = (source / "libs/hbb_common/src/config.rs").read_text(encoding="utf-8")
             for default_map, option in (
                 ("DEFAULT_SETTINGS", '"allow-remote-config-modification"'),
@@ -212,7 +214,7 @@ class ChannelTests(unittest.TestCase):
             self.assertTrue(
                 bad.read_bytes().endswith(b"// upstream change outside the customization\n")
             )
-            self.assertIn(b'version = "1.5.2"', cargo.read_bytes())
+            self.assertIn(version_line, cargo.read_bytes())
             self.assertIn(
                 'RwLock::new("GeodomDesk".to_owned())',
                 (source / "libs/hbb_common/src/config.rs").read_text(),

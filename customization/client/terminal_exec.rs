@@ -25,6 +25,25 @@ const MAX_SCRIPT: usize = 64 * 1024;
 const MAX_OUTPUT: usize = 256 * 1024;
 const MAX_TIMEOUT: u32 = 300;
 
+pub(crate) fn run_cli_process() -> ResultType<i32> {
+    // Connection setup nests several transport futures. Give both the CLI driver
+    // and its reconnect workers enough stack independently of the host executable.
+    const STACK_BYTES: usize = 16 * 1024 * 1024;
+    std::thread::Builder::new()
+        .name("geodomdesk-cli".into())
+        .stack_size(STACK_BYTES)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(STACK_BYTES)
+                .enable_all()
+                .build()?;
+            runtime.block_on(run_cli(std::env::args().skip(2)))
+        })?
+        .join()
+        .map_err(|_| hbb_common::anyhow::anyhow!("GeodomDesk CLI thread panicked"))?
+}
+
 pub(crate) fn validate(request: &TerminalExecRequest) -> ResultType<()> {
     if request.script.is_empty() || request.script.len() > MAX_SCRIPT {
         bail!("Script must contain 1 to {MAX_SCRIPT} bytes");
