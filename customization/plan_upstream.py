@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Resolve the latest official release and decide whether a custom rebuild is needed."""
+"""Plan a build from the reviewed RustDesk release and customization."""
 import json
 import hashlib
 import os
@@ -10,6 +10,9 @@ import urllib.request
 from pathlib import Path
 
 from channel import version_tuple
+
+
+RUSTDESK_REPOSITORY = "/repos/rustdesk/rustdesk"
 
 
 def customization_hash(root=None):
@@ -67,16 +70,60 @@ def get(path):
         return json.loads(raw)
 
 
-def plan():
-    release = get("/repos/rustdesk/rustdesk/releases/latest")
+def official_release(requested_version=""):
+    requested_version = requested_version.strip()
+    if requested_version:
+        requested_version = requested_version.removeprefix("v")
+        version_tuple(requested_version)
+        tags = RUSTDESK_REPOSITORY + "/releases/tags/"
+        try:
+            release = get(tags + requested_version)
+        except urllib.error.HTTPError as error:
+            if error.code != 404:
+                raise
+            release = get(tags + "v" + requested_version)
+    else:
+        release = get(RUSTDESK_REPOSITORY + "/releases/latest")
     tag = release["tag_name"]
     version = tag.removeprefix("v")
     version_tuple(version)
     if release["draft"] or release["prerelease"]:
-        raise ValueError("Expected the latest stable official release")
-    upstream = get("/repos/rustdesk/rustdesk/commits/" + urllib.parse.quote(tag, safe=""))["sha"]
+        raise ValueError("Select an official stable RustDesk release")
+    if requested_version and version != requested_version:
+        raise ValueError(f"Official release tag {tag!r} differs from requested version {requested_version}")
+    upstream = get(RUSTDESK_REPOSITORY + "/commits/" + urllib.parse.quote(tag, safe=""))["sha"]
     if not re.fullmatch("[0-9a-f]{40}", upstream):
         raise ValueError("Invalid upstream source commit")
+    return version, tag, upstream
+
+
+def reviewed_release(root):
+    manifest = (root / "reference/Cargo.toml").read_text(encoding="utf-8")
+    package = re.search(r"(?ms)^\[package\][ \t]*\n(.*?)(?=^\[|\Z)", manifest)
+    version = re.search(r'(?m)^version[ \t]*=[ \t]*"([^"]+)"', package[1]) if package else None
+    if version is None:
+        raise ValueError("The reviewed RustDesk manifest must specify a package version")
+    channel = json.loads((root / "config/client-channel.json").read_bytes())
+    release = official_release(version[1])
+    if channel["upstream_commit"] != release[2]:
+        raise ValueError("The reviewed upstream commit must match the official RustDesk release tag")
+    return release
+
+
+def require_publishable_version(repository, version):
+    try:
+        published = get("/repos/" + repository + "/releases/latest")
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            return
+        raise
+    if version_tuple(version) < version_tuple(published["tag_name"].removeprefix("v")):
+        raise ValueError(f"The release channel already serves {published['tag_name']}")
+
+
+def plan(root=None):
+    root = Path(root) if root else Path(__file__).resolve().parent
+    version, tag, upstream = reviewed_release(root)
     repository = os.environ["GITHUB_REPOSITORY"]
     required = True
     if os.environ.get("GITHUB_EVENT_NAME") == "schedule":
@@ -93,7 +140,7 @@ def plan():
                 current = json.load(response)
             required = (
                 current.get("upstream_commit") != upstream
-                or current.get("customization_hash") != customization_hash()
+                or current.get("customization_hash") != customization_hash(root)
             )
         except (urllib.error.HTTPError, StopIteration, ValueError):
             required = True

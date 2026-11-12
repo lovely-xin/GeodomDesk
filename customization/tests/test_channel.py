@@ -219,7 +219,7 @@ class ChannelTests(unittest.TestCase):
                 'RwLock::new("GeodomDesk".to_owned())',
                 (source / "libs/hbb_common/src/config.rs").read_text(),
             )
-            gradle = (source / "flutter/android/app/build.gradle").read_text()
+            gradle = (source / "flutter/android/app/build.gradle").read_text(encoding="utf-8")
             self.assertIn('applicationId "cn.geodom.geodomdesk"', gradle)
             self.assertIn('namespace "com.carriez.flutter_hbb"', gradle)
             manifest = (source / "flutter/android/app/src/main/AndroidManifest.xml").read_text()

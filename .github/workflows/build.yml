@@ -10,6 +10,9 @@ on:
   push:
     branches: [main]
     paths: ['customization/**', '.github/workflows/build.yml', '!customization/**/*.md', '!customization/assets/DESIGN.txt']
+  pull_request:
+    branches: [main]
+    paths: ['customization/**', '.github/workflows/build.yml', '!customization/**/*.md', '!customization/assets/DESIGN.txt']
   schedule:
     - cron: '15 */6 * * *'
 
@@ -18,8 +21,8 @@ permissions:
   actions: read
 
 concurrency:
-  group: geodomdesk-native-build
-  cancel-in-progress: false
+  group: ${{ github.event_name == 'pull_request' && format('geodomdesk-native-validation-{0}', github.event.pull_request.number) || 'geodomdesk-native-build' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   RUST_VERSION: '1.85.1'
@@ -30,6 +33,7 @@ env:
 
 jobs:
   plan:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-22.04
     outputs:
       version: ${{ steps.plan.outputs.version }}
@@ -58,7 +62,7 @@ jobs:
         run: |
           python3 -c 'import json,pathlib; assert json.loads(pathlib.Path("reused-windows/geodomdesk-build-config.json").read_text()) == json.loads(pathlib.Path("reused-ubuntu/geodomdesk-build-config.json").read_text())'
           python3 -m pip install -r customization/requirements.txt
-      - name: Follow the latest official stable source
+      - name: Resolve the reviewed official stable source
         id: plan
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -245,6 +249,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Terminal CLI stream forwarding failed' }
           cargo test --locked --release --features $features --lib terminal_exec::
           if ($LASTEXITCODE -ne 0) { throw 'Terminal protocol regression tests failed' }
+          cargo test --locked --release --features $features --lib port_forward::
+          if ($LASTEXITCODE -ne 0) { throw 'TCP tunnel regression tests failed' }
           $cli = './flutter/build/windows/x64/runner/Release/geodomdesk-cli.exe'
           $help = (& $cli --help | Out-String)
           if ($LASTEXITCODE -ne 0 -or !$help.Contains('geodomdesk-cli exec')) { throw 'Bundled terminal CLI could not start the main client' }
@@ -351,6 +357,7 @@ jobs:
           features=$(python3 ./build.py --print-features --flutter --hwcodec --unix-file-copy-paste)
           cargo build --locked --release --features "$features" --bin geodomdesk-cli
           cargo test --locked --release --features "$features" --lib terminal_exec::
+          cargo test --locked --release --features "$features" --lib port_forward::
           python3 -m unittest discover -s ../customization/tests -p test_terminal_cli.py -v
           mkdir -p ../ubuntu-artifact
           python3 ../customization/repack_deb.py --input "rustdesk-$VERSION.deb" --output ../ubuntu-artifact/geodomdesk.deb --version "$VERSION" --build-number "$BUILD_NUMBER" --cli target/release/geodomdesk-cli
@@ -373,6 +380,7 @@ jobs:
 
   android:
     needs: [plan, bridge]
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-22.04
     timeout-minutes: 180
     defaults:
@@ -527,7 +535,7 @@ jobs:
 
   release:
     needs: [plan, windows, ubuntu, android, reused_windows]
-    if: always() && needs.plan.result == 'success' && needs.android.result == 'success' && ((needs.plan.outputs.reuse_run != '' && needs.reused_windows.result == 'success') || (needs.windows.result == 'success' && needs.ubuntu.result == 'success'))
+    if: always() && github.ref == 'refs/heads/main' && needs.plan.result == 'success' && needs.android.result == 'success' && ((needs.plan.outputs.reuse_run != '' && needs.reused_windows.result == 'success') || (needs.windows.result == 'success' && needs.ubuntu.result == 'success'))
     env:
       VERSION: ${{ needs.plan.outputs.version }}
       UPSTREAM_COMMIT: ${{ needs.plan.outputs.upstream_commit }}
@@ -567,7 +575,10 @@ jobs:
       - name: Publish a new stable Release
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          PYTHONPATH: customization
         run: |
+          python3 -c 'import os; from plan_upstream import require_publishable_version; require_publishable_version(os.environ["GITHUB_REPOSITORY"], os.environ["VERSION"])'
           payloads=()
           for file in release/*; do
             if [ "$(basename "$file")" != geodomdesk-build.json ]; then payloads+=("$file"); fi

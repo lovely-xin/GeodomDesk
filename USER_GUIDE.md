@@ -18,7 +18,7 @@ geodomdesk-cli.exe exec --id DEVICE_ID --shell powershell --script check.ps1
 geodomdesk-cli.exe exec --id DEVICE_ID --shell pwsh --script check.ps1 --admin-user "DOMAIN\Administrator" --ask-device-password
 ```
 
-新版 `exec --shell bash` 和 `session --shell bash` 默认通过 CLI 管理的 TCP 中继使用 SSH，目标需开启 SSH 服务并允许 TCP 转发，发起端需有 OpenSSH Client。SSH 用户默认取目标 username，可用 `--ssh-user LOGIN` 指定；密码用 `--ask-ssh-password` 无回显输入或受控环境提供 `GEODOMDESK_SSH_PASSWORD`，私钥用 `--ssh-identity PATH`。这些凭据与 GeodomDesk 账号、设备密码分别验证。
+`exec --shell bash` 和 `session --shell bash` 默认通过 CLI 管理的 TCP 中继使用 SSH，目标需开启 SSH 服务并允许 TCP 转发，发起端需有 OpenSSH Client。SSH 用户默认取目标 username，可用 `--ssh-user LOGIN` 指定；密码用 `--ask-ssh-password` 无回显输入或受控环境提供 `GEODOMDESK_SSH_PASSWORD`，私钥用 `--ssh-identity PATH`。这些凭据与 GeodomDesk 账号、设备密码分别验证。
 
 `--transport terminal` 显式使用原终端方式；SSH 启动失败不自动降级或重放。Windows PowerShell/pwsh 保持终端方式；没有指定默认 Shell 的 session 也保持终端方式，以支持逐条选择 Shell。
 
@@ -46,7 +46,7 @@ geodomdesk-cli session --id DEVICE_ID --non-interactive --timeout 120
 
 先返回 `event: ready`，之后每条命令返回一行 `event: result`。`stdout`、`stderr` 使用 Base64 编码，`exit_code` 是远端退出码；旧终端的错误输出合并到 `stdout`。逐条提交并等待结果即可复用连接，命令使用独立进程，不保留上一条命令的工作目录和变量。关闭标准输入会在已提交命令执行完成后退出。分别启动的 `exec` 进程仍各自建立连接。
 
-会话协议 `session_protocol: 2` 将连接与 CLI 进程分开管理：参数错误可修正后继续；连接、传输或执行等待失败时丢弃旧连接、取消尚未发送的队列，返回 `fatal: false`，下一条新请求可重新建连。执行结果未知时先核对远端状态，不自动重跑命令。只有致命输入错误等无法继续处理时返回 `fatal: true` 并退出进程。启动、分批上传和执行分别计时；旧终端上传每批最多等待 15 秒进展，`timeout` 仅从脚本开始执行后计时，范围为 1–300 秒。脚本上限为 64 KiB，单个输出通道上限为 256 KiB；旧终端合并输出上限为 256 KiB。
+会话协议 `session_protocol: 2` 将连接与 CLI 进程分开管理。参数错误可修正后继续。连接、传输或执行等待失败时，CLI 丢弃旧连接、清空队列并返回 `fatal: false`，下一条新请求可重新建连。致命输入错误返回 `fatal: true` 并退出进程。启动、分批上传和执行分别计时，旧终端上传每批最多等待 15 秒进展。`timeout` 从脚本开始执行后计时，范围为 1–300 秒。脚本上限为 64 KiB，单个输出通道上限为 256 KiB，旧终端合并输出上限为 256 KiB。
 
 ### Agent 常用增强参数
 
@@ -90,7 +90,7 @@ Windows、Ubuntu 的新配置首次启动时，自动导入同一用户 RustDesk
 
 ## Android 权限
 
-被控时按系统提示允许屏幕录制；远程输入还需要开启对应的无障碍服务。需要后台被控时，再按使用需要允许悬浮窗、自启动及后台运行。系统或设备厂商可能限制锁屏、重启后的自动接入。
+被控时按系统提示允许屏幕录制，远程输入还需要开启对应的无障碍服务。需要后台被控时，在设备设置中允许悬浮窗、自启动及后台运行。锁屏或重启后，通过设备状态检查客户端是否已接入。
 
 ## Windows 打印
 
@@ -112,7 +112,7 @@ Ubuntu 和 Android 不展示 Windows 专用的打印机驱动安装入口。
 
 ### 新建连接与故障恢复
 
-以下控制要求 `ready.session_protocol >= 2`。`connection: fresh` 在轮到该请求执行时替换连接；卡住时使用 `reconnect` 立即停止当前等待、取消未发送的队列并重新认证。每条控制使用新的 id 或省略 id，等待其确认后继续。
+以下控制使用 `ready.session_protocol >= 2`。`connection: fresh` 在轮到该请求执行时替换连接。卡住时使用 `reconnect` 立即停止当前等待、清空队列并重新认证。每条控制使用新的 id 或省略 id，等待其确认后继续。
 
 ```json
 {"id":"new-check","connection":"fresh","script":"pwd"}
@@ -128,15 +128,15 @@ Ubuntu 和 Android 不展示 Windows 专用的打印机驱动安装入口。
 
 可使用 `--expect-platform Linux`、`--expect-hostname EXPECTED_HOST` 在每次认证后核对目标，不匹配则拒绝执行。连接编号 `connection_id` 可用于确认是否已经换新连接。重复指定目标和脚本参数、重复使用活跃/排队请求 id 都会被拒绝。
 
-恢复判断应读取 `code`、`phase` 和 `execution_state`：`not_started` 表示没有执行；`finished` 表示收到结果但可能业务失败；`unknown` 表示无法确认远端状态，不能盲目重试。`retry_safe` 仅反映本次请求是否开始。取消或重连不保证远端业务进程终止，也不撤销已发生的修改。id 仅关联结果，不提供幂等去重。
+恢复时读取 `code`、`phase` 和 `execution_state`。`not_started` 表示命令未执行，修正问题后可重新提交。`finished` 表示已收到结果，按 `exit_code` 检查执行结果。`unknown` 时先用只读命令核对远端进程和业务状态，再决定后续操作。`retry_safe` 表示本次请求是否开始，id 用于关联请求与结果。
 
 通用端口代理使用 `tunnel open --id DEVICE_ID --remote-port PORT --local-port 0`，保持 stdin 打开并读取 `tunnel_ready` 的实际端口；`tunnel list --id DEVICE_ID` 查询，`tunnel close --id DEVICE_ID --tunnel-id UUID` 关闭。仅监听本机回环地址；CLI 退出会清理自己创建的映射。同一系统、用户和配置目录中的新版客户端 TCP 隧道页面会显示 CLI 行并提供关闭按钮，手工映射保持独立。通用 TCP 数据加密由服务协议提供，默认 Bash 使用 SSH。
 
-完整的操作示例、超时预算、故障恢复步骤、兼容边界和设计依据见 [CLI 实践说明](docs/CLI_RELIABILITY.txt)。
+操作示例、超时预算和故障恢复步骤见 [CLI 实践说明](docs/CLI_RELIABILITY.txt)。
 
 
 脚本文件路径仅接受普通文件，命名管道和设备路径会在执行前拒绝；管道输入使用 `exec --script -`，会话则发送 `script` 文本。Bash 兼容引导程序显式初始化自己的输出窗口计数器，支持开启未定义变量检查的目标环境。
 
 新结构化执行协议会在远端执行预算之外额外等待最多 25 秒，以接收结果并处理清理；调用方的总等待上限需要包含连接、上传和该余量。控制操作仍可主动中断等待。`status` 反映本地生命周期，需要验证目标当前能否连接和认证时使用 `probe`。
 
-Windows 旧终端输出采用能放入 160 列终端的短记录，并使用有界确认窗口；大输出的验证须覆盖真实 ConPTY 滚屏，普通管道测试不能替代。
+Windows 旧终端把输出拆成适合 160 列终端的短记录，按窗口确认接收。使用实际 ConPTY 会话验证跨屏输出。
