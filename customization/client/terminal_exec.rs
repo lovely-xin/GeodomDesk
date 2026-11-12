@@ -26,19 +26,23 @@ const MAX_OUTPUT: usize = 256 * 1024;
 const MAX_TIMEOUT: u32 = 300;
 
 pub(crate) fn run_cli_process() -> ResultType<i32> {
+    run_cli_with_args(2)
+}
+
+fn run_cli_with_args(skip: usize) -> ResultType<i32> {
     // Connection setup nests several transport futures. Give both the CLI driver
     // and its reconnect workers enough stack independently of the host executable.
     const STACK_BYTES: usize = 16 * 1024 * 1024;
     std::thread::Builder::new()
         .name("geodomdesk-cli".into())
         .stack_size(STACK_BYTES)
-        .spawn(|| {
+        .spawn(move || {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
                 .thread_stack_size(STACK_BYTES)
                 .enable_all()
                 .build()?;
-            runtime.block_on(run_cli(std::env::args().skip(2)))
+            runtime.block_on(run_cli(std::env::args().skip(skip)))
         })?
         .join()
         .map_err(|_| hbb_common::anyhow::anyhow!("GeodomDesk CLI thread panicked"))?
