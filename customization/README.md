@@ -32,13 +32,13 @@ GeodomDesk 基于官方 RustDesk 稳定版，支持 Windows x64、Ubuntu amd64�
 | `config/` | 编译连接参数、Android 图标设置和发布配置示例 |
 | `config/systemd/` | 云端发布任务的服务及定时器 |
 
-正式构建工作流位于仓库 `.github/workflows/build.yml`。新增定制应归入对应模块，不直接编辑临时 checkout；变更基线时同步审查 `reference/source-lock.json`。
+正式构建工作流位于仓库 `.github/workflows/build.yml`。新增定制归入对应模块，基线变更同步审查 `reference/source-lock.json`。
 
 ## 执行链路
 
-| 链路 | 入口与产物 | 边界与失败处理 |
+| 链路 | 入口与产物 | 检查项 |
 | --- | --- | --- |
-| 官方同步 | `plan_upstream.py` → 官方稳定版本、提交与内部构建号 | 定时检查无变化时跳过；不直接修改已发布客户端 |
+| 上游构建计划 | `plan_upstream.py` → 官方稳定版本、提交与内部构建号 | 核对已审查提交与官方标签，按源码和定制摘要决定是否构建 |
 | 源码定制 | `prepare_client.py` → `customizations/build.py` → 定制源码 | 先校验基线并完成三方合并，冲突时停止写入 |
 | 原生构建 | Actions 的 `bridge` → `windows` / `ubuntu` / `android` | UI 分析与原生检查通过，三平台成功后才生成 Release |
 | 产物契约 | `release_bundle.py` → `geodomdesk-build.json` 与对应源码 | 三平台版本、构建号和配置必须一致；逐文件记录大小与 SHA-256 |
@@ -46,15 +46,15 @@ GeodomDesk 基于官方 RustDesk 稳定版，支持 Windows x64、Ubuntu amd64�
 | 下载入口 | `publisher.py` 的 `portal_update` → 导航页下载区域 | 只替换标记区域，保留现有布局；旧生产任务必须停用 |
 | 客户端更新 | `client/geodomdesk_update.rs` → 官方 updater | 限定独立通道；下载、签名、摘要与提升权限继续使用官方流程 |
 
-连接参数的编译来源只有 `config/client-channel.json`；云端 `config/publisher.example.json` 只描述发布任务、签名密钥位置和输出目录。客户端不读取云端发布配置，发布端不生成访问密码或客户端配置脚本。
+客户端从 `config/client-channel.json` 编译连接参数。云端使用 `config/publisher.example.json` 配置发布任务、签名密钥位置和输出目录。
 
-账号登录由 `account_login.py` 和 `client/geodomdesk_auth.rs` 适配官方客户端界面：识别服务端登录错误、取消重试、打开已有登录窗口；不在此项目实现或修改服务端的账号验证。Ubuntu 克隆恢复与用户资料导入分别由独立模块处理，不进入发布程序。
+账号由服务端验证。`account_login.py` 和 `client/geodomdesk_auth.rs` 识别服务端登录错误，取消重试并打开登录窗口。
 
-构建错误先查看 Actions 中失败的 job / step。云端日志统一由 systemd journal 管理，使用 `journalctl -u geodomdesk-builder.service --since today` 查看；最近一次结果保存在 `/var/lib/geodomdesk-builder/status.json`。发布程序不常驻进程，不另建无限增长的日志文件。
+构建错误从 Actions 中对应的任务和步骤查看。使用 `journalctl -u geodomdesk-builder.service --since today` 查看云端日志，最近一次结果位于 `/var/lib/geodomdesk-builder/status.json`。
 
-## 兼容边界
+## 连接协议与登录
 
-保留官方设备 ID、消息协议、密钥交换、加密、打洞、中继和 WebSocket 行为。双方使用相同服务端及公钥时，设备 ID 连接保持兼容；完整二进制互通仍需实机验证。
+设备 ID、消息协议、密钥交换、加密、打洞、中继和 WebSocket 沿用官方实现。通过设备 ID 互连时，两端使用相同服务端及公钥。
 
 客户端本机直接 IP 监听使用 TCP **21128**，局域网发现使用 UDP **21129**，服务端端口不变。手动直接 IP 连接时需要指定被控端的监听端口；通过设备 ID 建立的点对点连接沿用官方流程。局域网自动发现与官方客户端隔离。
 
@@ -64,7 +64,7 @@ GeodomDesk 基于官方 RustDesk 稳定版，支持 Windows x64、Ubuntu amd64�
 
 沿用官方初始 ID 算法及手动修改 ID 功能。在主配置中单独记录永久物理网卡绑定：首次没有记录时只建立绑定，不改变现有 ID；同一硬件保留现有 ID，包括手动修改的 ID。克隆镜像在不同网卡上启动时，重新分配副本 ID 并保存新绑定，后续正常启动不重复修改。
 
-虚拟桥接、VPN 与随机化地址不作为绑定依据；硬件信息读取失败时不重置。保留服务器、密码和其他设置，不修改操作系统的机器标识。若副本连永久网卡标识也完全相同，或旧配置尚未建立绑定记录，不能仅凭复制的配置可靠判断来源。
+绑定使用永久物理网卡标识，过滤虚拟桥接、VPN 与随机化地址。硬件信息读取失败时沿用现有 ID。重新分配 ID 时保留服务器、密码、个人设置和系统机器标识。
 
 ## 数据导入
 
@@ -74,27 +74,32 @@ Windows、Ubuntu 新安装首次启动时自动导入一次，中断后下次启
 
 ## 上游同步与版本
 
-工作流每 6 小时检查官方稳定 Release；源码或定制改变后重新构建，也支持手动运行。三方合并保留无冲突的官方改动及本地定制。遇到冲突、文件移除、构建失败或校验失败时停止发布，审查后再构建。构建依据实际定制内容的摘要判断变化，纯说明修改不触发重编译。
+将 OpenAI 项目密钥保存到仓库 Actions Secret `OPENAI_API_KEY`，并启用 Actions 创建 PR 的仓库权限。
 
-显示版本和 Release 标签与官方一致，例如 `1.5.1`；内部构建序号独立递增，例如 `1.5.1-r101`。Ubuntu 包版本使用 `1.5.1+geodom.101`，应用显示仍为 `1.5.1`。同一官方版本的定制修复因此可以单独更新。
+1. **Sync RustDesk stable release** 每 6 小时检查官方稳定版并解析提交。也可在 **Actions** 手动运行，输入官方稳定版标签，支持带或省略 `v` 前缀。留空时选择最新稳定版。
+2. 工作流先尝试三方合并，遇到冲突或上游移除定制文件时由 Codex 生成修复。独立任务核对基线、执行源码定制及回归测试。
+3. 候选提交通过 Windows 和 Ubuntu 原生构建、CLI、TCP 隧道和安装校验后，工作流创建并合并 PR。
+4. 正式构建从合并提交生成 Windows、Ubuntu 和 Android Release 产物。云端发布程序验证摘要、签署更新清单并切换发布指针。
+
+显示版本和 Release 标签与官方版本一致。内部发布标识采用 `VERSION-rBUILD_NUMBER`，Ubuntu 包版本采用 `VERSION+geodom.BUILD_NUMBER`。内部构建号递增，支持同一官方版本的定制更新。
 
 ```sh
-python3 prepare_client.py --source /path/to/source --version 1.5.1 --build-number 101
+python3 prepare_client.py --source "$UPSTREAM_SOURCE" --version "$VERSION" --build-number "$BUILD_NUMBER"
 ```
 
 ## 打包与更新
 
-三种平台原生编译，不使用 Docker。每个内部构建使用独立的不可变目录，完整校验所有产物后才切换更新指针，拒绝回退到旧版本或旧构建。
+三种平台原生编译。每个内部构建使用独立的不可变目录，产物校验通过后按版本和构建号向前更新发布指针。
 
-产物包含 Windows 原生 EXE、Ubuntu DEB、Android ARM64 APK、对应源码、更新清单及签名。公开连接参数在编译时写入固定配置；界面和配置文件均不能覆盖这些连接参数；API 可留空，不预置永久密码，不覆盖已有密码与验证模式。
+产物包含 Windows 原生 EXE、Ubuntu DEB、Android ARM64 APK、对应源码、更新清单及签名。公开连接参数以编译时配置为准，API 可留空。设备访问密码和验证模式由设备使用者管理。
 
-连接参数只在 `config/client-channel.json` 维护，由 `customizations/server_config.py` 写入官方配置优先级；未新增运行时配置文件或轮询。桌面与移动设置页隐藏服务器入口，公共编辑窗口同时拦截扫码等内部调用；外部配置加载和文件名注入入口不读取参数。设备 ID、访问密码和个人记录继续使用独立的正常配置。
+连接参数在 `config/client-channel.json` 维护，由 `customizations/server_config.py` 写入编译配置。桌面和移动客户端使用这份连接配置。设备 ID、访问密码和个人记录保存在客户端的独立配置目录。
 
-Windows 原生 EXE 自带安装入口，更新使用同一程序的 `--update`。Ubuntu 提供更新提示与下载，由管理员安装 DEB，不支持静默自动安装。云端只校验、复制已构建的文件并生成签名更新清单，不重新封装或注入配置。
+Windows 原生 EXE 自带安装入口，更新使用同一程序的 `--update`。Ubuntu 提供更新提示和下载，由管理员安装 DEB。云端校验并复制原生构建文件，生成签名更新清单。
 
 保留官方签名、哈希、大小、临时文件复核和提升权限流程。应用标识、更新信任公钥及签名上下文独立。签名私钥只保存在受限部署环境与 Actions Secrets；账号、令牌和远程访问密码不进入源码或安装包默认值。
 
-Android 资源修复可在手动构建中填写 `reuse_desktop_run`，复用同一失败工作流尚未发布的桌面产物。复用前核对实际生成的桌面源码、构建配置、工具链和桌面构建步骤；任一变化均拒绝复用。
+Android 资源修复可在手动构建中填写 `reuse_desktop_run`，复用失败运行中处于待发布状态的桌面产物。复用条件为桌面源码、构建配置、工具链和构建步骤一致。
 
 ## Android
 
