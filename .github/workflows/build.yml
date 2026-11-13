@@ -154,6 +154,7 @@ jobs:
           flutter pub get
           dart format lib/common.dart lib/desktop/pages/connection_page.dart lib/desktop/pages/install_page.dart lib/desktop/pages/desktop_home_page.dart lib/models/model.dart lib/common/widgets/login.dart lib/desktop/pages/desktop_setting_page.dart lib/mobile/pages/connection_page.dart lib/mobile/pages/settings_page.dart lib/mobile/widgets/dialog.dart
           flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings lib/common.dart lib/desktop/pages/connection_page.dart lib/desktop/pages/install_page.dart lib/desktop/pages/desktop_home_page.dart lib/models/model.dart lib/common/widgets/login.dart lib/desktop/pages/desktop_setting_page.dart lib/mobile/pages/connection_page.dart lib/mobile/pages/settings_page.dart lib/mobile/widgets/dialog.dart
+          flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings lib/models/ab_model.dart lib/models/geodom_recent_sync.dart lib/models/peer_model.dart lib/common/widgets/address_book.dart lib/common/widgets/peer_card.dart lib/utils/http_service.dart
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: geodomdesk-bridge

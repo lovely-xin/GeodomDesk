@@ -18,7 +18,7 @@
     "host": "www.qcjcpt.com",
     "key": "AKJROlsG4WAI103ADqoVrBs4Nb7+6dpbHYVO+MVd81Y=",
     "websocket_port": "21114",
-    "api": "https://www.qcjcpt.com/geodomdesk-api",
+    "api": "https://www.qcjcpt.com/rustdesk",
     "relay": ""
   },
   "android_certificate_sha256": "fd453bfbafebd2861999fa9f8dd7c2bbfd637e54658c28ea942f59fedbde5f64"
