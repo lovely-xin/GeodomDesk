@@ -20,6 +20,8 @@ def apply(changes, root):
         """pub struct AbPeer {
     #[serde(default, deserialize_with = "deserialize_string", skip_serializing_if = "String::is_empty")]
     pub geodom_recent: String,
+    #[serde(default)]
+    pub geodom_recent_hash_present: bool,
 """,
     )
     edit(
@@ -133,12 +135,12 @@ def apply(changes, root):
             .collect();""",
     )
     peer = "flutter/lib/models/peer_model.dart"
-    edit(peer, "  String hash; // personal ab hash password", "  String geodomRecent;\n  String hash; // personal ab hash password")
-    edit(peer, "        hash = json['hash'] ?? '',", "        geodomRecent = json['geodom_recent'] is String ? json['geodom_recent'] : '',\n        hash = json['hash'] ?? '',")
+    edit(peer, "  String hash; // personal ab hash password", "  String geodomRecent;\n  bool geodomRecentHashPresent;\n  String hash; // personal ab hash password")
+    edit(peer, "        hash = json['hash'] ?? '',", "        geodomRecent = json['geodom_recent'] is String ? json['geodom_recent'] : '',\n        geodomRecentHashPresent = json['geodom_recent_hash_present'] as bool? ?? json.containsKey('hash'),\n        hash = json['hash'] ?? '',")
     edit(peer, "      res['hash'] = hash;", "      res['hash'] = hash;\n      if (geodomRecent.isNotEmpty) res['geodom_recent'] = geodomRecent;")
-    edit(peer, "    required this.hash,", "    required this.hash,\n    this.geodomRecent = '',")
-    edit(peer, "        hash == other.hash &&", "        hash == other.hash &&\n        geodomRecent == other.geodomRecent &&")
-    edit(peer, "        hash: other.hash,", "        hash: other.hash,\n        geodomRecent: other.geodomRecent,")
+    edit(peer, "    required this.hash,", "    required this.hash,\n    this.geodomRecent = '',\n    this.geodomRecentHashPresent = false,")
+    edit(peer, "        hash == other.hash &&", "        hash == other.hash &&\n        geodomRecent == other.geodomRecent &&\n        geodomRecentHashPresent == other.geodomRecentHashPresent &&")
+    edit(peer, "        hash: other.hash,", "        hash: other.hash,\n        geodomRecent: other.geodomRecent,\n        geodomRecentHashPresent: other.geodomRecentHashPresent,")
 
     book = "flutter/lib/models/ab_model.dart"
     edit(book, "import 'package:flutter/material.dart';", "import 'package:flutter/foundation.dart' show kIsWeb;\nimport 'package:flutter/material.dart';")
@@ -146,6 +148,20 @@ def apply(changes, root):
     edit(book, "class AbModel {\n", "class AbModel {\n  late final recentDevices = GeodomRecentSync(this);\n")
     edit(book, "          _syncFromRecent();\n", "          recentDevices.schedule();\n          _syncFromRecent();\n")
     edit(book, "          if (!current.initialized || !current.canWrite()) return;\n          recentDevices.schedule();", "          recentDevices.schedule();\n          if (!current.initialized || !current.canWrite()) return;")
+    edit(
+        book,
+        ".map((e) => e.toCustomJson(includingHash: value.isPersonal()))",
+        """.map((e) => {
+              ...e.toCustomJson(includingHash: value.isPersonal()),
+              if (value.isPersonal())
+                'geodom_recent_hash_present': e.geodomRecentHashPresent,
+            })""",
+    )
+    edit(
+        book,
+        "if (personal && r.hash.isNotEmpty && p.hash != r.hash) {",
+        "if (personal && !gFFI.abModel.recentDevices.enabled && r.hash.isNotEmpty && p.hash != r.hash) {",
+    )
     edit(book, "    _pulledOnce = false;\n    await bind.mainClearAb();", "    _pulledOnce = false;\n    _maxPeerOneAb = 0;\n    recentDevices.supported.value = false;\n    await bind.mainClearAb();")
     edit(book, "      _maxPeerOneAb = json['max_peer_one_ab'] ?? 0;", "      _maxPeerOneAb = json['max_peer_one_ab'] ?? 0;\n      recentDevices.supported.value = !kIsWeb && json['geodom_recent_sync'] == 1;")
     fetch_start = "  Future<bool> _fetchPeers(List<Peer> tmpPeers, {quiet = false}) async {"
@@ -177,6 +193,16 @@ def apply(changes, root):
         "flutter/lib/common/widgets/peer_card.dart",
         "              await bind.mainRemovePeer(id: id);",
         "              await bind.mainRemovePeer(id: id);\n              await gFFI.abModel.recentDevices.remove(id);",
+    )
+    edit(
+        "flutter/lib/common/widgets/peer_card.dart",
+        """        bool succ = await gFFI.abModel.changePersonalHashPassword(id, '');
+        await bind.mainForgetPassword(id: id);""",
+        """        final recent = gFFI.abModel.recentDevices;
+        final sync = recent.enabled;
+        final succ = sync || await gFFI.abModel.changePersonalHashPassword(id, '');
+        await bind.mainForgetPassword(id: id);
+        if (sync) await recent.forgetCredential(id);""",
     )
     edit(
         "flutter/lib/utils/http_service.dart",

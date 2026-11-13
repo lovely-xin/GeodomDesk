@@ -1,5 +1,6 @@
 //! Account-scoped recent device metadata and portable connection preferences.
 use hbb_common::config::{Ab, AbPeer, LocalConfig, PeerConfig};
+use hbb_common::sodiumoxide::base64::{decode, Variant};
 use serde_derive::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -174,11 +175,28 @@ pub(crate) fn apply_settings(id: &str, local: &mut PeerConfig) {
     let Some(peer) = account_peers().into_iter().find(|peer| peer.id == id) else {
         return;
     };
+    apply_peer(peer, millis(PeerConfig::last_modified(id)), local);
+}
+
+fn apply_peer(peer: AbPeer, local_timestamp: u64, local: &mut PeerConfig) {
     let Some(profile) = parse(&peer.geodom_recent) else {
         return;
     };
-    if profile.removed || profile.timestamp <= millis(PeerConfig::last_modified(id)) {
+    if profile.timestamp <= local_timestamp {
         return;
+    }
+    if profile.removed {
+        if peer.geodom_recent_hash_present && peer.hash.is_empty() {
+            local.password.clear();
+        }
+        return;
+    }
+    if peer.geodom_recent_hash_present && peer.hash.is_empty() {
+        local.password.clear();
+    } else if let Ok(password) = decode(&peer.hash, Variant::Original) {
+        if password.len() == 32 {
+            local.password = password;
+        }
     }
     for (setting, value) in [
         (&mut local.view_style, profile.view_style),
@@ -244,5 +262,49 @@ mod tests {
         assert!(profile.force_relay);
         assert_eq!(profile.timestamp, 123);
         assert!(record("834502176@another.example", time, &peer).is_none());
+    }
+
+    #[test]
+    fn newer_account_profile_replaces_or_clears_an_older_local_credential() {
+        let mut local = PeerConfig {
+            password: vec![1; 32],
+            ..PeerConfig::default()
+        };
+        let peer = AbPeer {
+            geodom_recent: r#"{"timestamp":200}"#.to_owned(),
+            hash: hbb_common::sodiumoxide::base64::encode([2; 32], Variant::Original),
+            ..AbPeer::default()
+        };
+        apply_peer(peer.clone(), 200, &mut local);
+        assert_eq!(local.password, vec![1; 32]);
+        apply_peer(peer.clone(), 199, &mut local);
+        assert_eq!(local.password, vec![2; 32]);
+        let cleared = AbPeer {
+            hash: String::new(),
+            ..peer.clone()
+        };
+        apply_peer(cleared.clone(), 199, &mut local);
+        assert_eq!(local.password, vec![2; 32]);
+        apply_peer(
+            AbPeer {
+                geodom_recent_hash_present: true,
+                ..cleared
+            },
+            199,
+            &mut local,
+        );
+        assert!(local.password.is_empty());
+        local.password = vec![1; 32];
+        apply_peer(
+            AbPeer {
+                geodom_recent: r#"{"timestamp":201,"removed":true}"#.to_owned(),
+                geodom_recent_hash_present: true,
+                hash: String::new(),
+                ..peer
+            },
+            199,
+            &mut local,
+        );
+        assert!(local.password.is_empty());
     }
 }
