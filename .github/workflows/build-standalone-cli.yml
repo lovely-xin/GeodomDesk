@@ -18,6 +18,8 @@ on:
       - 'customization/client/terminal_exec/**'
       - 'customization/config/client-channel.json'
       - 'docs/standalone-cli.md'
+      - 'skills/INSTALL.md'
+      - 'skills/geodomdesk-cli/**'
   push:
     branches: [main]
     paths: *cli-paths
@@ -146,23 +148,33 @@ jobs:
           stage=$(mktemp -d)
           unpacked=$(mktemp -d)
           cp "target/release/$EXECUTABLE" ../LICENSE ../docs/standalone-cli.md "$stage/"
+          mkdir -p "$stage/skills"
+          cp -R ../skills/INSTALL.md ../skills/geodomdesk-cli "$stage/skills/"
           cd "$stage"
-          sha256sum "$EXECUTABLE" > SHA256SUMS
+          {
+            sha256sum "$EXECUTABLE"
+            while IFS= read -r file; do
+              sha256sum "$file"
+            done < <(find skills -type f | LC_ALL=C sort)
+          } > SHA256SUMS
           name="geodomdesk-cli-$version-$PLATFORM"
           if [[ "$RUNNER_OS" == Linux ]]; then
             archive="$name.tar.gz"
             chmod 0755 "$EXECUTABLE"
-            tar -czf "$artifact/$archive" "$EXECUTABLE" LICENSE standalone-cli.md SHA256SUMS
+            tar -czf "$artifact/$archive" "$EXECUTABLE" LICENSE standalone-cli.md SHA256SUMS skills
             tar -xzf "$artifact/$archive" -C "$unpacked"
             test -x "$unpacked/$EXECUTABLE"
           else
             archive="$name.zip"
-            python -m zipfile -c "$artifact/$archive" "$EXECUTABLE" LICENSE standalone-cli.md SHA256SUMS
+            python -m zipfile -c "$artifact/$archive" "$EXECUTABLE" LICENSE standalone-cli.md SHA256SUMS skills
             python -m zipfile -e "$artifact/$archive" "$unpacked"
           fi
           (
             cd "$unpacked"
             sha256sum --check SHA256SUMS
+            test -f skills/INSTALL.md
+            test -f skills/geodomdesk-cli/SKILL.md
+            test -f skills/geodomdesk-cli/agents/openai.yaml
             "./$EXECUTABLE" --help > "$RUNNER_TEMP/standalone-help.txt"
             grep -F 'embedded SSH over TCP' "$RUNNER_TEMP/standalone-help.txt"
             grep -F -- 'account login' "$RUNNER_TEMP/standalone-help.txt"

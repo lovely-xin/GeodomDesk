@@ -2,6 +2,8 @@
 
 Windows 使用 ZIP 包，Ubuntu 使用保留执行权限的 TAR.GZ 包。用随包提供的 SHA-256 清单核验压缩包。解压后在 Windows 运行 `.\geodomdesk-cli.exe --help`，在 Ubuntu 运行 `./geodomdesk-cli --help`。帮助中出现 `embedded SSH over TCP` 即为内置 SSH 版本。Ubuntu 由系统提供程序依赖的运行库。被控设备或中转设备继续使用已授权的 GeodomDesk 服务。
 
+Codex 用户可按包内 `skills/INSTALL.md` 安装 `skills/geodomdesk-cli`。技能和 CLI 文件一起列入包内 `SHA256SUMS`。
+
 ## 账号登录
 
 ```text

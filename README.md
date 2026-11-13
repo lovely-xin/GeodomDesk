@@ -21,6 +21,8 @@
 
 三种平台通过构建和产物校验后发布 Release。云端核对原生安装文件的来源和摘要，生成签名更新清单，再切换下载和更新指针。
 
+Windows 和 Ubuntu 的独立 CLI 发布包内附 Codex 技能。也可以直接从仓库复制 [GeodomDesk CLI 技能](skills/geodomdesk-cli)，按[安装说明](skills/INSTALL.md)启用。
+
 ## 开发与维护
 
 客户端扩展、身份隔离、登录处理、更新通道和上游合并分别由定制模块维护。
