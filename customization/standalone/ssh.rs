@@ -296,7 +296,11 @@ bash --noprofile --norc "$script" </dev/null"#;
             } else {
                 "pwsh.exe"
             };
-            let code: Vec<u8> = include_str!("exec_bootstrap.ps1")
+            let bootstrap = format!(
+                "$geodomdeskExpectedBytes = {script_len}\n{}",
+                include_str!("exec_bootstrap.ps1")
+            );
+            let code: Vec<u8> = bootstrap
                 .encode_utf16()
                 .flat_map(u16::to_le_bytes)
                 .collect();
@@ -617,6 +621,38 @@ mod tests {
         let incomplete = run(&script[..script.len() - 1]);
         assert!(!incomplete.status.success());
         assert!(incomplete.stdout.is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_launcher_rejects_a_truncated_script_before_execution() {
+        use std::{
+            io::Write,
+            process::{Command, Stdio},
+        };
+
+        let script = "[Console]::Write('中文')\n[Console]::Write('END')";
+        let command = launcher(ExecShell::WINDOWS_POWERSHELL, script.len());
+        let mut args = command.split_whitespace();
+        let program = args.next().unwrap();
+        let run = |source: &str| {
+            let mut child = Command::new(program)
+                .args(args.clone())
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(source.as_bytes()).unwrap();
+            child.wait_with_output().unwrap()
+        };
+        let complete = run(script);
+        assert!(complete.status.success());
+        assert_eq!(complete.stdout, "中文END".as_bytes());
+        let incomplete = run(script.lines().next().unwrap());
+        assert_eq!(incomplete.status.code(), Some(1));
+        assert!(incomplete.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&incomplete.stderr).contains("Incomplete PowerShell script"));
     }
 
     fn test_key(byte: u8) -> keys::PublicKey {

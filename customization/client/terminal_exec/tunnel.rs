@@ -22,6 +22,7 @@ use std::{
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
+    sync::{mpsc, watch},
     task::JoinSet,
 };
 
@@ -234,6 +235,9 @@ pub(crate) async fn list(device: &str) -> ResultType<Value> {
             match rpc(&r, "status").await {
                 Ok(value) => Some(value),
                 Err(error) => {
+                    if fs::symlink_metadata(&path).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) {
+                        return None;
+                    }
                     // A dead process cannot own an OS listener. Never kill a PID or another mapping.
                     if error.chain().any(|e| {
                         e.downcast_ref::<std::io::Error>()
@@ -263,7 +267,8 @@ pub(crate) async fn list(device: &str) -> ResultType<Value> {
 }
 
 pub(crate) async fn close(device: &str, id: &str) -> ResultType<Value> {
-    let bytes = match fs::read(record_path(id)?) {
+    let path = record_path(id)?;
+    let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(json!({"tunnel_id":id,"state":"closed","already_closed":true}))
@@ -277,28 +282,29 @@ pub(crate) async fn close(device: &str, id: &str) -> ResultType<Value> {
     match rpc(&record, "close").await {
         Err(error) if error.chain().any(|cause| cause.downcast_ref::<std::io::Error>()
             .is_some_and(|error| error.kind() == std::io::ErrorKind::ConnectionRefused)) => {
-            if let Err(error) = fs::remove_file(record_path(id)?) {
+            if let Err(error) = fs::remove_file(&path) {
                 if error.kind() != std::io::ErrorKind::NotFound { return Err(error.into()); }
             }
+            Ok(json!({"tunnel_id":record.tunnel_id,"state":"closed","already_closed":true}))
+        }
+        Err(_) if fs::symlink_metadata(&path).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) => {
             Ok(json!({"tunnel_id":record.tunnel_id,"state":"closed","already_closed":true}))
         }
         result => result,
     }
 }
 
-// Once authenticated, closing the owner must not depend on delivering its reply.
-struct CloseRequest(tokio::sync::mpsc::Sender<()>);
-impl Drop for CloseRequest {
-    fn drop(&mut self) { let _ = self.0.try_send(()); }
-}
-
 async fn send_control_response(
     socket: &mut (impl tokio::io::AsyncWrite + Unpin),
     record: &Record, state: &State, close: bool,
-    close_tx: tokio::sync::mpsc::Sender<()>,
+    close_tx: mpsc::Sender<()>,
+    mut released: watch::Receiver<bool>,
 ) -> ResultType<()> {
-    let _close = close.then(|| CloseRequest(close_tx));
-    if close { state.closed.store(true, Ordering::Relaxed); }
+    if close {
+        // Request shutdown independently of delivery and acknowledge after the data plane stops.
+        let _ = close_tx.try_send(());
+        released.wait_for(|released| *released).await?;
+    }
     socket.write_all(&serde_json::to_vec(&record.public(state))?).await?;
     socket.write_all(b"\n").await?;
     Ok(())
@@ -310,6 +316,7 @@ pub(super) struct Managed {
     pub(super) setup_errors: Vec<super::stage::SetupError>,
     state: Arc<State>,
     task: tokio::task::JoinHandle<()>,
+    close_tx: mpsc::Sender<()>,
     path: PathBuf,
 }
 impl Drop for Managed {
@@ -421,8 +428,10 @@ impl Managed {
             info["setup_errors"] = json!(setup_errors);
         }
         let status = state.clone();
+        let (close_tx, mut close_rx) = mpsc::channel(1);
+        let control_close = close_tx.clone();
+        let (released, wait_released) = watch::channel(false);
         let task = tokio::spawn(async move {
-            let _registration = registration;
             let mut first = Some((first, Instant::now()));
             let mut channels = JoinSet::new();
             let mut controls = JoinSet::new();
@@ -438,7 +447,6 @@ impl Managed {
                     status.active.store(0, Ordering::Relaxed);
                 });
             }
-            let (close_tx, mut close_rx) = tokio::sync::mpsc::channel::<()>(1);
             loop {
                 tokio::select! {
                     _=async {
@@ -461,6 +469,8 @@ impl Managed {
                             impl Drop for Count {fn drop(&mut self){self.0.active.fetch_sub(1,Ordering::Relaxed);}}
                             let _count=Count(status.clone());
                             let result=async {
+                                #[cfg(feature = "embedded-ssh")]
+                                super::auth::verify_ssh_account(&options.token).await?;
                                 let connection=match saved {Some(c)=>c,None=>options.open_forward(&record.remote_host,record.remote_port).await?};
                                 forward(socket,connection).await
                             }.await;
@@ -470,7 +480,8 @@ impl Managed {
                     accepted=control.accept()=>{
                         let (socket,_)=match accepted {Ok(value)=>value,Err(_)=>break};
                         if controls.len()>=8 {drop(socket);continue;}
-                        let record=record.clone();let status=status.clone();let close_tx=close_tx.clone();
+                        let record=record.clone();let status=status.clone();
+                        let close_tx=control_close.clone();let released=wait_released.clone();
                         controls.spawn(async move {
                             let _=tokio::time::timeout(Duration::from_secs(1),async {
                                 socket.set_nodelay(true)?;
@@ -484,7 +495,7 @@ impl Managed {
                                 if value["secret"]!=record.secret || value["tunnel_id"]!=record.tunnel_id {bail!("Invalid tunnel owner token");}
                                 let close=value["op"]=="close";
                                 if !close && value["op"]!="status" {bail!("Unknown tunnel operation");}
-                                send_control_response(socket.get_mut(), &record, &status, close, close_tx).await
+                                send_control_response(socket.get_mut(), &record, &status, close, close_tx, released).await
                             }).await;
                         });
                     },
@@ -493,7 +504,15 @@ impl Managed {
                     _=controls.join_next(),if !controls.is_empty()=>{},
                 }
             }
+            drop(listener);
+            drop(first);
+            channels.shutdown().await;
+            status.active.store(0, Ordering::Relaxed);
+            drop(registration);
             status.closed.store(true, Ordering::Relaxed);
+            released.send_replace(true);
+            drop(control);
+            while controls.join_next().await.is_some() {}
         });
         Ok(Self {
             info,
@@ -501,11 +520,12 @@ impl Managed {
             setup_errors,
             state,
             task,
+            close_tx,
             path,
         })
     }
 
-    pub(super) async fn serve(self) -> ResultType<i32> {
+    pub(super) async fn serve(mut self) -> ResultType<i32> {
         let mut ready = self.snapshot();
         ready["event"] = json!("tunnel_ready");
         ready["ok"] = json!(true);
@@ -562,8 +582,9 @@ impl Managed {
                 signal=tokio::signal::ctrl_c()=>{signal?;break;},
             }
         }
-        let mut info = self.info.clone();
-        drop(self);
+        let _ = self.close_tx.try_send(());
+        (&mut self.task).await.context("Tunnel shutdown failed")?;
+        let mut info = self.snapshot();
         info["event"] = json!("tunnel_closed");
         info["state"] = json!("closed");
         info["ok"] = json!(true);
@@ -650,14 +671,41 @@ mod tests {
     #[tokio::test]
     async fn accepted_close_still_notifies_owner_when_reply_is_interrupted() {
         let (mut client, mut socket) = tokio::io::duplex(16);
-        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let (tx, mut rx) = mpsc::channel(1);
+        let (release, released) = watch::channel(false);
         let task = tokio::spawn(async move {
-            send_control_response(&mut socket, &control_record(1), &State::default(), true, tx).await
+            let state = State::default();
+            send_control_response(&mut socket, &control_record(1), &state, true, tx, released).await
         });
-        assert_eq!(client.read_u8().await.unwrap(), b'{');
-        drop(client); // The response has started, then its receiver disappears.
-        assert!(task.await.unwrap().is_err());
         assert_eq!(rx.recv().await, Some(()));
+        assert!(tokio::time::timeout(Duration::from_millis(50), client.read_u8()).await.is_err());
+        drop(client);
+        release.send_replace(true);
+        assert!(task.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn close_acknowledges_only_after_data_plane_releases() {
+        let (client, mut socket) = tokio::io::duplex(8192);
+        let mut client = BufReader::new(client);
+        let (tx, mut rx) = mpsc::channel(1);
+        let (release, released) = watch::channel(false);
+        let state = Arc::new(State::default());
+        state.active.store(1, Ordering::Relaxed);
+        let status = state.clone();
+        let task = tokio::spawn(async move {
+            send_control_response(&mut socket, &control_record(1), &status, true, tx, released).await
+        });
+        assert_eq!(rx.recv().await, Some(()));
+        assert!(tokio::time::timeout(Duration::from_millis(50), client.fill_buf()).await.is_err());
+        state.active.store(0, Ordering::Relaxed);
+        state.closed.store(true, Ordering::Relaxed);
+        release.send_replace(true);
+        let response = read_line(&mut client, 8192).await.unwrap();
+        let response: Value = serde_json::from_slice(&response).unwrap();
+        assert_eq!(response["state"], "closed");
+        assert_eq!(response["active_connections"], 0);
+        task.await.unwrap().unwrap();
     }
 
     #[tokio::test]

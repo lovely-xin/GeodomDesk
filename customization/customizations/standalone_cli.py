@@ -152,6 +152,8 @@ pub fn run_standalone_cli() -> ResultType<i32> {
         auth::verify_ssh_account(&token).await?;
     }
     let ssh = prepare_ssh().map_err(|error| super::stage::wrap(error, "ssh", "not_started"))?;'''),
+        ('    if tunnel {\n        return super::tunnel::Managed::start(',
+         '    if tunnel {\n        auth::verify_ssh_account(&options.token).await?;\n        return super::tunnel::Managed::start('),
         ("""  --transport MODE        auto (default): Bash uses SSH over a managed TCP relay
                           terminal: use GeodomDesk terminal; ssh: require SSH Bash
                           Session without --shell keeps the terminal transport
