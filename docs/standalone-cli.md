@@ -51,7 +51,7 @@ geodomdesk-cli session --id DEVICE_ID --shell powershell --expect-hostname HOSTN
 
 健康连接优先复用。每条新命令发出前都会重新校验 GeodomDesk 账号。`connection: "fresh"` 或 `op: "reconnect"` 重新建立连接。启动时可用 Ctrl+C 退出凭据输入。收到 `ready` 后，`op: "cancel"` 可中断当前请求并清理本次连接。结果为 `execution_state: "unknown"` 时，先用只读操作核对远端状态，再决定是否重新提交。关闭输入或结束进程会释放会话和所属隧道。
 
-`tunnel list --id DEVICE_ID` 显示内置 SSH 管理的隧道。`private_stream: true` 表示 SSH 流只在 CLI 进程内使用。`tunnel close --id DEVICE_ID --tunnel-id UUID` 可关闭对应隧道。访问 HTTP、HTTPS、RDP 等已知服务时，使用 `tunnel open` 管理本地 TCP 端口，并用服务实际握手核验。
+`tunnel list --id DEVICE_ID` 显示内置 SSH 管理的隧道。`private_stream: true` 表示 SSH 流只在 CLI 进程内使用。访问 HTTP、HTTPS、RDP 等已知服务时，使用 `tunnel open` 管理本地 TCP 端口，并用服务实际握手核验。独立 CLI 会在建立映射和接受新数据连接时核验账号。`tunnel close --id DEVICE_ID --tunnel-id UUID` 在释放监听端口和数据连接后返回关闭确认。
 
 ## 构建
 

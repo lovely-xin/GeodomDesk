@@ -206,6 +206,40 @@ jobs:
             (cd "$(dirname "$package")"; sha256sum --check "$(basename "$package").sha256")
             assets+=("$package" "$package.sha256")
           done
-          gh release create "cli-v$version" "${assets[@]}" --repo "$GITHUB_REPOSITORY" \
-            --target "$GITHUB_SHA" --title "GeodomDesk CLI $version" --latest=false \
-            --notes 'Standalone GeodomDesk CLI for Windows and Ubuntu with embedded SSH.'
+          tag="cli-v$version"
+          json() { python3 -c "import json, sys; data=json.load(sys.stdin); print($1)" "${@:2}"; }
+          releases=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --slurp)
+          existing=$(json 'next((json.dumps(r) for page in data for r in page if r["tag_name"] == sys.argv[1]), "")' "$tag" <<< "$releases")
+          if [[ -z "$existing" ]]; then
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --draft \
+              --target "$GITHUB_SHA" --title "GeodomDesk CLI $version" --latest=false \
+              --notes 'Standalone GeodomDesk CLI for Windows and Ubuntu with embedded SSH.'
+            api_url=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json apiUrl --jq .apiUrl)
+            existing=$(gh api "$api_url")
+          fi
+          draft=$(json 'data["draft"]' <<< "$existing")
+          if [[ "$draft" == True ]]; then
+            [[ $(json 'data["target_commitish"]' <<< "$existing") == "$GITHUB_SHA" ]]
+            gh release upload "$tag" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            tag_object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag")
+            [[ $(json 'data["object"]["type"]' <<< "$tag_object") == commit ]]
+            [[ $(json 'data["object"]["sha"]' <<< "$tag_object") == "$GITHUB_SHA" ]]
+          fi
+          gh api "$(json 'data["url"]' <<< "$existing")" | python3 -c '
+          import hashlib, json, pathlib, sys
+          uploaded = json.load(sys.stdin)["assets"]
+          expected = {}
+          for argument in sys.argv[1:]:
+              path = pathlib.Path(argument)
+              with path.open("rb") as stream:
+                  digest = hashlib.sha256()
+                  for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                      digest.update(chunk)
+              expected[path.name] = "sha256:" + digest.hexdigest()
+          if len(uploaded) != len(expected) or {asset["name"]: asset["digest"] for asset in uploaded} != expected:
+              raise SystemExit("Published assets differ from the verified packages")
+          ' "${assets[@]}"
+          if [[ "$draft" == True ]]; then
+            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest=false
+          fi

@@ -4,7 +4,12 @@ $utf8 = [System.Text.UTF8Encoding]::new($false)
 $OutputEncoding = $utf8
 $ProgressPreference = 'SilentlyContinue'
 try {
-    $remoteScript = [ScriptBlock]::Create([Console]::In.ReadToEnd())
+    $source = [Console]::In.ReadToEnd()
+    if ($null -ne $geodomdeskExpectedBytes -and $utf8.GetByteCount($source) -ne $geodomdeskExpectedBytes) {
+        [Console]::Error.WriteLine('Incomplete PowerShell script')
+        exit 1
+    }
+    $remoteScript = [ScriptBlock]::Create($source)
     $global:LASTEXITCODE = $null
     $script:commandHadError = $false
     & $remoteScript 2>&1 | ForEach-Object {
