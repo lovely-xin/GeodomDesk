@@ -154,6 +154,7 @@ jobs:
           flutter pub get
           dart format lib/common.dart lib/desktop/pages/connection_page.dart lib/desktop/pages/install_page.dart lib/desktop/pages/desktop_home_page.dart lib/models/model.dart lib/common/widgets/login.dart lib/desktop/pages/desktop_setting_page.dart lib/mobile/pages/connection_page.dart lib/mobile/pages/settings_page.dart lib/mobile/widgets/dialog.dart
           flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings lib/common.dart lib/desktop/pages/connection_page.dart lib/desktop/pages/install_page.dart lib/desktop/pages/desktop_home_page.dart lib/models/model.dart lib/common/widgets/login.dart lib/desktop/pages/desktop_setting_page.dart lib/mobile/pages/connection_page.dart lib/mobile/pages/settings_page.dart lib/mobile/widgets/dialog.dart
+          flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings lib/models/ab_model.dart lib/models/geodom_recent_sync.dart lib/models/peer_model.dart lib/common/widgets/address_book.dart lib/common/widgets/peer_card.dart lib/utils/http_service.dart
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: geodomdesk-bridge
@@ -273,6 +274,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Terminal protocol regression tests failed' }
           cargo test --locked --release --features $features --lib audio_resampler::allocation_tests::
           if ($LASTEXITCODE -ne 0) { throw 'Audio allocation regression tests failed' }
+          cargo test --locked --release --features $features --lib geodomdesk_recent::tests::
+          if ($LASTEXITCODE -ne 0) { throw 'Recent device sync regression tests failed' }
           cargo test --locked --release --features $features --lib port_forward::
           if ($LASTEXITCODE -ne 0) { throw 'TCP tunnel regression tests failed' }
           $cli = './flutter/build/windows/x64/runner/Release/geodomdesk-cli.exe'
@@ -381,6 +384,7 @@ jobs:
           features=$(python3 ./build.py --print-features --flutter --hwcodec --unix-file-copy-paste)
           cargo build --locked --release --features "$features" --bin geodomdesk-cli
           cargo test --locked --release --features "$features" --lib terminal_exec::
+          cargo test --locked --release --features "$features" --lib geodomdesk_recent::tests::
           cargo test --locked --release --features "$features" --lib port_forward::
           python3 -m unittest discover -s ../customization/tests -p test_terminal_cli.py -v
           mkdir -p ../ubuntu-artifact

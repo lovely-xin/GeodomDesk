@@ -58,6 +58,9 @@ def verify(source=None, update_lock=False):
         begin = config_source.index(" = ", begin) + 3
         end = config_source.index(";\n", begin)
         fixed = config_source[begin:end]
+        expected_api = json.loads(
+            (ROOT / "config/client-channel.json").read_text(encoding="utf-8")
+        )["server"].get("api", "")
         begin = config_source.index("fn get_or(")
         end = config_source.index("\n#[inline]\npub fn is_incoming_only", begin)
         (crate / "src/server_config_verification.rs").write_text(
@@ -65,6 +68,7 @@ def verify(source=None, update_lock=False):
             + "fn fixed() -> RwLock<HashMap<String, String>> { "
             + fixed
             + " }\n"
+            + "const EXPECTED_API: &str = " + json.dumps(expected_api, ensure_ascii=False) + ";\n"
             + config_source[begin:end]
             + """
 #[cfg(test)]
@@ -81,7 +85,7 @@ mod tests {
             assert_eq!(get_or(&fixed, &imported, &defaults, &key), Some(value));
             assert!(!is_option_can_save(&fixed, &key, &defaults, "user-edited-value"));
         }
-        assert_eq!(get_or(&fixed, &imported, &defaults, "api-server"), Some(String::new()));
+        assert_eq!(get_or(&fixed, &imported, &defaults, "api-server"), Some(EXPECTED_API.to_owned()));
     }
     #[test]
     fn personal_password_mode_is_not_locked_or_overwritten() {
