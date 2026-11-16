@@ -1,6 +1,8 @@
 part of 'ab_model.dart';
 
 const _recentSyncAccount = 'geodom-recent-sync-account';
+const _recentSyncLocalOwner = 'geodom-recent-sync-local-owner';
+const _recentSyncDisabled = 'geodom-recent-sync-disabled';
 const _recentSyncRemovals = 'geodom-recent-sync-removals';
 const _recentSyncForgotten = 'geodom-recent-sync-forgotten';
 
@@ -12,35 +14,85 @@ class GeodomRecentSync {
   bool _running = false;
   String? _savedState;
   String? _savedToken;
+  String? _supportToken;
   DateTime _next = DateTime.fromMillisecondsSinceEpoch(0);
 
   String get _account => gFFI.userModel.userName.value;
   String get _token => bind.mainGetLocalOption(key: 'access_token');
+
+  Set<String> get _disabledAccounts {
+    try {
+      return (jsonDecode(bind.mainGetLocalOption(key: _recentSyncDisabled))
+              as List)
+          .whereType<String>()
+          .toSet();
+    } catch (_) {
+      return {};
+    }
+  }
 
   bool get enabled =>
       !kIsWeb &&
       supported.value &&
       gFFI.userModel.isLogin &&
       _account.isNotEmpty &&
-      bind.mainGetLocalOption(key: _recentSyncAccount) == _account;
+      _supportToken != null &&
+      _supportToken == _token &&
+      !_disabledAccounts.contains(_account);
+
+  Future<void> setSupport(bool available, String token) async {
+    final account = _account;
+    bool current() => token.isNotEmpty && _token == token && _account == account;
+    if (!current()) return;
+    if (available && (account.isEmpty || !await _bindAccount(account, current))) return;
+    if (available && (!supported.value || _supportToken != token)) {
+      _next = DateTime.fromMillisecondsSinceEpoch(0);
+    }
+    _supportToken = available ? token : null;
+    supported.value = available;
+  }
+
+  void resetSupport() {
+    _supportToken = null;
+    supported.value = false;
+  }
 
   Future<void> setEnabled(bool value) async {
     final account = _account;
     final token = _token;
-    if (value && (!supported.value || account.isEmpty || token.isEmpty)) return;
-    final previousOwner = bind.mainGetLocalOption(key: _recentSyncAccount);
-    if (previousOwner != account) {
-      await bind.mainSetLocalOption(key: _recentSyncRemovals, value: '');
-      await bind.mainSetLocalOption(key: _recentSyncForgotten, value: '');
+    if (account.isEmpty || token.isEmpty || (value && _supportToken != token)) return;
+    final disabled = _disabledAccounts;
+    if (value) {
+      disabled.remove(account);
+    } else {
+      disabled.add(account);
     }
-    if (_account != account || _token != token) return;
     await bind.mainSetLocalOption(
-        key: _recentSyncAccount, value: value ? account : '');
+        key: _recentSyncDisabled, value: jsonEncode(disabled.toList()));
+    if (_account != account || _token != token) return;
     _savedState = null;
     _savedToken = null;
     _next = DateTime.fromMillisecondsSinceEpoch(0);
     await bind.mainLoadRecentPeers();
     schedule();
+  }
+
+  Future<bool> _bindAccount(String account, bool Function() current) async {
+    final previousOwner = bind.mainGetLocalOption(key: _recentSyncAccount);
+    if (bind.mainGetLocalOption(key: _recentSyncLocalOwner).isEmpty) {
+      await bind.mainSetLocalOption(
+          key: _recentSyncLocalOwner,
+          value: previousOwner.isEmpty ? account : previousOwner);
+    }
+    if (previousOwner != account) {
+      if (!current()) return false;
+      await bind.mainSetLocalOption(key: _recentSyncRemovals, value: '');
+      if (!current()) return false;
+      await bind.mainSetLocalOption(key: _recentSyncForgotten, value: '');
+      if (!current()) return false;
+      await bind.mainSetLocalOption(key: _recentSyncAccount, value: account);
+    }
+    return current();
   }
 
   Map<String, int> _pending(String key) {

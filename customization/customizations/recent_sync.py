@@ -96,6 +96,12 @@ def apply(changes, root):
         "        crate::geodomdesk_recent::apply_settings(&self.id, &mut config);\n"
         "        self.remember",
     )
+    edit(
+        "src/client.rs",
+        "        config.info = serde;\n        let password = self.password.clone();",
+        "        crate::geodomdesk_recent::mark_new_peer(&mut config);\n"
+        "        config.info = serde;\n        let password = self.password.clone();",
+    )
     ffi = "src/flutter_ffi.rs"
     edit(
         ffi,
@@ -125,7 +131,7 @@ def apply(changes, root):
         """        let peers: Vec<HashMap<&str, String>> = PeerConfig::peers(id_filters)
             .into_iter()
             .map(|(id, time, peer)| {
-                let profile = crate::geodomdesk_recent::record(&id, time, &peer);
+                let profile = crate::geodomdesk_recent::export_record(&id, time, &peer);
                 let mut entry = peer_to_map(id, peer);
                 if let Some(profile) = profile {
                     entry.insert(crate::geodomdesk_recent::FIELD, profile);
@@ -146,8 +152,14 @@ def apply(changes, root):
     edit(book, "import 'package:flutter/material.dart';", "import 'package:flutter/foundation.dart' show kIsWeb;\nimport 'package:flutter/material.dart';")
     edit(book, "final syncAbOption", "part 'geodom_recent_sync.dart';\n\nfinal syncAbOption")
     edit(book, "class AbModel {\n", "class AbModel {\n  late final recentDevices = GeodomRecentSync(this);\n")
-    edit(book, "          _syncFromRecent();\n", "          recentDevices.schedule();\n          _syncFromRecent();\n")
-    edit(book, "          if (!current.initialized || !current.canWrite()) return;\n          recentDevices.schedule();", "          recentDevices.schedule();\n          if (!current.initialized || !current.canWrite()) return;")
+    edit(book, "    if (desktopType == DesktopType.main) {\n      Timer.periodic",
+         "    if (!kIsWeb && (isMobile || desktopType == DesktopType.main)) {\n      Timer.periodic")
+    edit(book, "          if (!current.initialized || !current.canWrite()) return;",
+         "          recentDevices.schedule();\n"
+         "          if (desktopType != DesktopType.main || !current.initialized || !current.canWrite()) return;")
+    edit(book, "    _pulledOnce = true;\n  }", "    _pulledOnce = true;\n    recentDevices.schedule();\n  }")
+    edit(book, "        if (!legacyMode.value && _maxPeerOneAb == 0) {\n          await _getAbSettings(quiet: quiet);\n        }",
+         "        if (legacyMode.value) {\n          recentDevices.resetSupport();\n        } else {\n          await _getAbSettings(quiet: quiet);\n        }")
     edit(
         book,
         ".map((e) => e.toCustomJson(includingHash: value.isPersonal()))",
@@ -162,8 +174,24 @@ def apply(changes, root):
         "if (personal && r.hash.isNotEmpty && p.hash != r.hash) {",
         "if (personal && !gFFI.abModel.recentDevices.enabled && r.hash.isNotEmpty && p.hash != r.hash) {",
     )
-    edit(book, "    _pulledOnce = false;\n    await bind.mainClearAb();", "    _pulledOnce = false;\n    _maxPeerOneAb = 0;\n    recentDevices.supported.value = false;\n    await bind.mainClearAb();")
-    edit(book, "      _maxPeerOneAb = json['max_peer_one_ab'] ?? 0;", "      _maxPeerOneAb = json['max_peer_one_ab'] ?? 0;\n      recentDevices.supported.value = !kIsWeb && json['geodom_recent_sync'] == 1;")
+    edit(
+        "flutter/lib/models/model.dart",
+        "          if (id != null && hash != null) {\n            gFFI.abModel",
+        "          if (id != null && hash != null && !gFFI.abModel.recentDevices.enabled) {\n            gFFI.abModel",
+    )
+    edit(book, "    _pulledOnce = false;\n    await bind.mainClearAb();", "    _pulledOnce = false;\n    _maxPeerOneAb = 0;\n    recentDevices.resetSupport();\n    await bind.mainClearAb();")
+    edit(book, "  Future<bool> _getAbSettings({required bool quiet}) async {\n    int? statusCode;",
+         "  Future<bool> _getAbSettings({required bool quiet}) async {\n"
+         "    final token = bind.mainGetLocalOption(key: 'access_token');\n    int? statusCode;")
+    edit(book, "        debugPrint(\"HTTP 404, api server doesn't support shared address book\");",
+         "        await recentDevices.setSupport(false, token);\n"
+         "        debugPrint(\"HTTP 404, api server doesn't support shared address book\");")
+    edit(book, "      _maxPeerOneAb = json['max_peer_one_ab'] ?? 0;",
+         "      if (token != bind.mainGetLocalOption(key: 'access_token')) return false;\n"
+         "      _maxPeerOneAb = json['max_peer_one_ab'] ?? 0;\n"
+         "      await recentDevices.setSupport(\n"
+         "          !kIsWeb && Uri.parse(api).scheme == 'https' && json['geodom_recent_sync'] == 1, token);\n"
+         "      if (token != bind.mainGetLocalOption(key: 'access_token')) return false;")
     fetch_start = "  Future<bool> _fetchPeers(List<Peer> tmpPeers, {quiet = false}) async {"
     before, fetch = changes[book].split(fetch_start, 1)
     fetch, after = fetch.split("  Future<bool> _fetchTags(", 1)
