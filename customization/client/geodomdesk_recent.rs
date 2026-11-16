@@ -10,6 +10,9 @@ use std::{
 
 pub(crate) const FIELD: &str = "geodom_recent";
 const ACCOUNT_OPTION: &str = "geodom-recent-sync-account";
+const LOCAL_OWNER_OPTION: &str = "geodom-recent-sync-local-owner";
+const DISABLED_OPTION: &str = "geodom-recent-sync-disabled";
+const PEER_OWNER: &str = "geodom-recent-owner";
 const REMOVALS_OPTION: &str = "geodom-recent-sync-removals";
 const MAX_PROFILE_BYTES: usize = 2048;
 
@@ -80,14 +83,44 @@ pub(crate) fn record(id: &str, modified: SystemTime, peer: &PeerConfig) -> Optio
     parse(&encoded).map(|_| encoded)
 }
 
+fn signed_in_account() -> Option<String> {
+    if LocalConfig::get_option("access_token").is_empty() {
+        return None;
+    }
+    let user: serde_json::Value =
+        serde_json::from_str(&LocalConfig::get_option("user_info")).ok()?;
+    user.get("name")?.as_str().filter(|name| !name.is_empty()).map(str::to_owned)
+}
+
+pub(crate) fn mark_new_peer(peer: &mut PeerConfig) {
+    if peer.info.platform.is_empty() && peer.password.is_empty() {
+        if let Some(owner) = signed_in_account() {
+            peer.options.insert(PEER_OWNER.to_owned(), owner);
+        }
+    }
+}
+
+fn owns_peer(peer: &PeerConfig, account: &str, legacy_owner: &str) -> bool {
+    peer.options.get(PEER_OWNER).map_or(legacy_owner, String::as_str) == account
+}
+
+pub(crate) fn export_record(id: &str, modified: SystemTime, peer: &PeerConfig) -> Option<String> {
+    let account = signed_in_account()?;
+    let legacy_owner = LocalConfig::get_option(LOCAL_OWNER_OPTION);
+    owns_peer(peer, &account, &legacy_owner)
+        .then(|| record(id, modified, peer))
+        .flatten()
+}
+
 pub(crate) fn account_peers() -> Vec<AbPeer> {
     let token = LocalConfig::get_option("access_token");
     let owner = LocalConfig::get_option(ACCOUNT_OPTION);
-    let user: serde_json::Value =
-        serde_json::from_str(&LocalConfig::get_option("user_info")).unwrap_or_default();
+    let disabled: Vec<String> =
+        serde_json::from_str(&LocalConfig::get_option(DISABLED_OPTION)).unwrap_or_default();
     if token.is_empty()
         || owner.is_empty()
-        || user.get("name").and_then(serde_json::Value::as_str) != Some(owner.as_str())
+        || disabled.contains(&owner)
+        || signed_in_account().as_deref() != Some(owner.as_str())
     {
         return Vec::new();
     }
@@ -262,6 +295,16 @@ mod tests {
         assert!(profile.force_relay);
         assert_eq!(profile.timestamp, 123);
         assert!(record("834502176@another.example", time, &peer).is_none());
+    }
+
+    #[test]
+    fn a_second_account_cannot_export_the_first_accounts_local_history() {
+        let mut peer = PeerConfig::default();
+        assert!(owns_peer(&peer, "alice", "alice"));
+        assert!(!owns_peer(&peer, "bob", "alice"));
+        peer.options.insert(PEER_OWNER.to_owned(), "bob".to_owned());
+        assert!(owns_peer(&peer, "bob", "alice"));
+        assert!(!owns_peer(&peer, "alice", "alice"));
     }
 
     #[test]
