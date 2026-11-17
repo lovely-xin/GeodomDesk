@@ -14,7 +14,7 @@ PowerShell Remoting 的 SSH 模式需要目标 SSH 服务配置相应子系统�
 
 ## SSH 路径
 
-先确认 SSH 服务地址、端口、登录方式及已核验的主机密钥。独立 CLI 支持时优先用 `exec --shell powershell` 或 `session --shell powershell`。显式要求 SSH 时加 `--transport ssh`。见 [内置 SSH](embedded-ssh.md)。使用 Windows OpenSSH 服务时，可通过已授权的终端只读查询 `Get-Service sshd -ErrorAction SilentlyContinue`，再核对实际监听和登录能力。
+先确认 SSH 服务地址、端口、登录方式及已核验的主机密钥。独立 CLI 支持该 Shell 时，用 `exec --transport ssh --shell powershell` 或 `session --transport ssh --shell powershell`。仅支持 SSH Bash 的 CLI 可用显式 TCP 映射搭配已有的 SSH 客户端执行 PowerShell。见 [内置 SSH](embedded-ssh.md)。服务不明时，可通过已有的授权终端只读查询 `Get-Service sshd -ErrorAction SilentlyContinue`，再核对实际监听。
 
 ```text
 geodomdesk-cli tunnel open --id "DEVICE_ID" --remote-host SSH_SERVICE_ADDRESS --remote-port SSH_PORT --local-port 0 --expect-platform Windows --expect-hostname EXPECTED_HOST --non-interactive
@@ -52,10 +52,10 @@ exit $LASTEXITCODE
 ## WinRM 路径
 
 1. 核对目标已有的 WinRM 监听地址、端口、协议和 PowerShell 会话端点。用 `tunnel open` 映射该服务，等待 `tunnel_ready`。见 [TCP 隧道与工具组合](tcp-tunnels.md)。
-2. 使用能把预期服务名路由到隧道端口的现有连接配置。WinRM 经 HTTPS 时，连接名称须匹配证书。使用域认证时，服务身份应满足 Kerberos 要求。连接回环端口后，再用实际会话核对证书与账号认证。 [WinRM 远程连接排查](https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_remote_troubleshooting) · [WinRM HTTPS 证书要求](https://learn.microsoft.com/en-us/troubleshoot/windows-client/system-management-components/configure-winrm-for-https)
+2. 使用能把预期服务名路由到隧道端口的现有连接配置。WinRM 经 HTTPS 时，连接名称须匹配证书。使用域认证时，服务身份应满足 Kerberos 要求。仅能连到回环端口不足以证明 WinRM 能认证。保留现有证书与身份验证要求。 [WinRM 远程连接排查](https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_remote_troubleshooting) · [WinRM HTTPS 证书要求](https://learn.microsoft.com/en-us/troubleshoot/windows-client/system-management-components/configure-winrm-for-https)
 3. 用实际认证建立会话，先运行只读命令确认目标身份和输出。业务结束后释放 PSSession，再关闭隧道。遇到意外的证书或身份不符时先核实原因。现有连接配置无法通过隧道保留所需服务身份时，可在核实目标且业务命令尚未发出的前提下，使用已授权的 GeodomDesk 终端中继。
 
 ## 复用、备选与清理
 
 - 同一条 TCP 映射可供多个 PowerShell 命令或 SFTP 使用。SSH 会话由 SSH 客户端管理。要共享同一 Shell 的变量和目录，在同一脚本或同一交互 SSH 会话中完成。结束后按原 UUID 关闭并验证，见 [TCP 隧道与工具组合](tcp-tunnels.md)。
-- 先核对发起端 `--transport ssh` 支持的 shell。旧版可用显式 TCP 隧道搭配已有的 SSH 工具执行 PowerShell。缺少可用的隧道执行路径、命令尚未发出且终端已获授权时，使用当前 CLI 支持的 `exec --shell powershell --transport terminal --relay` 或 `session --shell powershell --transport terminal --relay`。专用 Windows 管理员终端按其独立凭据流程操作，见 [脚本、会话与恢复](session-recovery.md)。
+- 按 [建连诊断](tcp-tunnels.md#建连失败后的诊断与回落) 确认 TCP 执行路径不可用后，可按任务授权用 `--shell powershell --transport terminal`，需要走中继时再加 `--relay`。专用 Windows 管理员终端按其独立凭据流程操作，见 [脚本、会话与恢复](session-recovery.md)。

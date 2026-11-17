@@ -1,4 +1,4 @@
 interface:
   display_name: "GeodomDesk CLI"
   short_description: "优先通过 TCP 隧道运行 Bash 或 PowerShell，访问指定服务并管理连接"
-  default_prompt: "使用 $geodomdesk-cli 在发起端宿主机验证指定设备，优先走 TCP 隧道，核对结果并关闭本次连接。"
+  default_prompt: "使用 $geodomdesk-cli 按需预检服务，优先经 TCP 隧道连接目标终端，包括通过远端设备中转。验证结果并清理临时连接。"
