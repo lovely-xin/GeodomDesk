@@ -57,10 +57,26 @@ fn main() {
     std::process::exit(1);
 }
 
-// The OS closes this non-inherited job handle when the launcher exits or is killed.
-// Assign before spawning, so a killed launcher cannot orphan the main process or SSH.
+#[cfg(windows)]
+const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x2000;
+
+#[cfg(windows)]
+fn can_inherit_process_tree(
+    error: &io::Error,
+    current_limits: impl FnOnce() -> Option<u32>,
+) -> bool {
+    const ERROR_ACCESS_DENIED: i32 = 5;
+    const BREAKAWAY_FLAGS: u32 = 0x0800 | 0x1000;
+    error.raw_os_error() == Some(ERROR_ACCESS_DENIED)
+        && current_limits().is_some_and(|flags| {
+            flags & (JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | BREAKAWAY_FLAGS)
+                == JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        })
+}
+
 #[cfg(windows)]
 fn own_process_tree()->io::Result<()> {
+    const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION: i32 = 9;
     use std::ffi::c_void;
     type Handle=*mut c_void;
     #[repr(C)] #[derive(Default)]
@@ -71,6 +87,13 @@ fn own_process_tree()->io::Result<()> {
     extern "system" {
         fn CreateJobObjectW(attributes:*const c_void,name:*const u16)->Handle;
         fn SetInformationJobObject(job:Handle,class:i32,data:*const c_void,size:u32)->i32;
+        fn QueryInformationJobObject(
+            job: Handle,
+            class: i32,
+            data: *mut c_void,
+            size: u32,
+            written: *mut u32,
+        ) -> i32;
         fn AssignProcessToJobObject(job:Handle,process:Handle)->i32;
         fn GetCurrentProcess()->Handle;
         fn CloseHandle(handle:Handle)->i32;
@@ -78,10 +101,57 @@ fn own_process_tree()->io::Result<()> {
     unsafe {
         let job=CreateJobObjectW(std::ptr::null(),std::ptr::null());
         if job.is_null(){return Err(io::Error::last_os_error());}
-        let mut limits=Extended::default();limits.basic.flags=0x2000;
-        if SetInformationJobObject(job,9,(&limits as *const Extended).cast(),std::mem::size_of::<Extended>() as u32)==0 || AssignProcessToJobObject(job,GetCurrentProcess())==0 {
-            let error=io::Error::last_os_error();CloseHandle(job);return Err(error);
+        let mut limits = Extended::default();
+        limits.basic.flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let size = std::mem::size_of::<Extended>() as u32;
+        if SetInformationJobObject(
+            job,
+            JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+            (&limits as *const Extended).cast(),
+            size,
+        ) == 0
+        {
+            let error = io::Error::last_os_error();
+            CloseHandle(job);
+            return Err(error);
         }
+        if AssignProcessToJobObject(job, GetCurrentProcess()) == 0 {
+            let error = io::Error::last_os_error();
+            CloseHandle(job);
+            // Server 2008 R2 can inherit cleanup from the remote terminal's job.
+            if can_inherit_process_tree(&error, || {
+                let queried = QueryInformationJobObject(
+                    std::ptr::null_mut(),
+                    JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+                    (&mut limits as *mut Extended).cast(),
+                    size,
+                    std::ptr::null_mut(),
+                );
+                (queried != 0).then_some(limits.basic.flags)
+            }) {
+                return Ok(());
+            }
+            return Err(error);
+        }
+        // The OS closes the private job handle when the launcher exits.
     }
     Ok(())
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inherited_job_must_keep_and_clean_the_process_tree() {
+        let denied = io::Error::from_raw_os_error(5);
+        let cleanup = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        assert!(can_inherit_process_tree(&denied, || Some(cleanup)));
+        assert!(!can_inherit_process_tree(&denied, || None));
+        for flags in [0, cleanup | 0x0800, cleanup | 0x1000] {
+            assert!(!can_inherit_process_tree(&denied, || Some(flags)));
+        }
+        let unexpected = io::Error::from_raw_os_error(6);
+        assert!(!can_inherit_process_tree(&unexpected, || unreachable!()));
+    }
 }

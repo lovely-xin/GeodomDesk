@@ -46,7 +46,7 @@ def run_build(ref, commit, validation):
         ["gh", "run", "watch", str(run_id), "--repo", repository, "--interval", "30", "--exit-status"],
         check=True,
     )
-    required = {"plan", "bridge", "windows", "ubuntu"}
+    required = {"plan", "bridge", "windows", "windows-server-2008-r2", "ubuntu"}
     if not validation:
         required.update({"android", "release"})
     jobs = api(run + "/jobs?per_page=100")["jobs"]

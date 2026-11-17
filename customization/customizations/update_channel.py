@@ -42,6 +42,19 @@ def apply(changes, cfg):
     change(name, "let latest_release_version = display_version_from_release_id(&release_id)?;", "")
     change(
         name,
+        "let release_id = release_id_from_update_url(&response_url)?;",
+        """let release_id = release_id_from_update_url(&response_url)?;
+    #[cfg(windows)]
+    if crate::updater::current_update_platform() == "windows-server-2008-r2" {
+        let pointer: serde_json::Value = serde_json::from_slice(&bytes)?;
+        if pointer["windows_server_2008_r2_url"].as_str().is_none() {
+            clear_software_update_url();
+            return Ok(());
+        }
+    }""",
+    )
+    change(
+        name,
         "if get_version_number(&latest_release_version) > get_version_number(crate::VERSION) {",
         "if crate::geodomdesk_update::is_newer_release(&release_id, crate::VERSION, crate::geodomdesk_update::BUILD_NUMBER)? {",
     )
@@ -102,6 +115,21 @@ pub async fn do_check_software_update() -> hbb_common::ResultType<()> {
         + changes[name][end:]
     )
 
+    change(
+        "src/updater/artifact.rs",
+        """    #[cfg(target_os = "windows")]
+    {
+        "windows"
+    }""",
+        """    #[cfg(target_os = "windows")]
+    {
+        if crate::platform::is_win_10_or_greater() {
+            "windows"
+        } else {
+            "windows-server-2008-r2"
+        }
+    }""",
+    )
     change(
         "src/updater/artifact.rs",
         "https://github.com/rustdesk/rustdesk/releases/download/{release_id}/",
