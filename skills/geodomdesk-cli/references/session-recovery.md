@@ -12,7 +12,7 @@ geodomdesk-cli probe --id "DEVICE_ID" --relay --expect-platform Windows --expect
 geodomdesk-cli exec --id "DEVICE_ID" --shell powershell --transport terminal --relay --expect-platform Windows --expect-hostname EXPECTED_HOST --non-interactive --command 'Get-Location' --json
 ```
 
-- 支持内置 Bash SSH 时优先使用受管隧道。用 `--help` 确认 `--shell bash` 的默认路由，支持时可用 `--transport ssh` 明确选择。目标 SSH 服务使用实际端口和账号，必要时加 `--ssh-port` 和 `--ssh-user`。有会话支持时可复用 SSH 连接，每个请求独立执行。若只支持通用 TCP 映射，可搭配外部 SSH。
+- 支持目标 Shell 的 SSH 执行时，用 `--transport ssh` 明确选择受管隧道。目标 SSH 服务使用实际端口和账号，必要时加 `--ssh-port` 和 `--ssh-user`。有会话支持时可复用 SSH 连接，每个请求独立执行。也可用通用 TCP 映射搭配外部 SSH。
 - Windows 优先查阅 [PowerShell 经 TCP 隧道](windows-powershell.md)。显式选择 GeodomDesk 终端时使用 `--transport terminal`。需要经 GeodomDesk 中继时再加 `--relay`。`protocol: exec` 表示结构化终端，`protocol: legacy` 表示兼容终端。`terminal_exec` 和 `terminal` 是对端能力字段。兼容终端可能合并 stderr 与 stdout，大输出按规模设置超时。创建会话时选择通道和 Shell，后续单条请求改变 Shell 不等于换通道。
 - `probe` 可检查设备认证与能力。支持时用 `probe --transport ssh` 核对 SSH 通道。结果若包含 `protocol: ssh` 或 `command_transport: ssh-relay`，可用于确认内置 SSH 路径。`transport: Relay` 只标记底层走中继，终端中继也可返回这个值。若中继不可用且任务允许直连，可为新的终端请求选择可用路由。
 
@@ -76,4 +76,4 @@ geodomdesk-cli exec --id "DEVICE_ID" --shell powershell --transport terminal --r
 | `finished` | 按退出码及输出判断成功。非零退出仍可能已经完成部分操作。 |
 | `unknown` | 超时、断线或取消时先只读核对业务状态。收到取消确认后，仍需核对远端任务状态及已产生的结果。 |
 
-建连时 CLI 已在总预算内对临时故障有限重建，原始原因可见 `setup_errors`。明确的临时连接失败且状态为 `not_started` 时可有限重连。登录拒绝、权限不足、目标不符或 SSH 主机密钥变化时先解决原因。显式设备密码、管理员凭据或验证码使用单次完整登录预算。SSH 失败时由调用方为新的请求选择通道。上传或执行中断按结果状态核对。调用方设总等待上限，先尝试正常控制。仍卡死时只处理本次启动的进程树及其 UUID。
+建连时 CLI 已在总预算内对临时故障有限重建，原始原因可见 `setup_errors`。明确的临时连接失败且状态为 `not_started` 时可有限重连。登录拒绝、权限不足、目标不符或主机密钥变化时先解决原因。按 [建连失败后的诊断与回落](tcp-tunnels.md#建连失败后的诊断与回落) 判断何时换通道。上传或执行中断按实际结果状态核对。调用方设总等待上限，先尝试正常控制。仍卡死时只处理本次启动的进程树及其 UUID。
