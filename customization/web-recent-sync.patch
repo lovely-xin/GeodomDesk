@@ -1,0 +1,268 @@
+diff --git a/src/main/resources/static/js/app/recent-sync.js b/src/main/resources/static/js/app/recent-sync.js
+--- a/src/main/resources/static/js/app/recent-sync.js
++++ b/src/main/resources/static/js/app/recent-sync.js
+@@ -7,6 +7,7 @@
+ const qualities = { low: 2, balanced: 3, best: 4, custom: 5 };
+ const pullInterval = 30_000;
+ const capabilityInterval = 300_000;
++const recentTag = "GeodomDesk 最近访问";
+ const syncId = (id) => validId(id) && id.length >= 6;
+ const label = (value, length) => (typeof value === "string" ? value.slice(0, length) : "");
+ 
+@@ -64,6 +65,7 @@
+   #retryAfter = 0;
+   #failures = 0;
+   #epoch = 0;
++  #changes = 0;
+   #preference;
+   supported;
+ 
+@@ -181,6 +183,7 @@
+     };
+     this.#pending.delete(id);
+     this.#pending.set(id, entry);
++    this.#changes++;
+     if (this.#pending.size > 500) this.#pending.delete(this.#pending.keys().next().value);
+     this.#save();
+   }
+@@ -208,6 +211,8 @@
+     )
+       return;
+     const controller = new AbortController();
++    const changes = this.#changes;
++    const epoch = this.#epoch;
+     this.#controller = controller;
+     this.#running = this.#sync(controller.signal, probe && force)
+       .then(
+@@ -225,6 +230,10 @@
+       .finally(() => {
+         this.#running = undefined;
+         this.#controller = undefined;
++      })
++      .then(() => {
++        if (this.#epoch === epoch && this.#changes !== changes && this.#pending.size)
++          return this.run();
+       });
+     return this.#running;
+   }
+@@ -258,19 +267,32 @@
+     for (const [id, entry] of [...this.#pending].slice(0, 32)) {
+       if (!current()) return;
+       const remote = cloud.get(id);
+-      const profile = parseRecent(entry.geodom_recent);
++      let profile = parseRecent(entry.geodom_recent);
++      const remoteTimestamp = remote?.profile?.timestamp || 0;
++      const clearsCredential = entry.credential === "clear";
++      const needsRemoval = profile?.removed && remote && !remote.profile?.removed;
++      const needsClear = clearsCredential && remote?.hash;
++      if (profile && (needsRemoval || needsClear) && profile.timestamp <= remoteTimestamp) {
++        profile = {
++          ...(profile.removed ? profile : remote.profile),
++          timestamp: remoteTimestamp + 1,
++        };
++      }
++      if (profile && clearsCredential && remote?.profile?.removed) profile.removed = true;
+       if (
+         profile &&
+-        profile.timestamp > (remote?.profile?.timestamp || 0) &&
++        profile.timestamp > remoteTimestamp &&
+         (!profile.removed || remote)
+       ) {
+         const { credential } = entry;
++        const preserveDevice = remote && (profile.removed || clearsCredential);
+         const data = {
+           id,
+-          alias: entry.alias,
+-          ...(entry.platform ? { platform: entry.platform } : {}),
+-          ...(entry.hostname ? { hostname: entry.hostname } : {}),
+-          ...(entry.username ? { username: entry.username } : {}),
++          ...(!preserveDevice ? { alias: entry.alias } : {}),
++          ...(!remote ? { tags: [recentTag] } : {}),
++          ...(!preserveDevice && entry.platform ? { platform: entry.platform } : {}),
++          ...(!preserveDevice && entry.hostname ? { hostname: entry.hostname } : {}),
++          ...(!preserveDevice && entry.username ? { username: entry.username } : {}),
+           geodom_recent: JSON.stringify(
+             profile.removed ? profile : { ...remote?.profile, ...profile }
+           ),
+@@ -283,15 +305,25 @@
+               : undefined;
+         if (hash !== undefined) data.hash = hash;
+         try {
+-          const result = await this.#api.request(
++          const write = () => this.#api.request(
+             `ab/peer/${remote ? "update" : "add"}/${this.#book}`,
+             remote ? "PUT" : "POST",
+             data,
+             false,
+             signal
+           );
++          let result;
++          try {
++            result = await write();
++          } catch (error) {
++            if (!data.tags || error.status !== 409 || error.message !== "Too many tags")
++              throw error;
++            if (!current()) return;
++            delete data.tags;
++            result = await write();
++          }
+           if (result?.error) deferred.set(id, entry);
+-          else attempted.set(id, { entry, timestamp: profile.timestamp });
++          else attempted.set(id, { entry, profile });
+         } catch (error) {
+           if (![400, 404, 409, 422].includes(error.status)) throw error;
+           deferred.set(id, entry);
+@@ -304,11 +336,18 @@
+     }
+     const latest = attempted.size ? await this.#read(signal) : cloud;
+     if (!current()) return;
+-    for (const [id, { entry, timestamp }] of attempted) {
++    for (const [id, { entry, profile }] of attempted) {
+       // Add is idempotent on the server. A competing insert can make it a no-op.
+-      if (this.#pending.get(id) === entry && (latest.get(id)?.profile?.timestamp || 0) >= timestamp) {
++      if (this.#pending.get(id) !== entry) continue;
++      const confirmed = latest.get(id);
++      const clearsCredential = entry.credential === "clear";
++      if ((confirmed?.profile?.timestamp || 0) >= profile.timestamp &&
++          (!profile.removed || confirmed?.profile?.removed) &&
++          (!clearsCredential || !confirmed?.hash)) {
+         this.#pending.delete(id);
+         this.#save();
++      } else if (profile.removed || clearsCredential) {
++        deferred.set(id, entry);
+       }
+     }
+     for (const [id, entry] of deferred) {
+diff --git a/src/main/resources/static/js/app/workspace.js b/src/main/resources/static/js/app/workspace.js
+--- a/src/main/resources/static/js/app/workspace.js
++++ b/src/main/resources/static/js/app/workspace.js
+@@ -1460,8 +1460,7 @@
+         await this.loadCloud();
+       } else {
+         this.devices = this.runtime.devices.remove(device.id);
+-        this.runtime.credentials?.forget(device.id);
+-        this.recordRecent(device, { removed: true }, "clear");
++        this.recordRecent(device, { removed: true });
+       }
+     } catch (error) {
+       this.handleError(error);
+diff --git a/tools/tests/recent-sync.test.js b/tools/tests/recent-sync.test.js
+--- a/tools/tests/recent-sync.test.js
++++ b/tools/tests/recent-sync.test.js
+@@ -75,6 +75,116 @@
+   return { connect, counts: () => [reads, writes] };
+ }
+ 
++test("a single removal supersedes a newer active record from another client", async () => {
++  const { connect } = fixture();
++  const browser = connect("delete-newer");
++  const device = { id, alias: "Device", platform: "Windows" };
++  browser.rows.set(id, { ...device, hash: key, geodom_recent: profile(Date.now() - 100, {}) });
++  await browser.sync.run();
++
++  browser.devices.remove(id);
++  browser.sync.change(device, { removed: true }, { credential: "clear" });
++  const competingRevision = Date.now() + 1_000;
++  browser.rows.set(id, { ...device, hash: key, geodom_recent: profile(competingRevision, {}) });
++  await browser.sync.run();
++
++  const saved = browser.rows.get(id);
++  assert.equal(JSON.parse(saved.geodom_recent).removed, true);
++  assert.ok(JSON.parse(saved.geodom_recent).timestamp > competingRevision);
++  assert.equal(saved.hash, "");
++  assert.equal(browser.devices.values.length, 0);
++});
++
++test("a removal stays pending if a concurrent update wins before the server receives it", async () => {
++  const { connect } = fixture();
++  const browser = connect("delete-race");
++  const device = { id, alias: "Device", platform: "Windows" };
++  browser.rows.set(id, { ...device, geodom_recent: profile(Date.now() - 100, {}) });
++  await browser.sync.run();
++  const request = browser.api.request;
++  let conflict = true;
++  browser.api.request = async (path, method, data) => {
++    if (conflict && method === "PUT") {
++      conflict = false;
++      const timestamp = JSON.parse(data.geodom_recent).timestamp + 1;
++      browser.rows.set(id, { ...device, geodom_recent: profile(timestamp, {}) });
++    }
++    return request(path, method, data);
++  };
++
++  browser.devices.remove(id);
++  browser.sync.change(device, { removed: true });
++  await assert.rejects(browser.sync.run({ force: true }), /部分设备/);
++  assert.equal(browser.devices.values.length, 0);
++  await browser.sync.run({ force: true });
++  assert.equal(JSON.parse(browser.rows.get(id).geodom_recent).removed, true);
++  assert.equal(browser.devices.values.length, 0);
++});
++
++test("a change queued during a write is sent after the active sync completes", async () => {
++  const { connect } = fixture();
++  const browser = connect("queued-during-write");
++  await browser.sync.run();
++  const second = "987654321";
++  const request = browser.api.request;
++  let reached;
++  let release;
++  const pendingWrite = new Promise((resolve) => { reached = resolve; });
++  const writeGate = new Promise((resolve) => { release = resolve; });
++  browser.api.request = async (path, method, data) => {
++    if (data?.id === id) {
++      reached();
++      await writeGate;
++    }
++    return request(path, method, data);
++  };
++  browser.sync.change({ id, alias: "First", platform: "Windows" });
++  const firstRun = browser.sync.run();
++  await pendingWrite;
++  browser.sync.change({ id: second, alias: "Second", platform: "Linux" });
++  const secondRun = browser.sync.run();
++  release();
++  await Promise.all([firstRun, secondRun]);
++  assert.equal(browser.rows.get(second).alias, "Second");
++  assert.deepEqual(browser.rows.get(second).tags, ["GeodomDesk 最近访问"]);
++});
++
++test("forgetting a credential preserves newer device details and tags", async () => {
++  const { connect } = fixture();
++  const browser = connect("forget-newer");
++  const before = { id, alias: "Before", platform: "Windows", tags: ["Existing"] };
++  browser.rows.set(id, { ...before, hash: key, geodom_recent: profile(Date.now() - 100, {}) });
++  await browser.sync.run();
++  browser.sync.change(before, {}, { credential: "clear" });
++  browser.rows.set(id, { ...before, alias: "Renamed elsewhere", hash: key,
++    geodom_recent: profile(Date.now() + 1000, { force_relay: true }) });
++  await browser.sync.run();
++  const after = browser.rows.get(id);
++  assert.equal(after.hash, "");
++  assert.equal(after.alias, "Renamed elsewhere");
++  assert.deepEqual(after.tags, ["Existing"]);
++  assert.equal(JSON.parse(after.geodom_recent).force_relay, true);
++});
++
++test("a full tag list still allows a new recent visit", async () => {
++  const { connect } = fixture();
++  const browser = connect("full-tags");
++  await browser.sync.run();
++  const request = browser.api.request;
++  let rejected = 0;
++  browser.api.request = async (path, method, data) => {
++    if (data?.tags) {
++      rejected++;
++      throw Object.assign(new Error("Too many tags"), { status: 409 });
++    }
++    return request(path, method, data);
++  };
++  browser.sync.change({ id, alias: "Recent", platform: "Windows" });
++  await browser.sync.run();
++  assert.equal(rejected, 1);
++  assert.equal(browser.rows.get(id).alias, "Recent");
++});
++
+ test("native records and remembered device hashes round-trip through the personal account", async () => {
+   const { connect, counts } = fixture();
+   const desktop = connect("operator");

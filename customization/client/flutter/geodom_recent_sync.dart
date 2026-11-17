@@ -185,8 +185,12 @@ class GeodomRecentSync {
         final uri = base.replace(
             path: '$prefix/api/ab/peer/$action/${book.profile.guid}');
         final request = add ? http.post : http.put;
-        final response =
-            await request(uri, headers: headers, body: jsonEncode(update));
+        var response = await request(uri, headers: headers, body: jsonEncode(update));
+        if (_jsonDecodeActionResp(response) == 'Too many tags' &&
+            update.remove('tags') != null &&
+            current()) {
+          response = await request(uri, headers: headers, body: jsonEncode(update));
+        }
         return _jsonDecodeActionResp(response).isEmpty;
       }
 
