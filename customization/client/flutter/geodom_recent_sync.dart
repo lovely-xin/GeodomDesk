@@ -5,6 +5,7 @@ const _recentSyncLocalOwner = 'geodom-recent-sync-local-owner';
 const _recentSyncDisabled = 'geodom-recent-sync-disabled';
 const _recentSyncRemovals = 'geodom-recent-sync-removals';
 const _recentSyncForgotten = 'geodom-recent-sync-forgotten';
+const geodomRecentTag = 'GeodomDesk 最近访问';
 
 class GeodomRecentSync {
   GeodomRecentSync(this.model);
@@ -16,6 +17,7 @@ class GeodomRecentSync {
   String? _savedToken;
   String? _supportToken;
   DateTime _next = DateTime.fromMillisecondsSinceEpoch(0);
+  Future<void> _pendingWrites = Future.value();
 
   String get _account => gFFI.userModel.userName.value;
   String get _token => bind.mainGetLocalOption(key: 'access_token');
@@ -85,12 +87,14 @@ class GeodomRecentSync {
           value: previousOwner.isEmpty ? account : previousOwner);
     }
     if (previousOwner != account) {
-      if (!current()) return false;
-      await bind.mainSetLocalOption(key: _recentSyncRemovals, value: '');
-      if (!current()) return false;
-      await bind.mainSetLocalOption(key: _recentSyncForgotten, value: '');
-      if (!current()) return false;
-      await bind.mainSetLocalOption(key: _recentSyncAccount, value: account);
+      await _writePending(() async {
+        if (!current() || bind.mainGetLocalOption(key: _recentSyncAccount) == account) return;
+        await bind.mainSetLocalOption(key: _recentSyncRemovals, value: '');
+        if (!current()) return;
+        await bind.mainSetLocalOption(key: _recentSyncForgotten, value: '');
+        if (!current()) return;
+        await bind.mainSetLocalOption(key: _recentSyncAccount, value: account);
+      });
     }
     return current();
   }
@@ -104,22 +108,30 @@ class GeodomRecentSync {
     }
   }
 
-  Future<void> remove(String id) async {
-    if (!enabled) return;
-    final book = model.addressbooks[_personalAddressBookName];
-    if (book is! Ab || !book.peers.any((peer) => peer.id == id)) return;
-    await _queue(_recentSyncRemovals, id);
-  }
+  Future<void> remove(String id) => _queue(_recentSyncRemovals, id);
 
   Future<void> forgetCredential(String id) => _queue(_recentSyncForgotten, id);
 
   Future<void> _queue(String key, String id) async {
     if (!enabled) return;
-    final pending = _pending(key);
-    pending[id] = DateTime.now().millisecondsSinceEpoch;
-    await bind.mainSetLocalOption(key: key, value: jsonEncode(pending));
+    final account = _account;
+    final token = _token;
+    bool current() => enabled && _account == account && _token == token;
+    await _writePending(() async {
+      if (!current()) return;
+      final pending = _pending(key);
+      pending[id] = DateTime.now().millisecondsSinceEpoch;
+      await bind.mainSetLocalOption(key: key, value: jsonEncode(pending));
+    });
+    if (!current()) return;
     _next = DateTime.fromMillisecondsSinceEpoch(0);
     schedule();
+  }
+
+  Future<void> _writePending(Future<void> Function() write) {
+    final result = _pendingWrites.then((_) => write());
+    _pendingWrites = result.then<void>((_) {}, onError: (Object _, StackTrace __) {});
+    return result;
   }
 
   void schedule() {
@@ -128,15 +140,23 @@ class GeodomRecentSync {
     if (book is! Ab || !book.initialized || book.abLoading.value) return;
     _running = true;
     _next = DateTime.now().add(const Duration(seconds: 30));
-    unawaited(_sync(book).whenComplete(() => _running = false));
+    unawaited(_sync(book).whenComplete(() {
+      _running = false;
+      schedule();
+    }));
   }
 
-  int _timestamp(String profile) {
+  Map<String, dynamic> _profile(String value) {
     try {
-      return (jsonDecode(profile) as Map)['timestamp'] as int;
+      return jsonDecode(value) as Map<String, dynamic>;
     } catch (_) {
-      return 0;
+      return {};
     }
+  }
+
+  int _timestamp(String value) {
+    final timestamp = _profile(value)['timestamp'];
+    return timestamp is int ? timestamp : 0;
   }
 
   Future<void> _sync(Ab book) async {
@@ -154,6 +174,7 @@ class GeodomRecentSync {
       final pending = _pending(_recentSyncRemovals);
       final forgotten = _pending(_recentSyncForgotten);
       final acknowledged = <String, int>{};
+      final submittedRemovals = <String, int>{};
       final cleared = <String, int>{};
       var wrote = false;
       Future<bool> send(Map<String, dynamic> update,
@@ -164,24 +185,30 @@ class GeodomRecentSync {
         final uri = base.replace(
             path: '$prefix/api/ab/peer/$action/${book.profile.guid}');
         final request = add ? http.post : http.put;
-        final response =
-            await request(uri, headers: headers, body: jsonEncode(update));
+        var response = await request(uri, headers: headers, body: jsonEncode(update));
+        if (_jsonDecodeActionResp(response) == 'Too many tags' &&
+            update.remove('tags') != null &&
+            current()) {
+          response = await request(uri, headers: headers, body: jsonEncode(update));
+        }
         return _jsonDecodeActionResp(response).isEmpty;
       }
 
       for (final entry in pending.entries.take(32)) {
         final remote = saved[entry.key];
-        if (remote == null || entry.value <= _timestamp(remote.geodomRecent)) {
+        if (remote == null || _profile(remote.geodomRecent)['removed'] == true) {
           acknowledged[entry.key] = entry.value;
           continue;
         }
+        final remoteRevision = _timestamp(remote.geodomRecent);
+        final revision = entry.value > remoteRevision ? entry.value : remoteRevision + 1;
+        if (revision > DateTime.now().millisecondsSinceEpoch + 299000) continue;
         if (await send({
           'id': entry.key,
-          'geodom_recent':
-              jsonEncode({'timestamp': entry.value, 'removed': true}),
+          'geodom_recent': jsonEncode({'timestamp': revision, 'removed': true}),
         }, add: false)) {
           wrote = true;
-          acknowledged[entry.key] = entry.value;
+          submittedRemovals[entry.key] = revision;
         }
       }
 
@@ -197,7 +224,7 @@ class GeodomRecentSync {
         }
         final now = DateTime.now().millisecondsSinceEpoch;
         final remoteRevision = _timestamp(remote.geodomRecent);
-        final removalRevision = pending[entry.key] ?? 0;
+        final removalRevision = submittedRemovals[entry.key] ?? pending[entry.key] ?? 0;
         final latest = removalRevision > remoteRevision ? removalRevision : remoteRevision;
         if (latest > now + 299000) continue;
         profile['timestamp'] = latest >= now ? latest + 1 : now;
@@ -235,6 +262,7 @@ class GeodomRecentSync {
           'platform': peer.platform,
           'alias': peer.alias,
           'geodom_recent': peer.geodomRecent,
+          if (previous == null) 'tags': [geodomRecentTag],
           if (_savedCredential(peer.hash)) 'hash': peer.hash,
         };
         changes++;
@@ -245,6 +273,13 @@ class GeodomRecentSync {
       if (wrote && !await _refreshPeers(book, current)) return;
       if (!current()) return;
       final latest = {for (final peer in book.peers) peer.id: peer};
+      for (final entry in submittedRemovals.entries) {
+        final profile = _profile(latest[entry.key]?.geodomRecent ?? '');
+        final timestamp = profile['timestamp'];
+        if (profile['removed'] == true && timestamp is int && timestamp >= entry.value) {
+          acknowledged[entry.key] = pending[entry.key]!;
+        }
+      }
       cleared.removeWhere((id, _) => latest[id]?.hash.isNotEmpty == true);
       for (final completed in {
         _recentSyncRemovals: acknowledged,
@@ -252,12 +287,15 @@ class GeodomRecentSync {
       }.entries) {
         if (!current()) return;
         if (completed.value.isEmpty) continue;
-        final remaining = _pending(completed.key);
-        for (final entry in completed.value.entries) {
-          if (remaining[entry.key] == entry.value) remaining.remove(entry.key);
-        }
-        await bind.mainSetLocalOption(
-            key: completed.key, value: jsonEncode(remaining));
+        await _writePending(() async {
+          if (!current()) return;
+          final remaining = _pending(completed.key);
+          for (final entry in completed.value.entries) {
+            if (remaining[entry.key] == entry.value) remaining.remove(entry.key);
+          }
+          await bind.mainSetLocalOption(
+              key: completed.key, value: jsonEncode(remaining));
+        });
       }
       if (!current()) return;
       final state = jsonEncode(model._serializeCache());
