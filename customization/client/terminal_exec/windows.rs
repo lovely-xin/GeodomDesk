@@ -227,10 +227,10 @@ fn shell_path(shell: ExecShell) -> ResultType<PathBuf> {
     }
 }
 
-fn read_output(input: impl Read) -> ResultType<Vec<u8>> {
+fn read_output(input: impl Read, limit: usize) -> ResultType<Vec<u8>> {
     let mut bytes = Vec::new();
-    input.take(MAX_OUTPUT as u64 + 1).read_to_end(&mut bytes)?;
-    if bytes.len() > MAX_OUTPUT {
+    input.take(limit as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > limit {
         bail!("Output exceeded {MAX_OUTPUT} bytes");
     }
     Ok(bytes)
@@ -245,13 +245,31 @@ fn run_script(request: TerminalExecRequest) -> ResultType<TerminalExecResult> {
             .map_err(|_| hbb_common::anyhow::anyhow!("Unknown shell"))?,
     )?;
     const BOOTSTRAP: &str = include_str!("exec_bootstrap.ps1");
+    const READY: &[u8] = b"GEODOMDESK_EXEC_READY";
+    // Separate the script from ConsoleHost's stdin and the Windows command-line limit.
+    const CHUNK_SIZE: usize = 24_000;
+    let script = request
+        .script
+        .strip_prefix(b"\xef\xbb\xbf")
+        .unwrap_or(&request.script);
+    if script.is_empty() {
+        bail!("PowerShell script is empty");
+    }
+    let encoded = crate::encode64(script);
+    let chunks = encoded.as_bytes().chunks(CHUNK_SIZE);
+    let chunk_count = chunks.len();
+    let script_bytes = script.len();
+    let startup = format!(
+        "$geodomdeskScriptChunks = {chunk_count}\n$geodomdeskExpectedBytes = {script_bytes}\n{BOOTSTRAP}"
+    );
     let bootstrap = crate::encode64(
-        BOOTSTRAP
+        startup
             .encode_utf16()
             .flat_map(u16::to_le_bytes)
             .collect::<Vec<_>>(),
     );
-    let mut process = Command::new(shell)
+    let mut command = Command::new(shell);
+    command
         .args([
             "-NoLogo",
             "-NoProfile",
@@ -259,36 +277,43 @@ fn run_script(request: TerminalExecRequest) -> ResultType<TerminalExecResult> {
             "-EncodedCommand",
             &bootstrap,
         ])
-        .stdin(Stdio::piped())
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .creation_flags(CREATE_NO_WINDOW.0)
-        .spawn()?;
-    let mut input = process.stdin.take().context("Missing PowerShell input")?;
+        .creation_flags(CREATE_NO_WINDOW.0);
+    for (index, chunk) in chunks.enumerate() {
+        command.env(
+            format!("GEODOMDESK_EXEC_SCRIPT_{index}"),
+            std::str::from_utf8(chunk)?,
+        );
+    }
+    let mut process = command.spawn()?;
     let stdout = process.stdout.take().context("Missing PowerShell output")?;
     let stderr = process
         .stderr
         .take()
         .context("Missing PowerShell error output")?;
-    let stdout = thread::spawn(move || read_output(stdout));
-    let stderr = thread::spawn(move || read_output(stderr));
-    input.write_all(
-        request
-            .script
-            .strip_prefix(b"\xef\xbb\xbf")
-            .unwrap_or(&request.script),
-    )?;
-    drop(input);
+    let stdout = thread::spawn(move || read_output(stdout, MAX_OUTPUT + READY.len()));
+    let stderr = thread::spawn(move || read_output(stderr, MAX_OUTPUT));
     let status = process.wait()?;
     let join = |thread: thread::JoinHandle<ResultType<Vec<u8>>>| {
         thread
             .join()
             .map_err(|_| hbb_common::anyhow::anyhow!("Output reader stopped"))?
     };
+    let mut stdout = join(stdout)?;
+    let stderr = join(stderr)?;
+    let exit_code = status.code().context("Missing PowerShell exit code")?;
+    if !stdout.starts_with(READY) {
+        let diagnostic = String::from_utf8_lossy(&stderr);
+        let diagnostic = diagnostic.trim().chars().take(512).collect::<String>();
+        bail!("PowerShell did not start the script (exit {exit_code}) {diagnostic}");
+    }
+    stdout.drain(..READY.len());
     Ok(TerminalExecResult {
-        stdout: join(stdout)?.into(),
-        stderr: join(stderr)?.into(),
-        exit_code: status.code().context("Missing PowerShell exit code")?,
+        stdout: stdout.into(),
+        stderr: stderr.into(),
+        exit_code,
         ..Default::default()
     })
 }
@@ -339,6 +364,17 @@ mod tests {
                 assert_eq!(&result.stdout[..], "输出".as_bytes());
                 assert_eq!(&result.stderr[..], "错误".as_bytes());
                 assert_eq!(result.exit_code, 7);
+                let script = format!(
+                    "#{}\nexit 19",
+                    "中文".repeat((MAX_SCRIPT - 10) / "中文".len())
+                );
+                let result = execute(shell, &script, 10).unwrap();
+                assert!(result.error.is_empty(), "{}", result.error);
+                assert!(result.stdout.is_empty());
+                assert!(result.stderr.is_empty());
+                assert_eq!(result.exit_code, 19);
+                let result = execute(shell, "Write-Output '", 10).unwrap();
+                assert!(result.error.contains("PowerShell did not start the script"));
             }
             let error =
                 execute(ExecShell::WINDOWS_POWERSHELL, "Start-Sleep -Seconds 30", 2).unwrap_err();
