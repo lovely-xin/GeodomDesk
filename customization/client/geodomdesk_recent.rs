@@ -167,6 +167,10 @@ pub(crate) fn merge_list(
         })
         .collect();
     for peer in cloud {
+        if pending.contains_key(&peer.id) {
+            peers.remove(&peer.id);
+            continue;
+        }
         let Some(profile) = parse(&peer.geodom_recent) else {
             continue;
         };
@@ -174,11 +178,7 @@ pub(crate) fn merge_list(
         if profile.timestamp <= local_timestamp {
             continue;
         }
-        if profile.removed
-            || pending
-                .get(&peer.id)
-                .is_some_and(|timestamp| *timestamp >= profile.timestamp)
-        {
+        if profile.removed {
             peers.remove(&peer.id);
         } else {
             peers.insert(

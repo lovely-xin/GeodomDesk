@@ -205,6 +205,44 @@ def apply(changes, root):
     widget = "flutter/lib/common/widgets/address_book.dart"
     edit(
         widget,
+        "      tags = [kUntagged, ...tags].toList();",
+        """      final abModel = gFFI.abModel;
+      final showRecent = abModel.current.isPersonal() && abModel.recentDevices.supported.value;
+      if (showRecent) tags.remove(geodomRecentTag);
+      tags = [kUntagged, if (showRecent) geodomRecentTag, ...tags];""",
+    )
+    edit(
+        widget,
+        """            onTap: () {
+              if (gFFI.abModel.selectedTags.contains(e)) {""",
+        """            onTap: () {
+              if (showRecent && e == geodomRecentTag) {
+                final active = abModel.selectedTags.contains(e);
+                abModel.selectedTags.value = active ? <String>[] : <String>[e];
+                return;
+              }
+              if (showRecent) abModel.selectedTags.remove(geodomRecentTag);
+              if (gFFI.abModel.selectedTags.contains(e)) {""",
+    )
+    edit(widget, "            showActionMenu: editPermission);",
+         "            showActionMenu: editPermission && !(showRecent && e == geodomRecentTag));")
+    edit(
+        widget,
+        """          child: AddressBookPeersView(
+            menuPadding: widget.menuPadding,
+          )),""",
+        """          child: Obx(() {
+            final abModel = gFFI.abModel;
+            if (abModel.current.isPersonal() &&
+                abModel.recentDevices.supported.value &&
+                abModel.selectedTags.contains(geodomRecentTag)) {
+              return RecentPeersView(menuPadding: widget.menuPadding);
+            }
+            return AddressBookPeersView(menuPadding: widget.menuPadding);
+          })),""",
+    )
+    edit(
+        widget,
         "      if (canWrite) syncMenuItem(),",
         """      if (canWrite) syncMenuItem(),
       if (gFFI.abModel.recentDevices.supported.value)
@@ -220,7 +258,7 @@ def apply(changes, root):
     edit(
         "flutter/lib/common/widgets/peer_card.dart",
         "              await bind.mainRemovePeer(id: id);",
-        "              await bind.mainRemovePeer(id: id);\n              await gFFI.abModel.recentDevices.remove(id);",
+        "              await gFFI.abModel.recentDevices.remove(id);\n              await bind.mainRemovePeer(id: id);",
     )
     edit(
         "flutter/lib/common/widgets/peer_card.dart",
