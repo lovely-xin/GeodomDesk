@@ -49,6 +49,12 @@ fn main() {
 }
 ''', encoding="utf-8")
         subprocess.run(["rustc", "--edition=2021", str(fixture), "-o", str(cls.main)], check=True)
+        if os.name == "nt":
+            cls.job_tests = cls.root / "job-tests.exe"
+            subprocess.run(
+                ["rustc", "--edition=2021", "--test", str(source), "-o", str(cls.job_tests)],
+                check=True,
+            )
 
     @classmethod
     def tearDownClass(cls):
@@ -72,6 +78,10 @@ fn main() {
         self.assertEqual(result.returncode, 1)
         self.assertIn(b"cannot run GeodomDesk", result.stderr)
         self.assertEqual(result.stdout, b"")
+
+    @unittest.skipUnless(os.name == "nt", "Windows process job")
+    def test_inherited_job_policy(self):
+        subprocess.run([str(self.job_tests)], check=True, timeout=10)
 
     @unittest.skipUnless(os.name == "nt", "Windows process job")
     def test_killed_launcher_closes_the_owned_process_tree(self):
