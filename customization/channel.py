@@ -12,6 +12,15 @@ SIGNATURE_CONTEXT = b"GeodomDesk update metadata v1\n"
 METADATA_NAME = "geodomdesk-update.json"
 APP = "geodomdesk"
 TARGETS = (("windows", "x86_64", "exe"), ("linux", "x86_64", "deb"), ("android", "aarch64", "apk"))
+WINDOWS_SERVER_2008_R2 = ("windows-server-2008-r2", "x86_64", "exe")
+
+
+def release_targets(artifacts):
+    selectors = {(item.get("platform"), item.get("arch"), item.get("format")) for item in artifacts}
+    for targets in (TARGETS, (*TARGETS, WINDOWS_SERVER_2008_R2)):
+        if len(artifacts) == len(targets) and selectors == set(targets):
+            return targets
+    raise ValueError("Release requires Windows x64 EXE, Ubuntu amd64 DEB and Android ARM64 APK")
 
 
 def version_tuple(version):
@@ -62,9 +71,12 @@ def release_url(version):
 
 def file_name(version, platform, fmt):
     release_parts(version)
-    suffix = {"windows": "windows-x64", "linux": "ubuntu-amd64", "android": "android-arm64"}[
-        platform
-    ]
+    suffix = {
+        "windows": "windows-x64",
+        "linux": "ubuntu-amd64",
+        "android": "android-arm64",
+        "windows-server-2008-r2": "windows-server-2008-r2-x64",
+    }[platform]
     return f"geodomdesk-{version}-{suffix}.{fmt}"
 
 
@@ -83,9 +95,7 @@ def signed_metadata(version, published_at, artifacts, seed):
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
     official_version, build_number = release_parts(version)
-    selectors = {(item["platform"], item["arch"], item["format"]) for item in artifacts}
-    if selectors != set(TARGETS) or len(artifacts) != len(TARGETS):
-        raise ValueError("Native Windows EXE, Ubuntu DEB and Android APK updates are required")
+    release_targets(artifacts)
     for item in artifacts:
         name = file_name(version, item["platform"], item["format"])
         if (

@@ -176,8 +176,13 @@ jobs:
             client/flutter/lib/mobile/widgets/dialog.dart
 
   windows:
+    name: ${{ matrix.package }}
     needs: [plan, bridge]
     if: needs.plan.outputs.reuse_run == ''
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [windows, windows-server-2008-r2]
     runs-on: windows-2022
     timeout-minutes: 180
     defaults:
@@ -199,13 +204,13 @@ jobs:
           path: client
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
         with:
-          toolchain: ${{ env.RUST_VERSION }}
+          toolchain: ${{ matrix.package == 'windows-server-2008-r2' && '1.75.0' || env.RUST_VERSION }}
           components: rustfmt
           targets: x86_64-pc-windows-msvc
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
           workspaces: client
-          prefix-key: geodomdesk-windows
+          prefix-key: geodomdesk-${{ matrix.package }}
           cache-on-failure: true
       - uses: subosito/flutter-action@2783a3f08e1baf891508463f8c6653c258246225
         with:
@@ -228,7 +233,7 @@ jobs:
           name: geodomdesk-bridge
           path: client
       - name: Patch the pinned Flutter SDK
-        run: python ../customization/patch_flutter_sdk.py
+        run: python ../customization/patch_flutter_sdk.py ${{ matrix.package == 'windows-server-2008-r2' && '--windows-legacy' || '' }}
       - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         id: native-cache
         with:
@@ -290,7 +295,8 @@ jobs:
           git clone https://github.com/rustdesk-org/RustDeskTempTopMostWindow ../topmost-helper
           git -C ../topmost-helper checkout ecd8d6a139eee76845ea66423fb739af450fda90
           $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products '*' -requires Microsoft.Component.MSBuild -property installationPath
-          & "$vs\MSBuild\Current\Bin\MSBuild.exe" ../topmost-helper/WindowInjection/WindowInjection.vcxproj -p:Configuration=Release -p:Platform=x64 -p:TargetVersion=Windows10
+          $toolset = '${{ matrix.package == 'windows-server-2008-r2' && 'v143' || 'v142' }}'
+          & "$vs\MSBuild\Current\Bin\MSBuild.exe" ../topmost-helper/WindowInjection/WindowInjection.vcxproj -p:Configuration=Release -p:Platform=x64 -p:TargetVersion=Windows10 -p:PlatformToolset=$toolset
           if ($LASTEXITCODE -ne 0) { throw 'Privacy helper build failed' }
           Copy-Item ../topmost-helper/WindowInjection/x64/Release/WindowInjection.dll ./flutter/build/windows/x64/runner/Release/
       - name: Create portable update executable
@@ -306,9 +312,21 @@ jobs:
           New-Item -ItemType Directory -Force ../windows-artifact | Out-Null
           Copy-Item ./target/release/rustdesk-portable-packer.exe ../windows-artifact/GeodomDesk.exe
           Copy-Item ./geodomdesk-build-config.json ../windows-artifact/
+      - name: Check Server 2008 R2 startup imports
+        if: matrix.package == 'windows-server-2008-r2'
+        run: |
+          $bundle = './flutter/build/windows/x64/runner/Release'
+          $binaries = @('../windows-artifact/GeodomDesk.exe', "$bundle/GeodomDesk.exe",
+                        "$bundle/geodomdesk-cli.exe", "$bundle/librustdesk.dll", "$bundle/flutter_windows.dll")
+          foreach ($binary in $binaries) {
+            $imports = llvm-readobj --coff-imports $binary
+            if ($LASTEXITCODE -ne 0 -or $imports -match 'WaitOnAddress|WakeByAddressAll|WakeByAddressSingle') {
+              throw "Server 2008 R2 startup imports failed verification: $binary"
+            }
+          }
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: geodomdesk-windows
+          name: geodomdesk-${{ matrix.package }}
           if-no-files-found: error
           path: windows-artifact/*
       - name: Verify native Windows installation and fixed connection settings
@@ -547,13 +565,17 @@ jobs:
   reused_windows:
     needs: plan
     if: needs.plan.outputs.reuse_run != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [windows, windows-server-2008-r2]
     runs-on: windows-2022
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          name: geodomdesk-windows
+          name: geodomdesk-${{ matrix.package }}
           path: reused-windows
           run-id: ${{ needs.plan.outputs.reuse_run }}
           github-token: ${{ github.token }}
@@ -588,13 +610,19 @@ jobs:
           github-token: ${{ github.token }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
+          name: geodomdesk-windows-server-2008-r2
+          path: windows-server-2008-r2
+          run-id: ${{ needs.plan.outputs.reuse_run || github.run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
           name: geodomdesk-android
           path: android
       - name: Validate all builds and write release descriptor
         run: |
-          python3 -c 'import json,pathlib; configs=[json.loads(pathlib.Path(p,"geodomdesk-build-config.json").read_text()) for p in ["windows","ubuntu","android"]]; assert configs[0] == configs[1] == configs[2]'
+          python3 -c 'import json,pathlib; configs=[json.loads(pathlib.Path(p,"geodomdesk-build-config.json").read_text()) for p in ["windows","windows-server-2008-r2","ubuntu","android"]]; assert all(config == configs[0] for config in configs)'
           python3 -m pip install -r customization/requirements.txt
-          python3 customization/release_bundle.py --version "$VERSION" --repository "$GITHUB_REPOSITORY" --windows windows/GeodomDesk.exe --ubuntu ubuntu/geodomdesk.deb --android android/geodomdesk.apk --source-archive android/geodomdesk-source.tar.gz --build-config windows/geodomdesk-build-config.json --output release
+          python3 customization/release_bundle.py --version "$VERSION" --repository "$GITHUB_REPOSITORY" --windows windows/GeodomDesk.exe --windows-server-2008-r2 windows-server-2008-r2/GeodomDesk.exe --ubuntu ubuntu/geodomdesk.deb --android android/geodomdesk.apk --source-archive android/geodomdesk-source.tar.gz --build-config windows/geodomdesk-build-config.json --output release
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: geodomdesk-release

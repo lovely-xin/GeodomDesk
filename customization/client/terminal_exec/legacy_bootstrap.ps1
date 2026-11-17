@@ -1,5 +1,6 @@
 $marker = '__MARKER__'
-$utf8 = [Text.UTF8Encoding]::new($false)
+$ProgressPreference = 'SilentlyContinue'
+$utf8 = New-Object System.Text.UTF8Encoding -ArgumentList $false
 [Console]::InputEncoding = $utf8
 [Console]::OutputEncoding = $utf8
 $OutputEncoding = $utf8
@@ -19,7 +20,7 @@ if (!$shell -or !(Test-Path -LiteralPath $shell -PathType Leaf)) {
     exit 1
 }
 [Console]::WriteLine("`n${marker}:READY")
-$payload = [Text.StringBuilder]::new()
+$payload = New-Object System.Text.StringBuilder
 for ($i = 1; $i -le __LINES__; $i++) {
     $line = [Console]::ReadLine()
     if ($null -eq $line) { exit 1 }
@@ -31,7 +32,7 @@ $sha = [Security.Cryptography.SHA256]::Create()
 try {
     $digest = [BitConverter]::ToString($sha.ComputeHash($utf8.GetBytes($payload))).Replace('-', '')
 } finally {
-    $sha.Dispose()
+    $sha.Clear()
 }
 if ($digest -ne '__DIGEST__') {
     [Console]::WriteLine("`n${marker}:ERROR:Legacy terminal script checksum mismatch")

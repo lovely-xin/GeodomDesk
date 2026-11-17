@@ -395,7 +395,7 @@ class PublisherTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def build_fixture(self, version="1.5.2", build_number=0):
+    def build_fixture(self, version="1.5.2", build_number=0, windows_server_2008_r2=False):
         release_id = channel.make_release_id(version, build_number) if build_number else version
         release = {"tag_name": version, "published_at": "2026-11-04T00:00:00Z", "assets": []}
         build = {
@@ -413,10 +413,16 @@ class PublisherTests(unittest.TestCase):
         }
         build.update(release_id=release_id, build_number=build_number)
         local = {}
-        for platform, arch, fmt in channel.TARGETS:
+        targets = channel.TARGETS
+        if windows_server_2008_r2:
+            targets += (channel.WINDOWS_SERVER_2008_R2,)
+        for platform, arch, fmt in targets:
             name = channel.file_name(release_id, platform, fmt)
             path = self.root / name
-            path.write_bytes((b"MZ" if fmt == "exe" else b"deb") * 1024)
+            if (platform, arch, fmt) == channel.WINDOWS_SERVER_2008_R2:
+                path.write_bytes(b"MZ-compatibility-pack")
+            else:
+                path.write_bytes((b"MZ" if fmt == "exe" else b"deb") * 1024)
             if fmt == "apk":
                 with zipfile.ZipFile(path, "w") as archive:
                     for entry in [
@@ -506,6 +512,26 @@ class PublisherTests(unittest.TestCase):
         )
         self.assertFalse((target / "install-windows.ps1").exists())
         self.assertIn("old client", self.portal.read_text())
+
+    def test_publish_server_2008_r2_as_separate_signed_artifact(self):
+        release, _, local = self.build_fixture(windows_server_2008_r2=True)
+        with self.mocks(release, local):
+            self.p.run(self.config)
+        latest = json.loads((self.public / "latest.json").read_text())
+        target = self.public / "releases/1.5.2"
+        metadata = (target / channel.METADATA_NAME).read_bytes()
+        signature = json.loads((target / (channel.METADATA_NAME + ".sig")).read_bytes())
+        Ed25519PublicKey.from_public_bytes(channel.public_key(self.seed.read_bytes())).verify(
+            base64.b64decode(signature["signature"]), channel.SIGNATURE_CONTEXT + metadata
+        )
+        packages = {item["platform"]: item for item in json.loads(metadata)["artifacts"]}
+        compatibility = packages["windows-server-2008-r2"]
+        self.assertEqual(compatibility["url"], latest["windows_server_2008_r2_url"])
+        self.assertEqual(compatibility["sha256"], channel.sha256(target / compatibility["file_name"]))
+        self.assertNotEqual(compatibility["sha256"], packages["windows"]["sha256"])
+        self.assertIn(compatibility["file_name"], (target / "index.html").read_text())
+        self.p.portal_update(self.portal, "1.5.2", windows_server_2008_r2=True)
+        self.assertIn(compatibility["url"], self.portal.read_text())
 
     def test_failed_build_does_not_switch_current(self):
         release, _, local = self.build_fixture()

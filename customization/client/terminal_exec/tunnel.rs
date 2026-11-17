@@ -436,7 +436,8 @@ impl Managed {
             let mut channels = JoinSet::new();
             let mut controls = JoinSet::new();
             let private = private_stream.is_some();
-            if let (Some(stream), Some((connection, _))) = (private_stream, first.take_if(|_| private)) {
+            let private_connection = if private { first.take() } else { None };
+            if let (Some(stream), Some((connection, _))) = (private_stream, private_connection) {
                 status.active.store(1, Ordering::Relaxed);
                 let status = status.clone();
                 channels.spawn(async move {

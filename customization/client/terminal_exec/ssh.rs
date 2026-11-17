@@ -7,7 +7,7 @@ use hbb_common::{
 };
 use sha2::{Digest, Sha256};
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Stdio,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -178,14 +178,52 @@ fn ssh_program() -> ResultType<PathBuf> {
     Ok(PathBuf::from("ssh"))
 }
 
+#[cfg(windows)]
+fn absolute_ssh_path(path: &Path) -> ResultType<PathBuf> {
+    use std::{
+        ffi::OsString,
+        os::windows::ffi::{OsStrExt, OsStringExt},
+        path::Component,
+    };
+    use windows::{core::PCWSTR, Win32::Storage::FileSystem::GetFullPathNameW};
+
+    if path.as_os_str().is_empty() {
+        bail!("SSH path must not be empty");
+    }
+    if matches!(path.components().next(), Some(Component::Prefix(prefix)) if prefix.kind().is_verbatim()) {
+        return Ok(path.to_owned());
+    }
+    let mut input: Vec<u16> = path.as_os_str().encode_wide().collect();
+    if input.contains(&0) {
+        bail!("SSH path contains a null character");
+    }
+    input.push(0);
+    let file_name = PCWSTR(input.as_ptr());
+    let mut size = unsafe { GetFullPathNameW(file_name, None, None) } as usize;
+    while size != 0 {
+        let mut output = vec![0u16; size];
+        let len = unsafe { GetFullPathNameW(file_name, Some(&mut output), None) } as usize;
+        if len != 0 && len < size {
+            return Ok(PathBuf::from(OsString::from_wide(&output[..len])));
+        }
+        size = len;
+    }
+    Err(std::io::Error::last_os_error().into())
+}
+
+#[cfg(not(windows))]
+fn absolute_ssh_path(path: &Path) -> ResultType<PathBuf> {
+    Ok(std::path::absolute(path)?)
+}
+
 pub(super) async fn open(
     options: &cli::ConnectOptions,
     ssh: &Options,
 ) -> ResultType<cli::Connection> {
     let started = Instant::now();
     let program = ssh_program()?;
-    let identity = ssh.identity.as_ref().map(std::path::absolute).transpose()?;
-    let known_hosts_path = std::path::absolute(&ssh.known_hosts)?;
+    let identity = ssh.identity.as_deref().map(absolute_ssh_path).transpose()?;
+    let known_hosts_path = absolute_ssh_path(&ssh.known_hosts)?;
     let tunnel =
         tunnel::Managed::start(options, 0, "127.0.0.1".into(), ssh.port, "Bash over SSH").await?;
     if tunnel.peer.platform != "Linux" {
@@ -388,6 +426,14 @@ pub(super) async fn open(
         bail!("SSH worker did not become ready (requires Bash and coreutils)");
     }
     Ok(cli::Connection::from_ssh(session, started.elapsed()))
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn resolves_a_windows_ssh_path_before_the_file_exists() {
+    let path = absolute_ssh_path(Path::new(r"keys\..\future-known-hosts")).unwrap();
+    assert_eq!(path, std::env::current_dir().unwrap().join("future-known-hosts"));
+    assert!(absolute_ssh_path(Path::new("")).is_err());
 }
 
 #[cfg(all(test, target_os = "linux"))]

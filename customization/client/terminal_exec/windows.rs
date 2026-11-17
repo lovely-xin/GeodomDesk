@@ -207,7 +207,7 @@ fn shell_path(shell: ExecShell) -> ResultType<PathBuf> {
             if path.is_file() {
                 return Ok(path);
             }
-            bail!("Windows PowerShell 5.1 is unavailable");
+            bail!("Windows PowerShell is unavailable");
         }
         ExecShell::POWERSHELL_CORE => {
             for root in ["ProgramW6432", "ProgramFiles"] {

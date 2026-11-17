@@ -351,7 +351,11 @@ impl Transcript {
             let line = if self.windows_console {
                 line.windows(marker.len())
                     .position(|part| part == marker.as_bytes())
-                    .map(|start| line[start..].trim_ascii_end())
+                    .map(|start| {
+                        let record = &line[start..];
+                        let end = record.iter().rposition(|byte| !byte.is_ascii_whitespace());
+                        &record[..end.map_or(0, |index| index + 1)]
+                    })
                     .unwrap_or(&line)
             } else {
                 &line

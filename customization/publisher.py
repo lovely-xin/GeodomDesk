@@ -248,10 +248,7 @@ def validate_build(build, release, config):
     if not re.fullmatch(r"[0-9a-f]{40}", build.get("upstream_commit", "")):
         raise ValueError("Source commit is required")
     items = build.get("artifacts", [])
-    if len(items) != len(channel.TARGETS) or {
-        (a.get("platform"), a.get("arch"), a.get("format")) for a in items
-    } != set(channel.TARGETS):
-        raise ValueError("Release requires Windows x64 EXE, Ubuntu amd64 DEB and Android ARM64 APK")
+    channel.release_targets(items)
     for item in items:
         if item.get("file_name") != channel.file_name(release_id, item["platform"], item["format"]):
             raise ValueError("Unexpected GeodomDesk payload name")
@@ -317,11 +314,15 @@ def download_names(version, native_config):
     }
 
 
-def page(version, native_config=True):
+def page(version, native_config=True, windows_server_2008_r2=False):
     names = download_names(version, native_config)
+    compatibility_link = ""
+    if windows_server_2008_r2:
+        name = channel.file_name(version, "windows-server-2008-r2", "exe")
+        compatibility_link = f'<a class="card" href="{name}" download><strong>Windows Server 2008 R2 SP1</strong><span>x64 · 下载兼容版 ↗</span></a>'
     style = 'body{margin:0;background:#f4f5f4;color:#192a32;font:16px system-ui,"Microsoft YaHei",sans-serif}main{max-width:760px;margin:10vh auto;padding:32px}header{display:flex;align-items:center;gap:18px}header img{width:64px;height:64px}h1{font-size:32px;margin:0}header p{margin:8px 0;color:#687981}.links{display:grid;gap:16px;margin:40px 0}a{color:inherit}a.card{display:flex;justify-content:space-between;align-items:center;text-decoration:none;border:1px solid #d8dfdd;border-radius:14px;padding:24px;background:#fff}.card span{color:#257678}.foot{color:#687981;font-size:13px;display:flex;gap:24px}a:focus-visible{outline:3px solid #169baf;outline-offset:4px}'
     display_version = html.escape(channel.release_parts(version)[0])
-    return f"""<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>GeodomDesk · 远程工具</title><style>{style}</style><main><header><img src="../../geodomdesk.png" alt=""><div><h1>GeodomDesk</h1><p>远程工具 · {display_version}</p></div></header><div class="links"><a class="card" href="{names["windows"]}" download><strong>Windows</strong><span>x64 · 下载安装包 ↗</span></a><a class="card" href="{names["ubuntu"]}" download><strong>Ubuntu</strong><span>amd64 · 下载 DEB ↗</span></a><a class="card" href="{names["android"]}" download><strong>Android</strong><span>ARM64 · 下载 APK ↗</span></a></div><div class="foot"><a href="geodomdesk-{version}-source.tar.gz">源代码</a><a href="https://geodom.cn">geodom.cn</a></div></main></html>""".encode()
+    return f"""<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>GeodomDesk · 远程工具</title><style>{style}</style><main><header><img src="../../geodomdesk.png" alt=""><div><h1>GeodomDesk</h1><p>远程工具 · {display_version}</p></div></header><div class="links"><a class="card" href="{names["windows"]}" download><strong>Windows</strong><span>x64 · 下载安装包 ↗</span></a>{compatibility_link}<a class="card" href="{names["ubuntu"]}" download><strong>Ubuntu</strong><span>amd64 · 下载 DEB ↗</span></a><a class="card" href="{names["android"]}" download><strong>Android</strong><span>ARM64 · 下载 APK ↗</span></a></div><div class="foot"><a href="geodomdesk-{version}-source.tar.gz">源代码</a><a href="https://geodom.cn">geodom.cn</a></div></main></html>""".encode()
 
 
 def public_complete(directory, manifest):
@@ -366,6 +367,9 @@ def publish_pointer(public, manifest):
         "android_url": channel.release_url(release_id) + names["android"],
         "native_config": manifest.get("native_config", False),
     }
+    if manifest.get("windows_server_2008_r2"):
+        name = channel.file_name(release_id, "windows-server-2008-r2", "exe")
+        latest["windows_server_2008_r2_url"] = channel.release_url(release_id) + name
     # All targets are in immutable, verified directories before exposing the pointer.
     save_json(public / "latest.json", latest)
     atomic_bytes(
@@ -376,13 +380,17 @@ def publish_pointer(public, manifest):
     )
 
 
-def portal_update(portal, version, native_config=True):
+def portal_update(portal, version, native_config=True, windows_server_2008_r2=False):
     names = download_names(version, native_config)
+    compatibility_link = ""
+    if windows_server_2008_r2:
+        name = channel.file_name(version, "windows-server-2008-r2", "exe")
+        compatibility_link = f'<a href="{channel.release_url(version)}{name}" download>下载 Server 2008 R2 兼容版<svg aria-hidden="true"><use href="#download"/></svg></a>'
     before = portal.read_bytes()
     text = before.decode("utf-8")
     if text.count(START) != 1 or text.count(END) != 1:
         raise ValueError("Download section markers are missing or ambiguous")
-    fragment = f"""<section class="client-downloads" aria-labelledby="clients-title"><div class="section-heading"><h2 id="clients-title">远程工具</h2><p>GeodomDesk {channel.release_parts(version)[0]}</p></div><div class="client-list"><div class="client-row"><div class="client-name"><h3>网页版</h3><p>免安装 · 浏览器访问</p></div><div class="client-links"><a href="/geodomdesk/">打开网页版<svg aria-hidden="true"><use href="#arrow"/></svg></a></div></div><div class="client-row"><div class="client-name"><h3>Windows</h3><p>x64</p></div><div class="client-links"><a href="{channel.release_url(version)}{names["windows"]}" download>下载 Windows 版<svg aria-hidden="true"><use href="#download"/></svg></a></div></div><div class="client-row"><div class="client-name"><h3>Ubuntu</h3><p>amd64</p></div><div class="client-links"><a href="{channel.release_url(version)}{names["ubuntu"]}" download>下载 Ubuntu 版<svg aria-hidden="true"><use href="#download"/></svg></a></div></div><div class="client-row"><div class="client-name"><h3>Android</h3><p>ARM64</p></div><div class="client-links"><a href="{channel.release_url(version)}{names["android"]}" download>下载 Android 版<svg aria-hidden="true"><use href="#download"/></svg></a></div></div></div></section>"""
+    fragment = f"""<section class="client-downloads" aria-labelledby="clients-title"><div class="section-heading"><h2 id="clients-title">远程工具</h2><p>GeodomDesk {channel.release_parts(version)[0]}</p></div><div class="client-list"><div class="client-row"><div class="client-name"><h3>网页版</h3><p>免安装 · 浏览器访问</p></div><div class="client-links"><a href="/geodomdesk/">打开网页版<svg aria-hidden="true"><use href="#arrow"/></svg></a></div></div><div class="client-row"><div class="client-name"><h3>Windows</h3><p>x64</p></div><div class="client-links"><a href="{channel.release_url(version)}{names["windows"]}" download>下载 Windows 版<svg aria-hidden="true"><use href="#download"/></svg></a>{compatibility_link}</div></div><div class="client-row"><div class="client-name"><h3>Ubuntu</h3><p>amd64</p></div><div class="client-links"><a href="{channel.release_url(version)}{names["ubuntu"]}" download>下载 Ubuntu 版<svg aria-hidden="true"><use href="#download"/></svg></a></div></div><div class="client-row"><div class="client-name"><h3>Android</h3><p>ARM64</p></div><div class="client-links"><a href="{channel.release_url(version)}{names["android"]}" download>下载 Android 版<svg aria-hidden="true"><use href="#download"/></svg></a></div></div></div></section>"""
     changed = text.split(START)[0] + START + "\n" + fragment + "\n" + END + text.split(END)[1]
     if portal.read_bytes() != before:
         raise RuntimeError("Portal changed during publication")
@@ -472,11 +480,12 @@ def run(config):
                     shutil.copyfile(payload, stage / item["file_name"])
                     payloads[item["file_name"]] = (payload, asset)
                 updates = []
-                for platform, arch, fmt in channel.TARGETS:
+                targets = channel.release_targets(build["artifacts"])
+                for platform, arch, fmt in targets:
                     name = channel.file_name(release_id, platform, fmt)
                     payload, asset = payloads[name]
                     updates.append(channel.artifact(stage / name, release_id, platform, arch, fmt))
-                    if platform == "windows":
+                    if fmt == "exe":
                         with payload.open("rb") as stream:
                             if stream.read(2) != b"MZ":
                                 raise ValueError("Invalid native Windows executable")
@@ -489,7 +498,8 @@ def run(config):
                 )
                 (stage / channel.METADATA_NAME).write_bytes(metadata)
                 (stage / (channel.METADATA_NAME + ".sig")).write_bytes(signature)
-                (stage / "index.html").write_bytes(page(release_id, True))
+                windows_server_2008_r2 = channel.WINDOWS_SERVER_2008_R2 in targets
+                (stage / "index.html").write_bytes(page(release_id, True, windows_server_2008_r2))
                 files = [
                     {"name": p.name, "size": p.stat().st_size, "sha256": channel.sha256(p)}
                     for p in stage.iterdir()
@@ -500,6 +510,7 @@ def run(config):
                     "release_id": release_id,
                     "build_number": build_number,
                     "native_config": True,
+                    "windows_server_2008_r2": windows_server_2008_r2,
                     "published_at": now(),
                     "build_sha256": channel.sha256(descriptor),
                     "files": files,
@@ -522,7 +533,8 @@ def run(config):
                     raise RuntimeError(
                         "Stop the former builder before activating this portal producer"
                     )
-            portal_update(portal, release_id, manifest.get("native_config", False))
+            portal_update(portal, release_id, manifest.get("native_config", False),
+                          manifest.get("windows_server_2008_r2", False))
         save_json(
             state / "status.json", {"status": "published", "version": version, "checked_at": now()}
         )

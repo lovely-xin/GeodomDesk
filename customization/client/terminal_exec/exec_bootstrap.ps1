@@ -1,8 +1,8 @@
-$utf8 = [System.Text.UTF8Encoding]::new($false)
+$ProgressPreference = 'SilentlyContinue'
+$utf8 = New-Object System.Text.UTF8Encoding -ArgumentList $false
 [Console]::InputEncoding = $utf8
 [Console]::OutputEncoding = $utf8
 $OutputEncoding = $utf8
-$ProgressPreference = 'SilentlyContinue'
 try {
     $source = [Console]::In.ReadToEnd()
     if ($null -ne $geodomdeskExpectedBytes -and $utf8.GetByteCount($source) -ne $geodomdeskExpectedBytes) {

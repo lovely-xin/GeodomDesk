@@ -7,11 +7,12 @@ import re
 import shutil
 from pathlib import Path
 
-from channel import TARGETS, file_name, make_release_id, sha256, stable_json, version_tuple
+from channel import TARGETS, WINDOWS_SERVER_2008_R2, file_name, make_release_id, sha256, stable_json, version_tuple
 from plan_upstream import customization_hash
 
 
-def bundle(version, repository, windows, ubuntu, android, source_archive, output, build_config):
+def bundle(version, repository, windows, ubuntu, android, source_archive, output, build_config,
+           windows_server_2008_r2=None):
     version_tuple(version)
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
         raise ValueError("Expected the GitHub owner/repository")
@@ -23,7 +24,10 @@ def bundle(version, repository, windows, ubuntu, android, source_archive, output
         raise ValueError("Build revision mismatch")
     output.mkdir(parents=True, exist_ok=True)
     artifacts = []
-    for payload, (platform, arch, fmt) in zip([windows, ubuntu, android], TARGETS):
+    payloads = list(zip((windows, ubuntu, android), TARGETS))
+    if windows_server_2008_r2 is not None:
+        payloads.append((windows_server_2008_r2, WINDOWS_SERVER_2008_R2))
+    for payload, (platform, arch, fmt) in payloads:
         name = file_name(release_id, platform, fmt)
         if not 1000000 <= payload.stat().st_size <= 512 * 1024 * 1024:
             raise ValueError("Unexpected build artifact size")
@@ -67,6 +71,7 @@ if __name__ == "__main__":
         parser.add_argument("--" + arg, required=True)
     for arg in ["windows", "ubuntu", "android", "source-archive", "output", "build-config"]:
         parser.add_argument("--" + arg, required=True, type=Path)
+    parser.add_argument("--windows-server-2008-r2", type=Path)
     args = parser.parse_args()
     bundle(
         args.version,
@@ -77,4 +82,5 @@ if __name__ == "__main__":
         args.source_archive,
         args.output,
         args.build_config,
+        args.windows_server_2008_r2,
     )
