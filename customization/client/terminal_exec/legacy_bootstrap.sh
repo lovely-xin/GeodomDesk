@@ -16,10 +16,21 @@ if [[ ${gd_hash%% *} != __DIGEST__ ]]; then
 fi
 gd_script=$(printf '%s' "$gd_payload" | base64 -d && printf '.') || exit 1
 gd_script=${gd_script%.}
+gd_b64_encode() {
+    if base64 -w 3072 </dev/null >/dev/null 2>&1; then
+        base64 -w 3072
+    elif base64 -b 3072 </dev/null >/dev/null 2>&1; then
+        base64 -b 3072
+    elif command -v fold >/dev/null 2>&1 && command -v tr >/dev/null 2>&1; then
+        base64 | tr -d '\r\n' | fold -w 3072
+    else
+        base64
+    fi
+}
 printf '\n%s:START\n' "$gd_marker"
 gd_window=0
 exec 3<&0
-bash --noprofile --norc -c "$gd_script" </dev/null 3<&- 2>&1 | base64 -w 3072 |
+bash --noprofile --norc -c "$gd_script" </dev/null 3<&- 2>&1 | gd_b64_encode |
     while IFS= read -r gd_line; do
         printf '%s:DATA:%s\n' "$gd_marker" "$gd_line"
         ((gd_window+=1))
@@ -30,7 +41,7 @@ bash --noprofile --norc -c "$gd_script" </dev/null 3<&- 2>&1 | base64 -w 3072 |
         fi
     done
 gd_status=("${PIPESTATUS[@]}")
-if ((gd_status[1] != 0 || gd_status[2] != 0)); then
+if ((gd_status[1] != 0)); then
     printf '\n%s:ERROR:Cannot encode legacy command output\n' "$gd_marker"
     exit 1
 fi

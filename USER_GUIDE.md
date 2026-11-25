@@ -20,7 +20,7 @@ geodomdesk-cli.exe exec --id DEVICE_ID --shell powershell --script check.ps1
 geodomdesk-cli.exe exec --id DEVICE_ID --shell pwsh --script check.ps1 --admin-user "DOMAIN\Administrator" --ask-device-password
 ```
 
-`exec --shell bash` 和 `session --shell bash` 默认通过 CLI 管理的 TCP 中继使用 SSH，目标需开启 SSH 服务并允许 TCP 转发，发起端需有 OpenSSH Client。SSH 用户默认取目标 username，可用 `--ssh-user LOGIN` 指定；密码用 `--ask-ssh-password` 无回显输入或受控环境提供 `GEODOMDESK_SSH_PASSWORD`，私钥用 `--ssh-identity PATH`。这些凭据与 GeodomDesk 账号、设备密码分别验证。
+新版 `exec --shell bash` 和 `session --shell bash` 默认通过 CLI 管理的 TCP 中继使用 SSH，目标需开启 SSH 服务并允许 TCP 转发，发起端需有 OpenSSH Client。SSH 用户默认取目标 username，可用 `--ssh-user LOGIN` 指定；跳板机中继场景可用 `--ssh-host HOST` 指定远端 SSH 主机（默认 `127.0.0.1`）；密码用 `--ask-ssh-password` 无回显输入或受控环境提供 `GEODOMDESK_SSH_PASSWORD`，私钥用 `--ssh-identity PATH`。这些凭据与 GeodomDesk 账号、设备密码分别验证。
 
 `--transport terminal` 显式使用原终端方式；SSH 启动失败不自动降级或重放。Windows PowerShell/pwsh 保持终端方式；没有指定默认 Shell 的 session 也保持终端方式，以支持逐条选择 Shell。
 
@@ -122,9 +122,10 @@ Ubuntu 和 Android 不展示 Windows 专用的打印机驱动安装入口。
 {"id":"reset","op":"reconnect"}
 {"id":"stop","op":"cancel"}
 {"id":"release","op":"close"}
+{"id":"done","op":"exit"}
 ```
 
-`cancel`、`close` 都释放连接并保留 CLI 进程，下一条新请求重新连接。关闭 stdin 才结束整个会话。控制操作只接受 op 和 id，附带脚本等字段会被拒绝。
+`cancel`、`close` 都释放连接并保留 CLI 进程，下一条新请求重新连接；`exit` 在释放连接并输出 `closed` 事件后干净退出整个会话，适合无法直接关闭标准输入的自动化调用（否则关闭 stdin 结束会话）。控制操作只接受 op 和 id，附带脚本等字段会被拒绝。
 
 默认一次执行一条，最多再排队 16 条。命令失败会取消未开始的队列，防止依赖步骤继续执行；只有相互独立的批处理才加 `--continue-on-error`。发生过失败或拒绝时会话最终返回 1，全成功返回 0。推荐逐条发送、等待结果，避免排队依赖步骤。
 

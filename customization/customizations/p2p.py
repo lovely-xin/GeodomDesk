@@ -15,6 +15,8 @@ def apply(changes):
     prepare_punch_fallback(changes)
     require_valid_signed_identity(changes)
     apply_mediator(changes)
+    apply_port_forward_tuning(changes)
+    apply_network_optimizations(changes)
     root = Path(__file__).resolve().parents[1] / "client/client"
     for name in ("relay.rs", "transport_race.rs"):
         changes["src/client/" + name] = (root / name).read_text(encoding="utf-8")
@@ -468,7 +470,15 @@ def prepare_punch_fallback(changes):
                 }
             };
             Self::prepare_relay_broker_during(
-                decision, rendezvous_server, key, !token.is_empty() || !switch_code.is_empty(),
+                decision,
+                rendezvous_server,
+                key,
+                !token.is_empty() || !switch_code.is_empty(),
+                if switch_code.is_empty() && !tcp_punch_allowed() {
+                    relay_deadline.window()
+                } else {
+                    Duration::from_millis(CONNECT_TIMEOUT)
+                },
             ).await
         };
         let connect_relay = |prepared_broker| async {
@@ -580,6 +590,41 @@ def apply_mediator(changes):
     path = "src/rendezvous_mediator.rs"
     changes.replace(
         path,
+        "pub struct RendezvousMediator {\n    addr: TargetAddr<'static>,",
+        "pub struct RendezvousMediator {\n    addr: TargetAddr<'static>,\n    udp_server_addr: Option<SocketAddr>,",
+    )
+    changes.replace(
+        path,
+        "        let mut rz = Self {\n            addr: addr.clone(),",
+        "        let udp_server_addr = match &addr {\n"
+        "            hbb_common::TargetAddr::Ip(ip) => Some(*ip),\n"
+        "            _ => None,\n"
+        "        };\n"
+        "        let mut rz = Self {\n            addr: addr.clone(),\n            udp_server_addr,",
+    )
+    changes.replace(
+        path,
+        "                                        rz.addr = new_addr.clone();",
+        "                                        rz.udp_server_addr = match &new_addr {\n"
+        "                                            hbb_common::TargetAddr::Ip(ip) => Some(*ip),\n"
+        "                                            _ => None,\n"
+        "                                        };\n"
+        "                                        rz.addr = new_addr.clone();",
+    )
+    changes.replace(
+        path,
+        "        let mut rz = Self {\n            addr: conn.local_addr().into_target_addr()?,",
+        "        let mut rz = Self {\n            addr: conn.local_addr().into_target_addr()?,\n            udp_server_addr: None,",
+    )
+    # The retained 1.5.3 relay-policy test constructs another mediator.
+    test_address = "            addr: host.into_target_addr().unwrap(),\n"
+    if not 1 <= changes[path].count(test_address) <= 2:
+        raise ValueError("Unexpected rendezvous test constructor")
+    changes[path] = changes[path].replace(
+        test_address, test_address + "            udp_server_addr: Some(host),\n"
+    )
+    changes.replace(
+        path,
         "    async fn handle_punch_hole(&self, ph: PunchHole, server: ServerPtr) -> ResultType<()> {",
         """    fn should_relay_ipv4(
         forced: bool,
@@ -589,6 +634,14 @@ def apply_mediator(changes):
     ) -> bool {
         // The rendezvous NAT test classifies TCP, not the independently observed UDP mapping.
         forced || (udp_port <= 0 && (tcp_symmetric || tcp_disabled))
+    }
+
+    fn direct_udp_target(udp_server_addr: Option<SocketAddr>, has_socks: bool) -> Option<SocketAddr> {
+        if has_socks {
+            None
+        } else {
+            udp_server_addr
+        }
     }
 
     async fn handle_punch_hole(&self, ph: PunchHole, server: ServerPtr) -> ResultType<()> {""",
@@ -614,6 +667,37 @@ def apply_mediator(changes):
     )
     changes.replace(
         path,
+        "        let (socket, addr) = new_direct_udp_for(&self.host).await?;",
+        """        let (socket, addr) = match Self::direct_udp_target(self.udp_server_addr, Config::get_socks().is_some()) {
+            Some(addr) => {
+                let local_addr = Config::get_any_listen_addr(addr.is_ipv4());
+                let socket = hbb_common::tokio::net::UdpSocket::bind(local_addr).await?;
+                (Arc::new(socket), addr)
+            }
+            None => new_direct_udp_for(&self.host).await?,
+        };""",
+    )
+    changes.replace(
+        path,
+        """        let socket_cloned = socket.clone();
+        tokio::spawn(async move {
+            for _ in 0..2 {
+                let tm = (hbb_common::time_based_rand() % 20 + 10) as f32 / 1000.;
+                hbb_common::sleep(tm).await;
+                socket.send_to(&data, addr).await.ok();
+            }
+        });
+        udp_nat_listen(
+            socket_cloned.clone(),""",
+        """        // Send one quick retransmit before udp_nat_listen connects this socket to peer_addr
+        // (once connected, send_to to the rendezvous server fails with EISCONN).
+        hbb_common::sleep(0.01).await;
+        socket.send_to(&data, addr).await.ok();
+        udp_nat_listen(
+            socket,""",
+    )
+    changes.replace(
+        path,
         "    #[tokio::test]\n    async fn manual_restart_interrupts_retry_wait() {",
         """    #[test]
     fn udp_mapping_is_not_disabled_by_tcp_nat_test() {
@@ -625,6 +709,467 @@ def apply_mediator(changes):
         assert!(!RendezvousMediator::should_relay_ipv4(false, 0, false, false));
     }
 
+    #[test]
+    fn tcp_mediator_does_not_reuse_local_socket_addr_as_udp_server() {
+        let addr: std::net::SocketAddr = "198.51.100.2:21128".parse().unwrap();
+        assert_eq!(RendezvousMediator::direct_udp_target(Some(addr), false), Some(addr));
+        assert_eq!(RendezvousMediator::direct_udp_target(Some(addr), true), None);
+        assert_eq!(RendezvousMediator::direct_udp_target(None, false), None);
+    }
+
     #[tokio::test]
     async fn manual_restart_interrupts_retry_wait() {""",
+    )
+
+
+def apply_port_forward_tuning(changes):
+    changes.replace(
+        "src/port_forward.rs",
+        "            Ok((forward, addr)) = listener.accept() => {\n"
+        '                log::info!("new connection from {:?}", addr);',
+        "            Ok((forward, addr)) = listener.accept() => {\n"
+        "                forward.set_nodelay(true).ok();\n"
+        '                log::info!("new connection from {:?}", addr);',
+    )
+    changes.replace(
+        "src/server/connection.rs",
+        '        (format!("{}:{}", pf.host, pf.port), is_rdp)',
+        "        let host = if pf.host.contains(':') && !pf.host.starts_with('[') {\n"
+        '            format!("[{}]", pf.host)\n'
+        "        } else {\n"
+        "            pf.host.clone()\n"
+        "        };\n"
+        '        (format!("{}:{}", host, pf.port), is_rdp)',
+    )
+    changes.replace(
+        "src/server/connection.rs",
+        "            Ok(Ok(sock)) => {\n"
+        "                self.port_forward_socket = Some(Framed::new(sock, BytesCodec::new()));",
+        "            Ok(Ok(sock)) => {\n"
+        "                sock.set_nodelay(true).ok();\n"
+        "                self.port_forward_socket = Some(Framed::new(sock, BytesCodec::new()));",
+    )
+
+
+def apply_network_optimizations(changes):
+    # Skip redundant service IPC when server coordinates are compiled in.
+    for fn_sig, ret_expr in (
+        (
+            "pub async fn get_rendezvous_server(ms_timeout: u64) -> (String, Vec<String>) {\n",
+            "(\n            Config::get_rendezvous_server(),\n            Config::get_rendezvous_servers(),\n        )",
+        ),
+        (
+            "pub async fn get_rendezvous_servers(ms_timeout: u64) -> Vec<String> {\n",
+            "Config::get_rendezvous_servers()",
+        ),
+    ):
+        changes.replace(
+            "src/ipc.rs",
+            fn_sig,
+            fn_sig
+            + "    if config::OVERWRITE_SETTINGS\n"
+            + "        .read()\n"
+            + "        .unwrap()\n"
+            + '        .get("custom-rendezvous-server")\n'
+            + "        .is_some_and(|v| !v.is_empty())\n"
+            + "    {\n"
+            + f"        return {ret_expr};\n"
+            + "    }\n",
+        )
+
+    # Clear stale cached IPv6 address and skip external STUN probes if local IPv6 bind fails.
+    changes.replace(
+        "src/common.rs",
+        """        Err(e) => {
+            log::warn!("Failed to bind IPv6 socket: {}", e);
+        }""",
+        """        Err(e) => {
+            PUBLIC_IPV6_ADDR.lock().unwrap().0 = None;
+            log::debug!("Failed to bind IPv6 socket: {}", e);
+            return None;
+        }""",
+    )
+
+    # Parallelize client startup probes (UDP probe, IPv6 check/bind, WebRTC offerer, primary TCP dial, NAT fetch).
+    client_rs = "src/client.rs"
+    text = changes[client_rs]
+    start = text.index("        // Same relay gate as the v6 socket below:")
+    end = text.index("        let fut = Self::_start_inner(", start)
+    changes.replace(
+        client_rs,
+        text[start:end],
+        """        let allow_p2p_v6 = crate::get_ipv6_punch_enabled() && !interface.is_force_relay();
+        let allow_udp_probe = crate::get_udp_punch_enabled() && !interface.is_force_relay();
+        let allow_webrtc = Self::should_create_webrtc_offerer(&interface);
+        let probe_started_at = tokio::time::Instant::now();
+        let (udp, ipv6, webrtc_res, primary_socket, my_nat_type) = tokio::join!(
+            async {
+                if allow_udp_probe {
+                    start_udp_probe(&rendezvous_server).await
+                } else {
+                    (None, None)
+                }
+            },
+            async {
+                if allow_p2p_v6 {
+                    crate::test_ipv6().await;
+                    crate::get_ipv6_socket().await
+                } else {
+                    None
+                }
+            },
+            async {
+                if allow_webrtc {
+                    Some(WebRTCStream::new("", interface.is_policy_relay(), CONNECT_TIMEOUT).await)
+                } else {
+                    None
+                }
+            },
+            connect_tcp(&*rendezvous_server, CONNECT_TIMEOUT),
+            crate::get_nat_type(100),
+        );
+        let has_udp_probe = udp.0.is_some();
+        let webrtc_offerer = match webrtc_res {
+            Some(Ok(stream)) => Some(stream),
+            Some(Err(err)) => {
+                log::warn!("webrtc offerer setup failed: {}", err);
+                None
+            }
+            None => None,
+        };
+        let has_webrtc_offerer = webrtc_offerer.is_some();
+""",
+    )
+    changes.replace(
+        client_rs,
+        """            rendezvous_server.clone(),
+            servers.clone(),
+            contained,
+            relay_deadline,
+        );""",
+        """            rendezvous_server.clone(),
+            servers.clone(),
+            contained,
+            relay_deadline,
+            probe_started_at,
+            Some(primary_socket),
+            my_nat_type,
+        );""",
+    )
+    changes.replace(
+        client_rs,
+        """            rendezvous_server,
+            servers,
+            contained,
+            relay_deadline,
+        )""",
+        """            rendezvous_server,
+            servers,
+            contained,
+            relay_deadline,
+            probe_started_at,
+            None,
+            my_nat_type,
+        )""",
+    )
+    changes.replace(
+        client_rs,
+        "        contained: bool,\n        relay_deadline: &transport_race::ConnectionDeadline,\n    ) -> ResultType<(",
+        "        contained: bool,\n        relay_deadline: &transport_race::ConnectionDeadline,\n"
+        "        mut probe_started_at: tokio::time::Instant,\n"
+        "        preconnected: Option<ResultType<Stream>>,\n"
+        "        my_nat_type: i32,\n    ) -> ResultType<(",
+    )
+    changes.replace(
+        client_rs,
+        "        let mut socket = connect_tcp(&*rendezvous_server, CONNECT_TIMEOUT).await;",
+        "        let mut socket = match preconnected {\n"
+        "            Some(res) => res,\n"
+        "            None => connect_tcp(&*rendezvous_server, CONNECT_TIMEOUT).await,\n"
+        "        };",
+    )
+    changes.replace(
+        client_rs,
+        "                    if udp.0.is_some() {\n                        drop(udp.1.take());",
+        "                    if udp.0.is_some() {\n                        drop(udp.1.take());\n                        probe_started_at = tokio::time::Instant::now();",
+    )
+    changes.replace(client_rs, "        let my_nat_type = crate::get_nat_type(100).await;\n", "")
+    changes.replace(
+        client_rs,
+        "        let udp_nat_deadline = tokio::time::Instant::now() + Self::UDP_NAT_TEST_GRACE;",
+        "        let udp_nat_deadline = probe_started_at + Self::UDP_NAT_TEST_GRACE;",
+    )
+    changes.replace(
+        client_rs,
+        "                    if my_nat_type == NatType::UNKNOWN_NAT as i32 {\n"
+        "                        my_nat_type = crate::get_nat_type(100).await;\n"
+        "                    }",
+        "                    if my_nat_type == NatType::UNKNOWN_NAT as i32 {\n"
+        "                        my_nat_type = Config::get_nat_type();\n"
+        "                    }",
+    )
+
+    # Raise KCP UDP socket buffers to 2 MiB (without shrinking larger OS defaults).
+    changes["libs/hbb_common/src/lib.rs"] = (
+        changes["libs/hbb_common/src/lib.rs"].rstrip()
+        + """
+
+#[cfg(any(unix, windows))]
+pub fn tune_udp_socket_buffers(socket: &tokio::net::UdpSocket, target_bytes: usize) {
+    #[cfg(unix)]
+    let raw = {
+        use std::os::unix::io::{AsRawFd, FromRawFd};
+        unsafe { socket2::Socket::from_raw_fd(socket.as_raw_fd()) }
+    };
+    #[cfg(windows)]
+    let raw = {
+        use std::os::windows::io::{AsRawSocket, FromRawSocket};
+        unsafe { socket2::Socket::from_raw_socket(socket.as_raw_socket()) }
+    };
+    let sock = std::mem::ManuallyDrop::new(raw);
+    if sock.recv_buffer_size().is_ok_and(|cur| cur < target_bytes) {
+        let _ = sock.set_recv_buffer_size(target_bytes);
+    }
+    if sock.send_buffer_size().is_ok_and(|cur| cur < target_bytes) {
+        let _ = sock.set_send_buffer_size(target_bytes);
+    }
+}
+"""
+    )
+    changes.replace(
+        "src/kcp_stream.rs",
+        "        let mut endpoint = KcpEndpoint::new();\n        Self::apply_kcp_config(&mut endpoint);\n        endpoint.run().await;\n\n        let (input, output) = (\n            endpoint.input_sender(),\n            endpoint\n                .output_receiver()\n                .ok_or_else(|| anyhow::anyhow!(\"Failed to get output receiver\"))?,\n        );\n        let (stop_sender, stop_receiver) = oneshot::channel();\n        if let Some(packet) =",
+        "        hbb_common::tune_udp_socket_buffers(&udp_socket, 2 * 1024 * 1024);\n"
+        "        let mut endpoint = KcpEndpoint::new();\n        Self::apply_kcp_config(&mut endpoint);\n        endpoint.run().await;\n\n        let (input, output) = (\n            endpoint.input_sender(),\n            endpoint\n                .output_receiver()\n                .ok_or_else(|| anyhow::anyhow!(\"Failed to get output receiver\"))?,\n        );\n        let (stop_sender, stop_receiver) = oneshot::channel();\n        if let Some(packet) =",
+    )
+    changes.replace(
+        "src/kcp_stream.rs",
+        "        let mut endpoint = KcpEndpoint::new();\n        Self::apply_kcp_config(&mut endpoint);\n        endpoint.run().await;\n\n        let (input, output) = (\n            endpoint.input_sender(),\n            endpoint\n                .output_receiver()\n                .ok_or_else(|| anyhow::anyhow!(\"Failed to get output receiver\"))?,\n        );\n        let (stop_sender, stop_receiver) = oneshot::channel();\n        Self::kcp_io",
+        "        hbb_common::tune_udp_socket_buffers(&udp_socket, 2 * 1024 * 1024);\n"
+        "        let mut endpoint = KcpEndpoint::new();\n        Self::apply_kcp_config(&mut endpoint);\n        endpoint.run().await;\n\n        let (input, output) = (\n            endpoint.input_sender(),\n            endpoint\n                .output_receiver()\n                .ok_or_else(|| anyhow::anyhow!(\"Failed to get output receiver\"))?,\n        );\n        let (stop_sender, stop_receiver) = oneshot::channel();\n        Self::kcp_io",
+    )
+
+    # Enable TCP_NODELAY on direct WebSocket connections.
+    changes.replace(
+        "libs/hbb_common/src/websocket.rs",
+        "            let disable_nagle = false;",
+        "            let disable_nagle = true;",
+    )
+
+    # Upgrade multiplexed port forwarding to a 1 MiB receive window while keeping
+    # UPDATE_THRESHOLD at 128 KiB so unmodified 1.5.1 peers (256 KiB cap) never deadlock.
+    mux = "src/port_forward_mux.rs"
+    changes.replace(
+        mux,
+        """pub const CHANNEL_WINDOW: u32 = 256 * 1024;
+pub const MAX_FRAME: usize = 64 * 1024;
+/// Cap on one framed packet once the tunnel is up: a `MAX_FRAME` data frame,
+/// its protobuf envelope and the 16-byte MAC fit with room to spare. The codec
+/// otherwise takes a header declaring up to 1 GiB, and the channel window is
+/// only checked once the whole packet has arrived.
+pub const MAX_PACKET: usize = 2 * MAX_FRAME;
+pub const UPDATE_THRESHOLD: u32 = CHANNEL_WINDOW / 2;""",
+        """pub const CHANNEL_WINDOW: u32 = 1024 * 1024;
+pub const MAX_FRAME: usize = 56 * 1024;
+/// Cap on one framed packet once the tunnel is up: a `MAX_FRAME` data frame,
+/// its protobuf envelope and the 16-byte MAC fit with room to spare. The codec
+/// otherwise takes a header declaring up to 1 GiB, and the channel window is
+/// only checked once the whole packet has arrived.
+pub const MAX_PACKET: usize = 128 * 1024;
+/// Pin at 128 KiB (not CHANNEL_WINDOW / 2) so unmodified 1.5.1 peers with a
+/// 256 KiB MAX_SEND_CREDIT cap receive timely window updates and never stall.
+pub const UPDATE_THRESHOLD: u32 = 128 * 1024;""",
+    )
+    changes.replace(
+        mux,
+        "pub use tunnel::{Claim, Tunnel};",
+        "pub use tunnel::{Claim, Tunnel, TunnelHandle};",
+    )
+    changes.replace(
+        mux,
+        "        #[cfg(test)]\n        pub fn live_channels(&self) -> usize {",
+        "        pub fn live_channels(&self) -> usize {",
+    )
+    changes.replace(
+        mux,
+        "    #[test]\n    fn raise_initial_rebases_credit_from_initial_window() {",
+        """    #[test]
+    fn recv_window_updates_within_legacy_256k_credit_cap() {
+        let mut recv = RecvWindow::new(CHANNEL_WINDOW);
+        let mut peer_credit: u32 = 256 * 1024;
+        let mut total_sent = 0usize;
+        let frame = MAX_FRAME;
+        while total_sent < 1024 * 1024 {
+            let cost = charge(frame);
+            assert!(peer_credit >= cost, "stalled at {total_sent} bytes with {peer_credit} credit");
+            peer_credit -= cost;
+            assert!(recv.accept(frame));
+            if let Some(add) = recv.drained(frame) {
+                peer_credit = peer_credit.saturating_add(add).min(256 * 1024);
+            }
+            total_sent += frame;
+        }
+    }
+
+    #[test]
+    fn raise_initial_rebases_credit_from_initial_window() {""",
+    )
+
+    smux = "src/server/port_forward_mux.rs"
+    changes.replace(
+        smux,
+        "pub struct PortForwardMux {\n    channels: HashMap<i32, Entry>,\n    tx: Sender,\n    login_target: String,",
+        "pub struct PortForwardMux {\n    channels: HashMap<i32, Entry>,\n    sink: FrameSink,\n    login_target: String,",
+    )
+    changes.replace(
+        smux,
+        """    pub fn new(tx: Sender, login_target: String) -> Self {
+        Self {
+            channels: HashMap::new(),
+            tx,
+            login_target,
+            teardown: watch::channel(false).0,
+        }
+    }""",
+        """    pub fn with_sink(sink: FrameSink, login_target: String) -> Self {
+        Self {
+            channels: HashMap::new(),
+            sink,
+            login_target,
+            teardown: watch::channel(false).0,
+        }
+    }
+
+    pub fn new(tx: Sender, login_target: String) -> Self {
+        Self::with_sink(FrameSink::Direct(tx), login_target)
+    }""",
+    )
+    changes.replace(
+        smux,
+        "            FrameSink::Direct(self.tx.clone()),",
+        "            self.sink.clone(),",
+    )
+    changes.replace(
+        smux,
+        """    fn reply(&self, msg: Message) {
+        self.tx
+            .send((tokio::time::Instant::now(), Arc::new(msg)))
+            .ok();
+    }""",
+        """    fn reply(&self, msg: Message) {
+        self.sink.send_control(msg).ok();
+    }""",
+    )
+    changes.replace(
+        smux,
+        "                    Ok(Ok(s)) => break s,",
+        "                    Ok(Ok(s)) => { s.set_nodelay(true).ok(); break s; },",
+    )
+
+    sconn = "src/server/connection.rs"
+    changes.replace(
+        sconn,
+        "    port_forward_mux: Option<super::port_forward_mux::PortForwardMux>,\n",
+        "    port_forward_mux: Option<super::port_forward_mux::PortForwardMux>,\n"
+        "    mux_ctrl_rx: Option<mpsc::UnboundedReceiver<Message>>,\n"
+        "    mux_data_rx: Option<mpsc::Receiver<Message>>,\n",
+    )
+    changes.replace(
+        sconn,
+        "            port_forward_mux: None,\n",
+        "            port_forward_mux: None,\n"
+        "            mux_ctrl_rx: None,\n"
+        "            mux_data_rx: None,\n",
+    )
+    changes.replace(
+        sconn,
+        """                Some((instant, value)) = rx.recv() => {""",
+        """                maybe_msg = async {
+                    match conn.mux_ctrl_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    match maybe_msg {
+                        Some(msg) => {
+                            if let Err(err) = conn.stream.send(&msg).await {
+                                conn.on_close(&err.to_string(), false).await;
+                                break;
+                            }
+                        }
+                        None => conn.mux_ctrl_rx = None,
+                    }
+                },
+                maybe_msg = async {
+                    match conn.mux_data_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    let mut send_failed = false;
+                    while let Some(ctrl_rx) = conn.mux_ctrl_rx.as_mut() {
+                        match ctrl_rx.try_recv() {
+                            Ok(ctrl_msg) => {
+                                if let Err(err) = conn.stream.send(&ctrl_msg).await {
+                                    conn.on_close(&err.to_string(), false).await;
+                                    send_failed = true;
+                                    break;
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    if send_failed {
+                        break;
+                    }
+                    match maybe_msg {
+                        Some(msg) => {
+                            if let Err(err) = conn.stream.send(&msg).await {
+                                conn.on_close(&err.to_string(), false).await;
+                                break;
+                            }
+                        }
+                        None => conn.mux_data_rx = None,
+                    }
+                },
+                Some((instant, value)) = rx.recv() => {""",
+    )
+    changes.replace(
+        sconn,
+        """        if pf.multiplex {
+            crate::port_forward_mux::cap_packet_size(&mut self.stream);
+            // `inner.tx` is set for the connection's whole life; `None` here is
+            // unreachable, and refusing the login is the only honest answer.
+            self.port_forward_mux = self.inner.tx.clone().map(|tx| {
+                super::port_forward_mux::PortForwardMux::new(tx, self.port_forward_address.clone())
+            });
+            return self.port_forward_mux.is_some();
+        }""",
+        """        if pf.multiplex {
+            crate::port_forward_mux::cap_packet_size(&mut self.stream);
+            let (data_tx, data_rx) =
+                mpsc::channel(crate::port_forward_mux::DATA_QUEUE_FRAMES);
+            let (control_tx, control_rx) = mpsc::unbounded_channel();
+            self.mux_data_rx = Some(data_rx);
+            self.mux_ctrl_rx = Some(control_rx);
+            self.port_forward_mux = Some(super::port_forward_mux::PortForwardMux::with_sink(
+                crate::port_forward_mux::FrameSink::Queued {
+                    data: data_tx,
+                    control: control_tx,
+                },
+                self.port_forward_address.clone(),
+            ));
+            return true;
+        }""",
+    )
+    changes.replace(
+        sconn,
+        """        if let Some(mut mux) = self.port_forward_mux.take() {
+            mux.close_all();
+        }""",
+        """        if let Some(mut mux) = self.port_forward_mux.take() {
+            mux.close_all();
+        }
+        self.mux_ctrl_rx = None;
+        self.mux_data_rx = None;""",
     )

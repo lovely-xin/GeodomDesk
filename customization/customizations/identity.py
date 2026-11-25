@@ -80,6 +80,11 @@ def apply(changes):
         'L"GEODOMDESK_RUNNER_WIN32_WINDOW"',
     )
     change(
+        "src/platform/windows.rs",
+        'pub const FLUTTER_RUNNER_WIN32_WINDOW_CLASS: &\'static str = "FLUTTER_RUNNER_WIN32_WINDOW";',
+        'pub const FLUTTER_RUNNER_WIN32_WINDOW_CLASS: &\'static str = "GEODOMDESK_RUNNER_WIN32_WINDOW";',
+    )
+    change(
         "flutter/windows/runner/main.cpp",
         'std::wstring app_name = L"RustDesk";',
         'std::wstring app_name = L"GeodomDesk";',
@@ -94,4 +99,9 @@ def apply(changes):
         "flutter/lib/desktop/pages/desktop_setting_page.dart",
         "hintText: '21118'",
         "hintText: '21128'",
+    )
+    change(
+        "flutter/lib/common/widgets/dialog.dart",
+        "hintText: '21118',",
+        "hintText: '21128',",
     )

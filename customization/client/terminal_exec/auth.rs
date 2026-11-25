@@ -108,12 +108,9 @@ pub(super) async fn account_token(
         "GeodomDesk account password: ",
         non_interactive,
     )?;
-    let id = tokio::task::spawn_blocking(crate::ipc::get_id).await?;
     let body = serde_json::to_string(&serde_json::json!({
         "username": account.username,
         "password": account.password,
-        "id": id,
-        "uuid": ui_interface::get_uuid(),
         "autoLogin": false,
         "type": "account",
         "deviceInfo": ui_interface::get_login_device_info(),
@@ -135,12 +132,17 @@ fn parse_account_response(status: u16, response: &str) -> ResultType<String> {
         error: Option<serde_json::Value>,
     }
     if status != 200 {
+        if let Ok(reply) = serde_json::from_str::<Reply>(response) {
+            if let Some(error) = reply.error {
+                bail!("GeodomDesk account sign-in failed (HTTP {status}): {error}");
+            }
+        }
         bail!("GeodomDesk account sign-in failed (HTTP {status})");
     }
     let reply: Reply =
         serde_json::from_str(response).context("Invalid GeodomDesk sign-in response")?;
-    if reply.error.is_some() {
-        bail!("GeodomDesk account sign-in was rejected");
+    if let Some(error) = reply.error {
+        bail!("GeodomDesk account sign-in was rejected: {error}");
     }
     if reply.r#type.as_deref() != Some("access_token") {
         bail!(

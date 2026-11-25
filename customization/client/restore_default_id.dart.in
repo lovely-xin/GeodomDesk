@@ -12,12 +12,14 @@
           refresh(() { inProgress = true; error = ''; });
           try {
             final status = await bind.mainRestoreDefaultId();
+            if (!mounted) return;
             if (status.isEmpty) {
               close();
             } else {
               refresh(() { inProgress = false; error = translate(status); });
             }
           } catch (_) {
+            if (!mounted) return;
             refresh(() {
               inProgress = false;
               error = translate('Failed to restore default ID');

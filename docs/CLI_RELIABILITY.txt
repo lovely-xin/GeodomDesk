@@ -80,8 +80,8 @@ PowerShell：https://learn.microsoft.com/en-us/powershell/module/microsoft.power
 先完成本地编译、模块回归、打包检查、Windows PowerShell 兼容脚本和真实设备故障场景，再提交触发远端构建。核对发布包对应的测试提交，记录测试平台、命令、场景和结果。
 
 
-八、旧 Windows 控制台兼容
-旧端 terminal=true、terminal_exec=false 时，CLI 通过交互终端执行。部分 Windows Server 控制台会把每行 512 字符的输入截为 254 字符；修复后的发起端改为每行 128 字符上传，并保持逐批确认、完整 SHA-256 校验和原有容量上限。
+旧 Windows 控制台兼容
+旧端 terminal=true、terminal_exec=false 时，CLI 通过交互终端执行。部分 Windows Server 控制台会把每行 512 字符的输入截为 254 字符；修复后的发起端对 Windows 改为每行 192 字符上传（Linux 为 1024 字符），并保持逐批确认、完整 SHA-256 校验和原有容量上限。
 部分旧控制台重绘还会在协议标记前留下残余字符、末尾补空格。发起端仅在 Windows 旧协议路径按每次命令随机生成的标记识别记录，去掉协议外围的重绘残留；实际业务输出仍按 Base64 字节解码，空格与中文保持原样。
 Server 2019 的旧控制台还可能只保留一屏可见输出，丢失较大窗口中的记录和确认标记。Windows 旧协议每 8 条输出确认一次，记录间保留分隔空行，使一批记录和控制标记落在 24 行的终端视口内；新结构化协议不受此兼容窗口影响。兼容模式的大输出会增加确认往返，按任务选择 60–120 秒执行预算，不要把默认 15 秒用于所有输出规模。
 出现 Legacy terminal script checksum mismatch 或退出码正常但输出为空时，先用 --version 识别发起端构建，再用 probe 检查目标终端能力。目标的 terminal 与 terminal_exec 均为 false 时，先在被控端授予终端权限。
@@ -115,6 +115,7 @@ SSH 使用按设备 ID 和 SSH 端口绑定的稳定主机别名，避免随机�
 geodomdesk-cli tunnel open --id DEVICE_ID --remote-host 127.0.0.1 --remote-port 22 --local-port 0 --non-interactive
 geodomdesk-cli tunnel list --id DEVICE_ID
 geodomdesk-cli tunnel close --id DEVICE_ID --tunnel-id TUNNEL_UUID
+（tunnel open 与 exec/session 相同，默认优先尝试 P2P 直连；需要强制走中继时追加 --relay。）
 
 open 默认分配空闲端口，仅监听发起端 127.0.0.1，默认强制经中继。指定的本地端口被占用时直接失败，不挤掉已有隧道。remote-host 是目标机可访问的主机，不是发起端主机。每个映射最多接受 16 个同时进行的 TCP 连接；新连接独立认证，一个通道失败不重放其他通道的数据。
 

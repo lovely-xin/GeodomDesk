@@ -51,7 +51,6 @@ pub(super) struct Device {
     pub id: String,
     pub info: DeviceInfo,
     pub alias: String,
-    pub file_name: std::ffi::OsString,
     pub modified: Option<SystemTime>,
     pub other_server: bool,
 }
@@ -138,7 +137,6 @@ fn device(path: &Path, source_key: &str, expected: &[u8]) -> ResultType<Device> 
         id,
         info: peer.info,
         alias: peer.options.alias,
-        file_name: path.file_name().unwrap().to_owned(),
         modified: path.metadata()?.modified().ok(),
         other_server,
     })

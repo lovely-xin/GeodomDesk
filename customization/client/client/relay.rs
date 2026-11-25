@@ -4,7 +4,7 @@ use crate::common::get_next_nonkeyexchange_msg;
 type RelayCandidate = (Stream, Option<KcpStream>, &'static str, bool);
 const RELAY_PRECONNECT_IDLE: Duration = Duration::from_secs(5);
 const RELAY_PRECONNECT_DELAY: Duration = Duration::from_millis(200);
-const BROKER_PRECONNECT_IDLE: Duration = Duration::from_secs(3);
+const BROKER_PRECONNECT_IDLE: Duration = Duration::from_secs(6);
 const STANDBY_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub(super) enum DirectFailure {
@@ -55,6 +55,7 @@ impl Client {
     ) -> ResultType<Stream> {
         for attempt in 1..=3 {
             // Each signaling retry uses a fresh address and a fresh pairing ID.
+            let used_prepared = prepared_broker.is_some();
             let mut socket = match prepared_broker.take() {
                 Some(socket) => socket,
                 None => {
@@ -80,7 +81,13 @@ impl Client {
                 ..Default::default()
             });
             let approval = async {
-                socket.send(&message).await?;
+                if let Err(err) = socket.send(&message).await {
+                    if used_prepared {
+                        log::debug!("Preconnected relay broker send failed ({err}), retrying fresh broker");
+                        return Ok(None);
+                    }
+                    return Err(err);
+                }
                 let Some(response) =
                     get_next_nonkeyexchange_msg(&mut socket, Some(CONNECT_TIMEOUT)).await
                 else {
@@ -117,9 +124,15 @@ impl Client {
         server: &str,
         key: &str,
         needs_secure: bool,
+        expected_wait: Duration,
     ) -> (T, Option<Stream>) {
-        let prepare = async {
-            tokio::time::sleep(RELAY_PRECONNECT_DELAY).await;
+        let delay = if expected_wait > BROKER_PRECONNECT_IDLE {
+            expected_wait.saturating_sub(Duration::from_secs(2))
+        } else {
+            RELAY_PRECONNECT_DELAY
+        };
+        let prepare = async move {
+            tokio::time::sleep(delay).await;
             Self::connect_relay_broker(server, key, needs_secure).await
         };
         transport_race::prepare_during(direct, prepare, BROKER_PRECONNECT_IDLE).await

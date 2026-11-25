@@ -24,6 +24,11 @@ def apply(changes):
         && msgtype""",
     )
     change(
+        "src/client.rs",
+        '                if err_str.starts_with("Failed") {',
+        '                if err_str.starts_with("Failed") && !crate::geodomdesk_auth::requires_login(&err_str) {',
+    )
+    change(
         "flutter/lib/models/model.dart",
         "import '../common/widgets/dialog.dart';",
         "import '../common/widgets/dialog.dart';\nimport '../common/widgets/login.dart';",
@@ -41,7 +46,9 @@ def apply(changes):
             const {
               'Please log in before starting a remote connection',
               'Invalid account or password',
-            }.contains(text is String ? text.trim() : text))) {
+            }.contains((text is String ? text.trim() : '')
+                .replaceFirst('Failed to connect via relay server: ', '')
+                .trim()))) {
       _requestAccountLogin(sessionId, dialogManager);
       return;
     }
@@ -69,8 +76,9 @@ def apply(changes):
         if (isDesktop) {
           rustDeskWinManager.call(WindowType.Main, kWindowRefreshCurrentUser, '');
         }
-        // Tunnel listeners read the current token for each new local connection.
-        if (parent.target?.connType == ConnType.portForward) return;
+        // Tunnel and RDP listeners read the current token for each new local connection.
+        if (parent.target?.connType == ConnType.portForward ||
+            parent.target?.connType == ConnType.rdp) return;
         // A new connection reads the newly stored account token. Do not use a retry timer.
         reconnect(dialogManager, sessionId, false);
       } else if (parent.target?.closed == false) {
@@ -84,6 +92,21 @@ def apply(changes):
 
   void resetRestartReconnectState() {""",
     )
+    change(
+        "flutter/lib/models/model.dart",
+        """    if (hasRetry) {
+      _timer = Timer(Duration(seconds: _reconnects), () {
+        reconnect(dialogManager, sessionId, false);
+      });
+      _reconnects *= 2;
+    }""",
+        """    if (hasRetry) {
+      _timer = Timer(Duration(seconds: _reconnects), () {
+        reconnect(dialogManager, sessionId, false);
+      });
+      _reconnects = (_reconnects * 2).clamp(1, 30);
+    }""",
+    )
 
     change(
         "flutter/lib/common/widgets/login.dart",
@@ -96,6 +119,47 @@ def apply(changes):
       debugPrint('Failed to refresh account data after login');
     }
   }""",
+    )
+    change(
+        "flutter/lib/common/widgets/login.dart",
+        """            if (isMobile) {
+              if (close != null) close(null);
+              verificationCodeDialog(
+                  resp.user, resp.secret, isEmailVerification);
+            } else {
+              setState(() => isInProgress = false);
+              // Workaround for web, close the dialog first, then show the verification code dialog.
+              // Otherwise, the text field will keep selecting the text and we can't input the code.
+              // Not sure why this happens.
+              if (isWeb && close != null) close(null);
+              final res = await verificationCodeDialog(
+                  resp.user, resp.secret, isEmailVerification);
+              if (res == true) {
+                if (!isWeb && close != null) close(false);
+                return;
+              }
+            }""",
+        """            if (isMobile) {
+              setState(() => isInProgress = false);
+              final res = await verificationCodeDialog(
+                  resp.user, resp.secret, isEmailVerification);
+              if (res == true) {
+                if (close != null) close(true);
+                return;
+              }
+            } else {
+              setState(() => isInProgress = false);
+              // Workaround for web, close the dialog first, then show the verification code dialog.
+              // Otherwise, the text field will keep selecting the text and we can't input the code.
+              // Not sure why this happens.
+              if (isWeb && close != null) close(null);
+              final res = await verificationCodeDialog(
+                  resp.user, resp.secret, isEmailVerification);
+              if (res == true) {
+                if (!isWeb && close != null) close(true);
+                return;
+              }
+            }""",
     )
 
     name = "src/port_forward.rs"

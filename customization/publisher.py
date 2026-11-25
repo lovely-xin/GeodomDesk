@@ -9,6 +9,7 @@ import errno
 import fcntl
 import hashlib
 import html
+import http.client
 import json
 import logging
 import os
@@ -16,6 +17,8 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -29,6 +32,7 @@ LIMIT = 512 * 1024 * 1024
 START = "<!-- rustdesk-downloads:start -->"
 END = "<!-- rustdesk-downloads:end -->"
 USER_AGENT = "GeodomDesk-Publisher/1"
+RANGE_CHUNK_BYTES = 4 * 1024 * 1024
 
 
 def now():
@@ -159,6 +163,25 @@ def select_asset(release, name, api):
     return asset
 
 
+def _resolve_range_url(asset_url, expected_size, headers, opener):
+    request = urllib.request.Request(
+        asset_url,
+        headers={
+            **headers,
+            "User-Agent": USER_AGENT,
+            "Accept": "application/octet-stream",
+            "Range": "bytes=0-0",
+        },
+    )
+    with opener.open(request, timeout=60) as response:
+        if (
+            response.status != 206
+            or response.headers.get("Content-Range") != f"bytes 0-0/{expected_size}"
+        ):
+            raise ValueError("Unexpected GitHub range response")
+        return response.geturl()
+
+
 def download(asset, cache, headers):
     digest = asset["digest"][7:]
     final = cache / (digest + "-" + asset["name"])
@@ -174,7 +197,7 @@ def download(asset, cache, headers):
             asset["url"],
             headers={**headers, "User-Agent": USER_AGENT, "Accept": "application/octet-stream"},
         )
-        if asset["size"] > 4 * 1024 * 1024:
+        if asset["size"] > RANGE_CHUNK_BYTES:
             request.add_header("Range", "bytes=0-0")
         opener = urllib.request.build_opener(DownloadRedirect())
         length = 0
@@ -186,14 +209,23 @@ def download(asset, cache, headers):
                         raise ValueError("Unexpected GitHub range response")
                     url = response.geturl()
                 else:
-                    for block in iter(lambda: response.read(1024 * 1024), b""):
+                    for block in iter(lambda: response.read(RANGE_CHUNK_BYTES), b""):
                         length += len(block)
                         if length > asset["size"]:
                             raise ValueError("Download exceeds declared size")
                         stream.write(block)
             if ranged:
                 stream.truncate(asset["size"])
-                download_ranges(url, asset["size"], stream.fileno(), headers)
+                download_ranges(
+                    url,
+                    asset["size"],
+                    stream.fileno(),
+                    headers,
+                    opener=opener,
+                    resolve_url=lambda: _resolve_range_url(
+                        asset["url"], asset["size"], headers, opener
+                    ),
+                )
                 length = asset["size"]
         if length != asset["size"] or channel.sha256(temp) != digest:
             raise ValueError("Release asset size or SHA256 mismatch")
@@ -204,28 +236,65 @@ def download(asset, cache, headers):
             os.unlink(temp)
 
 
-def download_ranges(url, size, fd, headers):
-    headers = {**headers, "User-Agent": USER_AGENT, "Accept": "application/octet-stream"}
-    if urllib.parse.urlsplit(url).hostname != "api.github.com":
-        headers = {k: v for k, v in headers.items() if k.lower() != "authorization"}
+def download_ranges(url, size, fd, headers, opener=None, resolve_url=None):
+    base_headers = {**headers, "User-Agent": USER_AGENT, "Accept": "application/octet-stream"}
+
+    def scoped_headers(target_url):
+        if urllib.parse.urlsplit(target_url).hostname != "api.github.com":
+            return {k: v for k, v in base_headers.items() if k.lower() != "authorization"}
+        return base_headers
+
+    opener = opener or urllib.request.build_opener(DownloadRedirect())
+    url_lock = threading.Lock()
+    state = {"url": url}
 
     def part(start):
-        end = min(start + 1024 * 1024, size) - 1
-        request = urllib.request.Request(url, headers={**headers, "Range": f"bytes={start}-{end}"})
-        opener = urllib.request.build_opener(DownloadRedirect())
-        with opener.open(request, timeout=60) as response:
-            if (
-                response.status != 206
-                or response.headers.get("Content-Range") != f"bytes {start}-{end}/{size}"
-            ):
-                raise ValueError("GitHub did not honor the requested download range")
-            data = response.read(end - start + 2)
-        if len(data) != end - start + 1 or os.pwrite(fd, data, start) != len(data):
-            raise ValueError("Incomplete release asset download range")
+        end = min(start + RANGE_CHUNK_BYTES, size) - 1
+        for attempt in range(3):
+            with url_lock:
+                target_url = state["url"]
+            request = urllib.request.Request(
+                target_url,
+                headers={**scoped_headers(target_url), "Range": f"bytes={start}-{end}"},
+            )
+            try:
+                with opener.open(request, timeout=60) as response:
+                    if (
+                        response.status != 206
+                        or response.headers.get("Content-Range")
+                        != f"bytes {start}-{end}/{size}"
+                    ):
+                        raise ValueError("GitHub did not honor the requested download range")
+                    data = response.read(end - start + 2)
+                if len(data) != end - start + 1 or os.pwrite(fd, data, start) != len(data):
+                    raise ValueError("Incomplete release asset download range")
+                return
+            except urllib.error.HTTPError as err:
+                if attempt >= 2 or err.code not in (401, 403, 410, 429, 500, 502, 503, 504):
+                    raise
+                if err.code in (401, 403, 410) and resolve_url is not None:
+                    with url_lock:
+                        if state["url"] == target_url:
+                            state["url"] = resolve_url()
+                else:
+                    time.sleep(0.2 * (attempt + 1))
+            except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError):
+                if attempt >= 2:
+                    raise
+                time.sleep(0.2 * (attempt + 1))
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-        for _ in pool.map(part, range(0, size, 1024 * 1024)):
+        for _ in pool.map(part, range(0, size, RANGE_CHUNK_BYTES)):
             pass
+
+
+def prune_cache(cache, keep_paths, max_extra=4):
+    keep = {Path(p).resolve() for p in keep_paths}
+    extras = [p for p in cache.iterdir() if p.is_file() and p.resolve() not in keep]
+    extras.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    for stale in extras[max_extra:]:
+        with contextlib.suppress(OSError):
+            stale.unlink()
 
 
 def validate_build(build, release, config):
@@ -397,11 +466,25 @@ def portal_update(portal, version, native_config=True, windows_server_2008_r2=Fa
     atomic_bytes(portal, changed.encode())
 
 
+@contextlib.contextmanager
+def _failed_status_on_error(state):
+    try:
+        yield
+    except Exception:
+        save_json(state / "status.json", {"status": "failed", "checked_at": now()})
+        raise
+
+
 def run(config):
     state = Path(config["state_dir"])
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
     with (state / "lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with _failed_status_on_error(state):
+            _run_locked(config, state)
+
+
+def _run_locked(config, state):
         if not config.get("enabled") or not config.get("repository"):
             status = "staged" if config.get("repository") else "waiting-for-build-repository"
             save_json(
@@ -440,24 +523,35 @@ def run(config):
         if asset["size"] > 64 * 1024:
             raise ValueError("Build descriptor exceeds size limit")
         descriptor = download(asset, cache, headers)
+        keep_cache = [descriptor]
         build = json.loads(descriptor.read_text())
         items = validate_build(build, release, config)
         release_id = build.get("release_id", version)
-        build_number = build.get("build_number", 0)
+        build_number = build.get("build_number") or 0
         if (
             current
             and current.get("version")
             and (channel.version_tuple(version), build_number)
-            < (channel.version_tuple(current["version"]), current.get("build_number", 0))
+            < (channel.version_tuple(current["version"]), current.get("build_number") or 0)
         ):
             raise ValueError("Refusing to roll back the GeodomDesk build revision")
         destination = public / "releases" / release_id
+        already_live = False
         if destination.exists():
             manifest = json.loads((destination / "publication.json").read_text())
             if manifest["build_sha256"] != channel.sha256(descriptor) or not public_complete(
                 destination, manifest
             ):
                 raise ValueError("Immutable release changed or damaged; publish a new version")
+            already_live = (
+                bool(current)
+                and current.get("url") == channel.release_url(release_id)
+                and (current.get("build_number") or 0) == build_number
+                and bool(current.get("native_config", False)) == bool(manifest.get("native_config", False))
+                and (public / "latest.json").is_file()
+                and (public / "index.html").is_file()
+                and (public / "geodomdesk.png").is_file()
+            )
         else:
             if build.get("native_config") is not True:
                 raise ValueError("New releases must contain compiled fixed connection settings")
@@ -469,6 +563,7 @@ def run(config):
                 stage = Path(temporary) / "release"
                 stage.mkdir()
                 payloads = {}
+                stage_digests = {}
                 for item in items:
                     asset = select_asset(release, item["file_name"], api)
                     if (
@@ -477,14 +572,29 @@ def run(config):
                     ):
                         raise ValueError("Build descriptor and GitHub asset digest disagree")
                     payload = download(asset, cache, headers)
-                    shutil.copyfile(payload, stage / item["file_name"])
+                    keep_cache.append(payload)
+                    staged = stage / item["file_name"]
+                    shutil.copyfile(payload, staged)
+                    stage_digest = channel.sha256(staged)
+                    if stage_digest != asset["digest"][7:]:
+                        raise ValueError("Copied release artifact SHA256 mismatch")
+                    stage_digests[item["file_name"]] = stage_digest
                     payloads[item["file_name"]] = (payload, asset)
                 updates = []
                 targets = channel.release_targets(build["artifacts"])
                 for platform, arch, fmt in targets:
                     name = channel.file_name(release_id, platform, fmt)
                     payload, asset = payloads[name]
-                    updates.append(channel.artifact(stage / name, release_id, platform, arch, fmt))
+                    updates.append(
+                        channel.artifact(
+                            stage / name,
+                            release_id,
+                            platform,
+                            arch,
+                            fmt,
+                            digest=stage_digests[name],
+                        )
+                    )
                     if fmt == "exe":
                         with payload.open("rb") as stream:
                             if stream.read(2) != b"MZ":
@@ -501,7 +611,11 @@ def run(config):
                 windows_server_2008_r2 = channel.WINDOWS_SERVER_2008_R2 in targets
                 (stage / "index.html").write_bytes(page(release_id, True, windows_server_2008_r2))
                 files = [
-                    {"name": p.name, "size": p.stat().st_size, "sha256": channel.sha256(p)}
+                    {
+                        "name": p.name,
+                        "size": p.stat().st_size,
+                        "sha256": stage_digests.get(p.name) or channel.sha256(p),
+                    }
                     for p in stage.iterdir()
                     if p.is_file()
                 ]
@@ -519,9 +633,13 @@ def run(config):
                 if not public_complete(stage, manifest):
                     raise ValueError("Final publication verification failed")
                 publish_directory(stage, destination, manifest)
-        (public / "geodomdesk.png").write_bytes((ROOT / "assets/geodomdesk.png").read_bytes())
-        publish_pointer(public, manifest)
-        if config.get("activate_portal"):
+        if not already_live:
+            atomic_bytes(public / "geodomdesk.png", (ROOT / "assets/geodomdesk.png").read_bytes())
+            publish_pointer(public, manifest)
+        if config.get("activate_portal") and (
+            not already_live
+            or channel.release_url(release_id) not in portal.read_text(encoding="utf-8")
+        ):
             # The activation command disables the former producer before setting this flag.
             for unit in ["geodom-rustdesk-builder.timer", "geodom-rustdesk-builder.service"]:
                 if (
@@ -538,6 +656,7 @@ def run(config):
         save_json(
             state / "status.json", {"status": "published", "version": version, "checked_at": now()}
         )
+        prune_cache(cache, keep_cache)
         logging.info("GeodomDesk %s published with signed update metadata", version)
 
 
@@ -552,9 +671,6 @@ def main():
     except BlockingIOError:
         logging.info("Another publisher run holds the lock")
     except Exception:
-        save_json(
-            Path(config["state_dir"]) / "status.json", {"status": "failed", "checked_at": now()}
-        )
         logging.exception("Publication failed; the previous update release remains available")
         raise
 

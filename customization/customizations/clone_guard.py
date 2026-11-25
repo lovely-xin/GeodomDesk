@@ -35,6 +35,7 @@ def apply(changes):
             );
             store |= update != BindingUpdate::Unchanged;
             if update == BindingUpdate::Cloned {
+                config.key_pair = geodomdesk_clone_guard::replacement_key_pair();
                 config.key_confirmed = false;
                 config.keys_confirmed.clear();
                 log::info!("Device hardware changed; replaced the copied client ID");

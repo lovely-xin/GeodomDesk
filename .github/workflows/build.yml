@@ -134,6 +134,10 @@ jobs:
         run: |
           python3 ../customization/prepare_client.py --source . --version "$VERSION" --build-number "$BUILD_NUMBER"
           CARGO_TARGET_DIR="$PWD/target/geodomdesk-verification" python3 ../customization/verify_rust.py --source .
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ~/.cargo/bin
+          key: ${{ runner.os }}-cargo-bin-bridge-1.0.95-1.80.1
       - name: Generate Flutter bridge
         run: |
           cargo install cargo-expand --version 1.0.95 --locked
@@ -152,8 +156,8 @@ jobs:
           sed -i 's/extended_text: 13.0.0/extended_text: 14.0.0/g' flutter/pubspec.yaml
           cd flutter
           flutter pub get
-          dart format lib/common.dart lib/desktop/pages/connection_page.dart lib/desktop/pages/install_page.dart lib/desktop/pages/desktop_home_page.dart lib/models/model.dart lib/common/widgets/login.dart lib/desktop/pages/desktop_setting_page.dart lib/mobile/pages/connection_page.dart lib/mobile/pages/settings_page.dart lib/mobile/widgets/dialog.dart
-          flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings lib/common.dart lib/desktop/pages/connection_page.dart lib/desktop/pages/install_page.dart lib/desktop/pages/desktop_home_page.dart lib/models/model.dart lib/common/widgets/login.dart lib/desktop/pages/desktop_setting_page.dart lib/mobile/pages/connection_page.dart lib/mobile/pages/settings_page.dart lib/mobile/widgets/dialog.dart
+          dart format lib/common.dart lib/desktop/pages/connection_page.dart lib/desktop/pages/install_page.dart lib/desktop/pages/desktop_home_page.dart lib/desktop/pages/port_forward_page.dart lib/models/model.dart lib/common/widgets/login.dart lib/desktop/pages/desktop_setting_page.dart lib/mobile/pages/connection_page.dart lib/mobile/pages/settings_page.dart lib/mobile/widgets/dialog.dart lib/web/bridge.dart
+          flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings lib/common.dart lib/desktop/pages/connection_page.dart lib/desktop/pages/install_page.dart lib/desktop/pages/desktop_home_page.dart lib/desktop/pages/port_forward_page.dart lib/models/model.dart lib/common/widgets/login.dart lib/desktop/pages/desktop_setting_page.dart lib/mobile/pages/connection_page.dart lib/mobile/pages/settings_page.dart lib/mobile/widgets/dialog.dart lib/web/bridge.dart
           flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings lib/models/ab_model.dart lib/models/geodom_recent_sync.dart lib/models/peer_model.dart lib/common/widgets/address_book.dart lib/common/widgets/peer_card.dart lib/utils/http_service.dart
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
@@ -165,6 +169,7 @@ jobs:
             client/flutter/lib/generated_bridge.dart
             client/flutter/lib/generated_bridge.freezed.dart
             client/flutter/lib/desktop/pages/desktop_home_page.dart
+            client/flutter/lib/desktop/pages/port_forward_page.dart
             client/flutter/lib/common.dart
             client/flutter/lib/desktop/pages/connection_page.dart
             client/flutter/lib/desktop/pages/install_page.dart
@@ -174,6 +179,7 @@ jobs:
             client/flutter/lib/mobile/pages/connection_page.dart
             client/flutter/lib/mobile/pages/settings_page.dart
             client/flutter/lib/mobile/widgets/dialog.dart
+            client/flutter/lib/web/bridge.dart
 
   windows:
     name: ${{ matrix.package }}
@@ -275,7 +281,7 @@ jobs:
           Copy-Item ./target/release/geodomdesk-cli.exe ./flutter/build/windows/x64/runner/Release/
           python -m unittest discover -s ../customization/tests -p test_terminal_cli.py -v
           if ($LASTEXITCODE -ne 0) { throw 'Terminal CLI stream forwarding failed' }
-          cargo test --locked --release --features $features --lib terminal_exec::
+          cargo test --locked --release --features $features --lib '--' terminal_exec:: client::transport_race:: client::native_udp_probe_tests:: client::webrtc_race_tests:: client::retry_tests:: port_forward_mux:: port_forward::login_tests:: server::port_forward_mux:: rendezvous_mediator::tests:: kcp_stream::tests:: server::video_service::tests:: common::tests::test_udp_punch
           if ($LASTEXITCODE -ne 0) { throw 'Terminal protocol regression tests failed' }
           cargo test --locked --release --features $features --lib audio_resampler::allocation_tests::
           if ($LASTEXITCODE -ne 0) { throw 'Audio allocation regression tests failed' }
@@ -401,9 +407,7 @@ jobs:
           python3 ./build.py --flutter --hwcodec --unix-file-copy-paste
           features=$(python3 ./build.py --print-features --flutter --hwcodec --unix-file-copy-paste)
           cargo build --locked --release --features "$features" --bin geodomdesk-cli
-          cargo test --locked --release --features "$features" --lib terminal_exec::
-          cargo test --locked --release --features "$features" --lib geodomdesk_recent::tests::
-          cargo test --locked --release --features "$features" --lib port_forward::
+          cargo test --locked --release --features "$features" --lib -- terminal_exec:: client::transport_race:: client::native_udp_probe_tests:: client::webrtc_race_tests:: client::retry_tests:: port_forward_mux:: port_forward::login_tests:: server::port_forward_mux:: rendezvous_mediator::tests:: kcp_stream::tests:: server::video_service::tests:: common::tests::test_udp_punch geodomdesk_recent::tests:: port_forward::
           python3 -m unittest discover -s ../customization/tests -p test_terminal_cli.py -v
           mkdir -p ../ubuntu-artifact
           python3 ../customization/repack_deb.py --input "rustdesk-$VERSION.deb" --output ../ubuntu-artifact/geodomdesk.deb --version "$VERSION" --build-number "$BUILD_NUMBER" --cli target/release/geodomdesk-cli
@@ -415,9 +419,6 @@ jobs:
         with:
           path: ${{ runner.temp }}/vcpkg-binary-cache
           key: ${{ steps.native-cache.outputs.cache-primary-key }}
-      - name: Archive corresponding source including modified submodules
-        run: |
-          python3 ../customization/archive_source.py --source . --customization ../customization --output ../ubuntu-artifact/geodomdesk-source.tar.gz
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: geodomdesk-ubuntu
@@ -510,6 +511,10 @@ jobs:
         with:
           path: ${{ runner.temp }}/vcpkg-binary-cache
           key: ${{ steps.native-cache.outputs.cache-primary-key }}
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ~/.cargo/bin
+          key: ${{ runner.os }}-cargo-bin-ndk-3.1.2
       - name: Build Android Rust library
         run: |
           cargo install cargo-ndk --version 3.1.2 --locked

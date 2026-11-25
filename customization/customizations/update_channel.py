@@ -14,9 +14,7 @@ def apply(changes, cfg):
         changes[name][:start]
         + """pub fn get_new_version() -> String {
     let url = SOFTWARE_UPDATE_URL.lock().unwrap().clone();
-    crate::geodomdesk_update::release_id(&url)
-        .and_then(|id| crate::geodomdesk_update::display_version(&id))
-        .unwrap_or_default()
+    crate::geodomdesk_update::release_id(&url).unwrap_or_default()
 }
 """
         + changes[name][end:]
@@ -57,6 +55,31 @@ def apply(changes, cfg):
         name,
         "if get_version_number(&latest_release_version) > get_version_number(crate::VERSION) {",
         "if crate::geodomdesk_update::is_newer_release(&release_id, crate::VERSION, crate::geodomdesk_update::BUILD_NUMBER)? {",
+    )
+    change(
+        name,
+        """    if crate::geodomdesk_update::is_newer_release(&release_id, crate::VERSION, crate::geodomdesk_update::BUILD_NUMBER)? {
+        #[cfg(feature = "flutter")]
+        {
+            let mut m = HashMap::new();
+            m.insert("name", "check_software_update_finish");
+            m.insert("url", &response_url);
+            if let Ok(data) = serde_json::to_string(&m) {
+                let _ = crate::flutter::push_global_event(crate::flutter::APP_TYPE_MAIN, data);
+            }
+        }
+        *SOFTWARE_UPDATE_URL.lock().unwrap() = response_url;""",
+        """    if crate::geodomdesk_update::is_newer_release(&release_id, crate::VERSION, crate::geodomdesk_update::BUILD_NUMBER)? {
+        *SOFTWARE_UPDATE_URL.lock().unwrap() = response_url.clone();
+        #[cfg(feature = "flutter")]
+        {
+            let mut m = HashMap::new();
+            m.insert("name", "check_software_update_finish");
+            m.insert("url", &response_url);
+            if let Ok(data) = serde_json::to_string(&m) {
+                let _ = crate::flutter::push_global_event(crate::flutter::APP_TYPE_MAIN, data);
+            }
+        }""",
     )
     start = changes[name].index("pub(crate) fn release_id_from_update_url(")
     end = changes[name].index("pub(crate) fn url_has_explicit_port(", start)
@@ -115,6 +138,7 @@ pub async fn do_check_software_update() -> hbb_common::ResultType<()> {
         + changes[name][end:]
     )
 
+    base_url = cfg["base_url"].rstrip("/")
     change(
         "src/updater/artifact.rs",
         """    #[cfg(target_os = "windows")]
@@ -133,7 +157,7 @@ pub async fn do_check_software_update() -> hbb_common::ResultType<()> {
     change(
         "src/updater/artifact.rs",
         "https://github.com/rustdesk/rustdesk/releases/download/{release_id}/",
-        "https://www.qcjcpt.com/downloads/geodomdesk/releases/{release_id}/",
+        f"{base_url}/releases/{{release_id}}/",
     )
     change(
         "src/updater/artifact.rs",
@@ -188,7 +212,7 @@ pub async fn do_check_software_update() -> hbb_common::ResultType<()> {
         changes[name]
         .replace(
             "https://github.com/rustdesk/rustdesk/releases/download/1.4.0/rustdesk-1.4.0-x86_64.dmg",
-            "https://www.qcjcpt.com/downloads/geodomdesk/releases/1.4.0/geodomdesk-1.4.0-x86_64.dmg",
+            f"{base_url}/releases/1.4.0/geodomdesk-1.4.0-x86_64.dmg",
         )
         .replace('Some("rustdesk-1.4.0-x86_64.dmg")', 'Some("geodomdesk-1.4.0-x86_64.dmg")')
     )
@@ -200,7 +224,7 @@ pub async fn do_check_software_update() -> hbb_common::ResultType<()> {
         + changes[name][start:end]
         .replace(
             "https://github.com/rustdesk/rustdesk/releases/tag/v1.4.6",
-            "https://www.qcjcpt.com/downloads/geodomdesk/releases/1.4.6",
+            f"{base_url}/releases/1.4.6",
         )
         .replace('"v1.4.6"', '"1.4.6"')
         + changes[name][end:]
@@ -250,6 +274,11 @@ pub async fn do_check_software_update() -> hbb_common::ResultType<()> {
         "flutter/lib/desktop/pages/desktop_home_page.dart",
         "'https://github.com/rustdesk/rustdesk/releases/tag/${bind.mainGetNewVersion()}'",
         "updateUrl",
+    )
+    change(
+        "flutter/lib/desktop/pages/desktop_home_page.dart",
+        "help: isToUpdate ? 'Changelog' : null,",
+        "help: isToUpdate ? 'Download' : null,",
     )
     change(
         "flutter/lib/desktop/pages/desktop_setting_page.dart",
