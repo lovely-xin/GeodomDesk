@@ -1406,7 +1406,6 @@ mod tests {
             expected_platform: None,
             expected_hostname: None,
             ssh: None,
-            ssh_fallback_to_terminal: false,
         };
         let error = match Managed::start(
             &options,

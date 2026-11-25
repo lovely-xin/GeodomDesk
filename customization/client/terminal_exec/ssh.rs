@@ -19,6 +19,7 @@ use tokio::{
 
 #[derive(Clone)]
 pub(super) struct Options {
+    pub allow_fallback: bool,
     pub host: String,
     pub username: Option<String>,
     pub port: u16,

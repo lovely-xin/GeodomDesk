@@ -222,7 +222,6 @@ pub(super) struct ConnectOptions {
     pub(super) expected_platform: Option<String>,
     pub(super) expected_hostname: Option<String>,
     pub(super) ssh: Option<super::ssh::Options>,
-    pub(super) ssh_fallback_to_terminal: bool,
 }
 impl ConnectOptions {
     fn current_token(&self) -> ResultType<String> {
@@ -309,7 +308,7 @@ impl ConnectOptions {
                     } else {
                         error
                     };
-                    if !self.ssh_fallback_to_terminal
+                    if !ssh.allow_fallback
                         || !(wrapped.is::<ForwardUnavailable>() || wrapped.is::<super::ssh::MissingProgram>())
                     {
                         return Err(wrapped);
@@ -978,6 +977,7 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
         };
         let mut askpass=std::env::current_exe()?;askpass.set_file_name(if cfg!(windows){"geodomdesk-cli.exe"}else{"geodomdesk-cli"});
         Some(super::ssh::Options{host:ssh_host,username:ssh_user,port:ssh_port,identity:ssh_identity,
+            allow_fallback:ssh_fallback_to_terminal && password.is_none(),
             known_hosts:ssh_known_hosts.unwrap_or_else(||hbb_common::config::Config::path("cli-ssh-known_hosts")),strict_host_key:ssh_strict,password,askpass})
     } else {None};
     let is_admin = admin_user.is_some();
@@ -1026,7 +1026,6 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
         expected_platform,
         expected_hostname,
         ssh,
-        ssh_fallback_to_terminal,
     };
     if tunnel {
         let port = remote_port.context("Missing --remote-port")?;
