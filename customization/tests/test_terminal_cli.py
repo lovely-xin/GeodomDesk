@@ -5,8 +5,10 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 @unittest.skipUnless(shutil.which("rustc"), "Rust compiler required")
@@ -248,9 +250,10 @@ fn main() {
 
 class CustomizationContractTests(unittest.TestCase):
     def test_port_forward_mux_retains_kcp_close_reason_for_1_5_3(self):
-        from customizations import performance
-
         root = Path(__file__).resolve().parents[1]
+        with mock.patch.object(sys, "path", [str(root), *sys.path]):
+            from customizations import performance
+
         source_file = root / "reference/src/port_forward_mux.rs"
         lifetime_file = root / "reference/src/port_forward.rs"
         tunnel_src = (root / "client/terminal_exec/tunnel.rs").read_text(encoding="utf-8")
