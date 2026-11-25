@@ -371,7 +371,8 @@ pub(super) async fn open(
     ssh: &Options,
 ) -> ResultType<cli::Connection> {
     let started = Instant::now();
-    auth::verify_ssh_account(&options.token).await?;
+    let token = options.current_token()?;
+    auth::verify_ssh_account(&token).await?;
     let host = ssh.host.as_deref().unwrap_or("127.0.0.1");
     let (tunnel, stream) = tunnel::Managed::start_stream(options, host.into(), ssh.port)
         .await
@@ -466,7 +467,7 @@ pub(super) async fn open(
         Session {
             handle,
             tunnel,
-            token: options.token.clone(),
+            token,
             shell: ssh.shell,
             alias,
         },
@@ -490,7 +491,8 @@ fn is_early_disconnect(error: &hbb_common::anyhow::Error) -> bool {
 
 #[derive(Clone)]
 pub(super) struct Authentication {
-    identity: Option<Arc<keys::PrivateKey>>,
+    identities: Vec<Arc<keys::PrivateKey>>,
+    explicit_identity: bool,
     password: Option<Arc<str>>,
 }
 
@@ -510,22 +512,27 @@ impl Authentication {
             )?),
             None => None,
         };
-        let identity = if let Some(path) = identity {
-            Some(Arc::new(load_identity(path, true, non_interactive)?))
+        let explicit_identity = identity.is_some();
+        let identities = if let Some(path) = identity {
+            vec![Arc::new(load_identity(path, true, non_interactive)?)]
         } else if password.is_none() {
-            std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).and_then(|home| {
-                ["id_ed25519", "id_ecdsa", "id_rsa"]
-                    .into_iter()
-                    .find_map(|name| {
-                        let path = PathBuf::from(&home).join(".ssh").join(name);
-                        load_identity(&path, false, true).ok().map(Arc::new)
-                    })
-            })
+            std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+                .map(|home| {
+                    ["id_ed25519", "id_ecdsa", "id_rsa"]
+                        .into_iter()
+                        .filter_map(|name| {
+                            let path = PathBuf::from(&home).join(".ssh").join(name);
+                            load_identity(&path, false, true).ok().map(Arc::new)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
         } else {
-            None
+            Vec::new()
         };
         Ok(Self {
-            identity,
+            identities,
+            explicit_identity,
             password: password.map(Arc::from),
         })
     }
@@ -535,17 +542,17 @@ impl Authentication {
         handle: &mut client::Handle<HostTrust>,
         username: &str,
     ) -> ResultType<()> {
-        if let Some(identity) = &self.identity {
-            let key = PrivateKeyWithHashAlg::new(
-                Arc::clone(identity),
-                handle.best_supported_rsa_hash().await?.flatten(),
-            );
-            if handle
-                .authenticate_publickey(username, key)
-                .await?
-                .success()
-            {
-                return Ok(());
+        if !self.identities.is_empty() {
+            let hash_alg = handle.best_supported_rsa_hash().await?.flatten();
+            for identity in &self.identities {
+                let key = PrivateKeyWithHashAlg::new(Arc::clone(identity), hash_alg);
+                if handle
+                    .authenticate_publickey(username, key)
+                    .await?
+                    .success()
+                {
+                    return Ok(());
+                }
             }
         }
         if let Some(password) = &self.password {
@@ -558,7 +565,7 @@ impl Authentication {
             }
             bail!("SSH destination rejected the account credentials");
         }
-        if self.identity.is_some() {
+        if self.explicit_identity {
             bail!("SSH destination rejected the private key");
         }
         Err(Unavailable::Credentials.into())

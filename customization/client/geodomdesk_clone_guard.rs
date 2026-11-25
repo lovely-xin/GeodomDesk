@@ -1,6 +1,11 @@
 //! Detect an Ubuntu image copied to different permanent network hardware.
-use sodiumoxide::crypto::hash::sha256;
+use sodiumoxide::crypto::{hash::sha256, sign};
 use std::{fs, path::Path};
+
+pub(crate) fn replacement_key_pair() -> (Vec<u8>, Vec<u8>) {
+    let (pk, sk) = sign::gen_keypair();
+    (sk.0.to_vec(), pk.0.to_vec())
+}
 
 pub(crate) fn current_binding() -> Vec<String> {
     read_binding(Path::new("/sys/class/net"))
@@ -16,6 +21,12 @@ fn read_binding(root: &Path) -> Vec<String> {
         let path = entry.path();
         // Bridges, VPNs and containers are not hardware identity anchors.
         if !path.join("device").exists() {
+            continue;
+        }
+        if fs::read_to_string(path.join("type"))
+            .ok()
+            .is_some_and(|arp_type| arp_type.trim() != "1")
+        {
             continue;
         }
         let Ok(kind) = fs::read_to_string(path.join("addr_assign_type")) else {
@@ -39,10 +50,10 @@ fn read_binding(root: &Path) -> Vec<String> {
             })
             .collect();
         let Some(bytes) = bytes else {
-            return Vec::new();
+            continue;
         };
         if bytes.len() != 6 || bytes[0] & 1 != 0 || bytes.iter().all(|b| *b == 0) {
-            return Vec::new();
+            continue;
         }
         addresses.push(address);
     }
@@ -199,8 +210,32 @@ mod tests {
             fs::write(path.join("addr_assign_type"), kind).unwrap();
         }
         assert_eq!(read_binding(&root), ids(&["02:00:00:00:00:01"]));
+        let wwan = root.join("wwan0");
+        fs::create_dir_all(wwan.join("device")).unwrap();
+        fs::write(wwan.join("type"), "512\n").unwrap();
+        fs::write(wwan.join("addr_assign_type"), "0\n").unwrap();
+        fs::write(wwan.join("address"), "\n").unwrap();
+        let can = root.join("can0");
+        fs::create_dir_all(can.join("device")).unwrap();
+        fs::write(can.join("type"), "280\n").unwrap();
+        fs::write(can.join("addr_assign_type"), "0\n").unwrap();
+        fs::write(can.join("address"), "00:00:00:00:00:00\n").unwrap();
+        assert_eq!(read_binding(&root), ids(&["02:00:00:00:00:01"]));
+        fs::remove_dir_all(&wwan).unwrap();
+        fs::remove_dir_all(&can).unwrap();
         fs::remove_file(root.join("eth1/address")).unwrap();
         assert!(read_binding(&root).is_empty());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replacement_key_pair_generates_distinct_ed25519_keys() {
+        sodiumoxide::init().unwrap();
+        let (sk1, pk1) = replacement_key_pair();
+        let (sk2, pk2) = replacement_key_pair();
+        assert_eq!(sk1.len(), sign::SECRETKEYBYTES);
+        assert_eq!(pk1.len(), sign::PUBLICKEYBYTES);
+        assert_ne!(sk1, sk2);
+        assert_ne!(pk1, pk2);
     }
 }

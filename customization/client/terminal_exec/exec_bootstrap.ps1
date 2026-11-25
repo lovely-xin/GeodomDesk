@@ -23,7 +23,7 @@ try {
     }
     $remoteScript = [ScriptBlock]::Create($source)
     $global:LASTEXITCODE = $null
-    $script:commandHadError = $false
+    $script:__gd_err = $false
     if ($geodomdeskScriptChunks) {
         [Console]::Out.Write('GEODOMDESK_EXEC_READY')
         [Console]::Out.Flush()
@@ -32,14 +32,14 @@ try {
         if ($_ -is [System.Management.Automation.ErrorRecord]) {
             [Console]::Error.WriteLine($_.ToString())
             if ($_.FullyQualifiedErrorId -notlike 'NativeCommandError*') {
-                $script:commandHadError = $true
+                $script:__gd_err = $true
             }
         } else {
             $_
         }
     }
-    if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }
-    if ($commandHadError) { exit 1 }
+    if ($null -ne $LASTEXITCODE -and 0 -ne $LASTEXITCODE) { exit $LASTEXITCODE }
+    if ($script:__gd_err) { exit 1 }
     exit 0
 } catch {
     [Console]::Error.WriteLine($_.ToString())

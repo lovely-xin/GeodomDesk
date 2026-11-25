@@ -5,6 +5,11 @@ import json
 
 def apply(changes, root):
     change = changes.replace
+    change(
+        "libs/hbb_common/src/config.rs",
+        "    fn path(id: &str) -> PathBuf {",
+        "    pub fn path(id: &str) -> PathBuf {",
+    )
     change("src/lib.rs", "mod updater;", "mod updater;\nmod geodomdesk_import;")
     change(
         "src/core_main.rs",

@@ -36,14 +36,14 @@ pub(crate) fn import() -> ResultType<ImportReport> {
             let mut peer = PeerConfig::load(&device.id);
             if peer.password.is_empty() && !device.password.is_empty() {
                 if let Some(password) = saved_password(&device.password) {
-                    let modified = Config::path("peers").join(&device.file_name)
-                        .metadata().and_then(|m| m.modified()).ok();
+                    let path = PeerConfig::path(&device.id);
+                    let modified = path.metadata().and_then(|m| m.modified()).ok();
                     peer.password = password;
                     peer.store(&device.id);
                     if PeerConfig::load(&device.id).password != peer.password {
                         hbb_common::bail!("Could not store imported device password");
                     }
-                    preserve_modified(&device.file_name, modified);
+                    preserve_modified(&path, modified);
                     report.passwords_added += 1;
                 } else {
                     report.passwords_skipped += 1;
@@ -75,13 +75,14 @@ pub(crate) fn import() -> ResultType<ImportReport> {
                 .insert("other-server-key".to_owned(), key.clone());
         }
         peer.store(&device.id);
+        let path = PeerConfig::path(&device.id);
         if !PeerConfig::exists(&device.id) {
             hbb_common::bail!("Could not store imported device records");
         }
         if !peer.password.is_empty() && PeerConfig::load(&device.id).password != peer.password {
             hbb_common::bail!("Could not store imported device password");
         }
-        preserve_modified(&device.file_name, device.modified);
+        preserve_modified(&path, device.modified);
         report.added += 1;
     }
     let mut favorites = LocalConfig::get_fav();
@@ -110,9 +111,9 @@ fn saved_password(stored: &[u8]) -> Option<Vec<u8>> {
         .filter(|password| !password.is_empty() && password.len() <= hbb_common::config::ENCRYPT_MAX_LEN)
 }
 
-fn preserve_modified(name: &std::ffi::OsStr, modified: Option<std::time::SystemTime>) {
+fn preserve_modified(path: &std::path::Path, modified: Option<std::time::SystemTime>) {
     if let Some(modified) = modified {
-        if let Ok(file) = fs::OpenOptions::new().write(true).open(Config::path("peers").join(name)) {
+        if let Ok(file) = fs::OpenOptions::new().write(true).open(path) {
             let _ = file.set_times(fs::FileTimes::new().set_modified(modified));
         }
     }

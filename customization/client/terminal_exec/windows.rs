@@ -20,7 +20,10 @@ use std::{
     os::windows::{io::AsRawHandle, process::CommandExt},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -82,7 +85,23 @@ pub(super) fn execute(
     user: Option<UserToken>,
     cancelled: &AtomicBool,
 ) -> ResultType<TerminalExecResult> {
-    execute_with_helper(request, user, cancelled, &std::env::current_exe()?)
+    if let Some(user) = user {
+        execute_with_helper(request, Some(user), cancelled, &std::env::current_exe()?)
+    } else {
+        execute_direct(request, cancelled)
+    }
+}
+
+fn execute_direct(
+    request: TerminalExecRequest,
+    cancelled: &AtomicBool,
+) -> ResultType<TerminalExecResult> {
+    if request.shell.enum_value() == Ok(ExecShell::BASH) {
+        bail!("This Windows device supports PowerShell execution");
+    }
+    let job = kill_on_close_job()?;
+    let timeout = Duration::from_secs(request.timeout_seconds.into());
+    run_script_bounded(request, Some((&job, timeout, cancelled)))
 }
 
 fn execute_with_helper(
@@ -141,6 +160,9 @@ fn execute_with_helper(
     let runtime = tokio::runtime::Handle::current();
     let request_bytes = request.write_to_bytes()?;
     let mut output = runtime.block_on(async move {
+        if cancelled.load(Ordering::Relaxed) {
+            bail!("Remote command cancelled");
+        }
         tokio::time::timeout(
             Duration::from_millis(PIPE_CONNECTION_TIMEOUT_MS.into()),
             async {
@@ -227,16 +249,24 @@ fn shell_path(shell: ExecShell) -> ResultType<PathBuf> {
     }
 }
 
-fn read_output(input: impl Read, limit: usize) -> ResultType<Vec<u8>> {
+fn read_output(input: impl Read, limit: usize, overflow: Arc<AtomicBool>) -> ResultType<Vec<u8>> {
     let mut bytes = Vec::new();
     input.take(limit as u64 + 1).read_to_end(&mut bytes)?;
     if bytes.len() > limit {
+        overflow.store(true, Ordering::Release);
         bail!("Output exceeded {MAX_OUTPUT} bytes");
     }
     Ok(bytes)
 }
 
 fn run_script(request: TerminalExecRequest) -> ResultType<TerminalExecResult> {
+    run_script_bounded(request, None)
+}
+
+fn run_script_bounded(
+    request: TerminalExecRequest,
+    guard: Option<(&OwnedHandle, Duration, &AtomicBool)>,
+) -> ResultType<TerminalExecResult> {
     validate(&request)?;
     let shell = shell_path(
         request
@@ -288,21 +318,68 @@ fn run_script(request: TerminalExecRequest) -> ResultType<TerminalExecResult> {
         );
     }
     let mut process = command.spawn()?;
+    if let Some((job, _, _)) = guard {
+        if let Err(error) =
+            unsafe { AssignProcessToJobObject(job.as_raw(), HANDLE(process.as_raw_handle())) }
+        {
+            let _ = process.kill();
+            let _ = process.wait();
+            return Err(error.into());
+        }
+    }
     let stdout = process.stdout.take().context("Missing PowerShell output")?;
     let stderr = process
         .stderr
         .take()
         .context("Missing PowerShell error output")?;
-    let stdout = thread::spawn(move || read_output(stdout, MAX_OUTPUT + READY.len()));
-    let stderr = thread::spawn(move || read_output(stderr, MAX_OUTPUT));
-    let status = process.wait()?;
-    let join = |thread: thread::JoinHandle<ResultType<Vec<u8>>>| {
-        thread
-            .join()
-            .map_err(|_| hbb_common::anyhow::anyhow!("Output reader stopped"))?
+    let overflow = Arc::new(AtomicBool::new(false));
+    let out_flag = overflow.clone();
+    let err_flag = overflow.clone();
+    let (out_tx, out_rx) = std::sync::mpsc::sync_channel(1);
+    let (err_tx, err_rx) = std::sync::mpsc::sync_channel(1);
+    thread::spawn(move || {
+        let _ = out_tx.send(read_output(stdout, MAX_OUTPUT + READY.len(), out_flag));
+    });
+    thread::spawn(move || {
+        let _ = err_tx.send(read_output(stderr, MAX_OUTPUT, err_flag));
+    });
+    let started = Instant::now();
+    let status = loop {
+        if overflow.load(Ordering::Acquire) {
+            let _ = process.kill();
+            let _ = process.wait();
+            bail!("Output exceeded {MAX_OUTPUT} bytes");
+        }
+        if let Some((_, timeout, cancelled)) = guard {
+            if cancelled.load(Ordering::Relaxed) {
+                let _ = process.kill();
+                let _ = process.wait();
+                bail!("Remote command cancelled");
+            }
+            if started.elapsed() >= timeout {
+                let _ = process.kill();
+                let _ = process.wait();
+                bail!("Remote command timed out");
+            }
+        }
+        if let Some(status) = process.try_wait()? {
+            break status;
+        }
+        thread::sleep(Duration::from_millis(20));
     };
-    let mut stdout = join(stdout)?;
-    let stderr = join(stderr)?;
+    let recv_output = |rx: std::sync::mpsc::Receiver<ResultType<Vec<u8>>>, name: &str| {
+        match rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(res) => res,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                bail!("PowerShell exited but a child process kept {name} open")
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                bail!("Output reader stopped")
+            }
+        }
+    };
+    let mut stdout = recv_output(out_rx, "stdout")?;
+    let stderr = recv_output(err_rx, "stderr")?;
     let exit_code = status.code().context("Missing PowerShell exit code")?;
     if !stdout.starts_with(READY) {
         let diagnostic = String::from_utf8_lossy(&stderr);

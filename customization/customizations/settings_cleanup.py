@@ -52,6 +52,9 @@ def apply(changes):
     client = "src/client.rs"
     change(client, "https://rustdesk.com/docs/en/manual/linux/#x11-required", GUIDE + "#ubuntu")
     change(client, "https://rustdesk.com/docs/en/manual/linux/#login-screen", GUIDE + "#ubuntu")
+    config = "libs/hbb_common/src/config.rs"
+    change(config, 'pub const LINK_DOCS_HOME: &str = "https://rustdesk.com/docs/en/";', f'pub const LINK_DOCS_HOME: &str = "{GUIDE}";')
+    change(config, 'pub const LINK_DOCS_X11_REQUIRED: &str = "https://rustdesk.com/docs/en/manual/linux/#x11-required";', f'pub const LINK_DOCS_X11_REQUIRED: &str = "{GUIDE}#ubuntu";')
     en = "src/lang/en.rs"
     change(en, "https://rustdesk.com/docs/en/client/linux/#x11-required", GUIDE + "#ubuntu")
     changes.replace("src/lang/cn.rs", "    [\n",

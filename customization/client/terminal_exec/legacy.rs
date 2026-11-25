@@ -9,7 +9,7 @@ use hbb_common::{
 };
 use std::{time::Duration, vec};
 
-const LINE_BYTES: usize = 512;
+const LINE_BYTES: usize = 1024;
 const BATCH_LINES: usize = 16;
 const WINDOWS_BOOTSTRAP_BATCH_LINES: usize = 8;
 const WINDOWS_POWERSHELL: &str = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe";
@@ -18,15 +18,31 @@ const PREPARE_TIMEOUT: Duration = Duration::from_secs(15);
 fn input_line_bytes(platform: &str) -> usize {
     if platform == "Windows" {
         // Older Windows consoles truncate ReadLine input at 254 characters.
-        128
+        192
     } else {
         LINE_BYTES
     }
 }
 
+fn compact_powershell(script: &str) -> String {
+    let mut out = String::with_capacity(script.len());
+    for line in script.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(trimmed);
+    }
+    out
+}
+
 fn encode_powershell(script: &str) -> String {
+    let compacted = compact_powershell(script);
     crate::encode64(
-        script
+        compacted
             .encode_utf16()
             .flat_map(u16::to_le_bytes)
             .collect::<Vec<_>>(),
@@ -370,6 +386,7 @@ impl Transcript {
                     }
                 }
                 if record == b":WINDOW" {
+                    size = 0;
                     send_input(stream, self.terminal_id, b"GDOUTPUT\r".to_vec()).await?;
                     continue;
                 }
@@ -381,6 +398,7 @@ impl Transcript {
                         bail!("Legacy terminal output exceeded {MAX_OUTPUT} bytes");
                     }
                     output.extend_from_slice(&data);
+                    size = 0;
                     continue;
                 }
             }
@@ -413,7 +431,7 @@ impl Escape {
             (Start, b']' | b'P' | b'X' | b'^' | b'_') => String,
             (Sequence, 0x20..=0x3f) => Sequence,
             (String, 0x07) | (StringEnd, b'\\') => Text,
-            (String, 0x1b) => StringEnd,
+            (String | StringEnd, 0x1b) => StringEnd,
             (String | StringEnd, _) => String,
             _ => Text,
         };

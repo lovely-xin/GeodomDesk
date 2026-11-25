@@ -179,7 +179,7 @@ def permitted_file(name):
     return (
         name == CHANNEL
         or name.startswith(REFERENCE)
-        or (name.startswith("customization/client/") and path.suffix in {".rs", ".ps1", ".sh", ".in", ".h"})
+        or (name.startswith("customization/client/") and path.suffix in {".rs", ".ps1", ".sh", ".in", ".h", ".dart"})
         or (
             name.startswith("customization/customizations/")
             and path.suffix in {".py", ".patch"}

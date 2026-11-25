@@ -31,7 +31,7 @@ def customization_hash(root=None):
         paths.extend(
             p
             for p in (root / directory).rglob(pattern)
-            if p.is_file() and (directory != "client" or p.suffix in (".rs", ".in", ".h", ".ps1", ".sh"))
+            if p.is_file() and (directory != "client" or p.suffix in (".rs", ".in", ".h", ".ps1", ".sh", ".dart"))
         )
     paths.extend(
         root / name

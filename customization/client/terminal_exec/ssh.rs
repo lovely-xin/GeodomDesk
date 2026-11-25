@@ -3,7 +3,7 @@ use super::{cli, stage, tunnel, MAX_OUTPUT};
 use base::message_proto::{ExecShell, TerminalExecRequest, TerminalExecResult};
 use hbb_common::{
     anyhow::{anyhow, Context},
-    bail, base64, tokio, ResultType,
+    bail, tokio, ResultType,
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -19,6 +19,8 @@ use tokio::{
 
 #[derive(Clone)]
 pub(super) struct Options {
+    pub allow_fallback: bool,
+    pub host: String,
     pub username: Option<String>,
     pub port: u16,
     pub identity: Option<PathBuf>,
@@ -34,6 +36,7 @@ pub(super) struct Session {
     stdout: BufReader<ChildStdout>,
     errors: Arc<Mutex<Vec<u8>>>,
     stderr_task: tokio::task::JoinHandle<()>,
+    pub destination: String,
     pub tunnel: tunnel::Managed,
 }
 impl Drop for Session {
@@ -68,6 +71,7 @@ impl Session {
     pub(super) async fn idle(&mut self) -> ResultType<()> {
         let bytes = self.stdout.fill_buf().await?;
         if bytes.is_empty() {
+            let _ = tokio::time::timeout(Duration::from_millis(250), &mut self.stderr_task).await;
             bail!("SSH channel disconnected: {}", self.diagnostic());
         }
         bail!("Unexpected data from idle SSH worker")
@@ -88,7 +92,7 @@ impl Session {
         }
         let timeout = request.timeout_seconds;
         tokio::time::timeout(
-            Duration::from_secs(u64::from(timeout) + 10),
+            Duration::from_secs(u64::from(timeout) + 25),
             self.exchange(request),
         )
         .await
@@ -106,7 +110,7 @@ impl Session {
         let header = format!(
             "RUN {marker} {} {digest}\n{}\n",
             request.timeout_seconds,
-            base64::encode(script)
+            crate::encode64(script)
         );
         self.stdin.write_all(header.as_bytes()).await?;
         self.stdin.flush().await?;
@@ -127,13 +131,13 @@ impl Session {
                 bail!("SSH output received before execution acknowledgement");
             }
             if let Some(data) = record.strip_prefix("O:") {
-                let bytes = base64::decode(data)?;
+                let bytes = crate::decode64(data)?;
                 if stdout.len() + bytes.len() > MAX_OUTPUT {
                     bail!("SSH stdout exceeded {MAX_OUTPUT} bytes");
                 }
                 stdout.extend_from_slice(&bytes);
             } else if let Some(data) = record.strip_prefix("E:") {
-                let bytes = base64::decode(data)?;
+                let bytes = crate::decode64(data)?;
                 if stderr.len() + bytes.len() > MAX_OUTPUT {
                     bail!("SSH stderr exceeded {MAX_OUTPUT} bytes");
                 }
@@ -157,9 +161,27 @@ impl Session {
     }
 }
 
+#[derive(Debug)]
+pub(super) struct MissingProgram;
+
+impl std::fmt::Display for MissingProgram {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("OpenSSH Client is unavailable; install it or use --transport terminal")
+    }
+}
+impl std::error::Error for MissingProgram {}
+
 fn ssh_program() -> ResultType<PathBuf> {
     #[cfg(windows)]
     {
+        for var in ["ProgramW6432", "ProgramFiles"] {
+            if let Some(root) = std::env::var_os(var) {
+                let candidate = PathBuf::from(root).join(r"OpenSSH\ssh.exe");
+                if candidate.is_file() {
+                    return Ok(candidate);
+                }
+            }
+        }
         use std::os::windows::ffi::OsStringExt;
         use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
         let mut buffer = [0u16; 512];
@@ -170,7 +192,7 @@ fn ssh_program() -> ResultType<PathBuf> {
         let path =
             PathBuf::from(std::ffi::OsString::from_wide(&buffer[..len])).join(r"OpenSSH\ssh.exe");
         if !path.is_file() {
-            bail!("Windows OpenSSH Client is unavailable; enable it or use --transport terminal");
+            return Err(MissingProgram.into());
         }
         return Ok(path);
     }
@@ -216,54 +238,128 @@ fn absolute_ssh_path(path: &Path) -> ResultType<PathBuf> {
     Ok(std::path::absolute(path)?)
 }
 
-pub(super) async fn open(
-    options: &cli::ConnectOptions,
-    ssh: &Options,
-) -> ResultType<cli::Connection> {
-    let started = Instant::now();
+fn is_peer_loopback(host: &str) -> bool {
+    matches!(
+        host.trim().to_ascii_lowercase().as_str(),
+        "127.0.0.1" | "localhost" | "::1" | "[::1]"
+    )
+}
+
+fn format_ssh_destination(username: &str, host: &str, port: u16) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("{username}@[{host}]:{port}")
+    } else {
+        format!("{username}@{host}:{port}")
+    }
+}
+
+struct LocalConfig {
+    program: PathBuf,
+    identity: Option<PathBuf>,
+    known_hosts: String,
+}
+
+fn validate_local(ssh: &Options) -> ResultType<LocalConfig> {
     let program = ssh_program()?;
+    if let Some(username) = ssh.username.as_deref() {
+        let trimmed = username.trim();
+        if trimmed.is_empty() || trimmed.chars().any(char::is_control) {
+            bail!("Set --ssh-user to the target SSH login name");
+        }
+    } else if !is_peer_loopback(&ssh.host) {
+        bail!("Set --ssh-user to the target SSH login name");
+    }
     let identity = ssh.identity.as_deref().map(absolute_ssh_path).transpose()?;
-    let known_hosts_path = absolute_ssh_path(&ssh.known_hosts)?;
-    let tunnel =
-        tunnel::Managed::start(options, 0, "127.0.0.1".into(), ssh.port, "Bash over SSH").await?;
-    if tunnel.peer.platform != "Linux" {
-        bail!("SSH Bash transport requires a Linux target");
-    }
-    let username = ssh
-        .username
-        .as_deref()
-        .unwrap_or(&tunnel.peer.username)
-        .trim();
-    if username.is_empty() || username.chars().any(char::is_control) {
-        bail!("Set --ssh-user to the target Linux login name");
-    }
     if let Some(identity) = &identity {
         if !std::fs::metadata(identity)?.is_file() {
             bail!("SSH identity must be a regular file");
         }
     }
+    if let Some(password) = &ssh.password {
+        if !ssh.askpass.is_file() {
+            bail!("The matching geodomdesk-cli askpass helper is missing");
+        }
+        if password.contains(['\r', '\n']) {
+            bail!("SSH password must not contain line breaks");
+        }
+    }
+    let known_hosts_path = absolute_ssh_path(&ssh.known_hosts)?;
     if let Some(parent) = known_hosts_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let known_hosts = known_hosts_path
+    let known_hosts_str = known_hosts_path
         .to_str()
         .context("SSH host-key path must be Unicode")?;
-    if known_hosts.chars().any(char::is_control) {
+    if known_hosts_str.chars().any(char::is_control)
+        || (cfg!(unix) && known_hosts_str.contains('"'))
+    {
         bail!("Invalid SSH host-key path");
     }
     let known_hosts = if cfg!(windows) {
-        known_hosts.replace('\\', "/")
+        known_hosts_str.replace('\\', "/")
     } else {
-        known_hosts.to_owned()
+        known_hosts_str.to_owned()
     };
-    let known_hosts = known_hosts.replace('%', "%%").replace('"', "\\\"");
+    Ok(LocalConfig {
+        program,
+        identity,
+        known_hosts: known_hosts.replace('%', "%%").replace('"', "\\\""),
+    })
+}
+
+pub(super) async fn open(
+    options: &cli::ConnectOptions,
+    ssh: &Options,
+) -> ResultType<cli::Connection> {
+    let started = Instant::now();
+    let local = validate_local(ssh)?;
+    let tunnel =
+        tunnel::Managed::start(options, 0, ssh.host.clone(), ssh.port, "Bash over SSH").await?;
+    let setup_errors = tunnel.setup_errors.clone();
+    open_with_tunnel(options, ssh, &local, tunnel, started)
+        .await
+        .map_err(|error| {
+            if !setup_errors.is_empty()
+                && error.downcast_ref::<super::stage::SetupHistory>().is_none()
+            {
+                error.context(super::stage::SetupHistory(setup_errors))
+            } else {
+                error
+            }
+        })
+}
+
+async fn open_with_tunnel(
+    options: &cli::ConnectOptions,
+    ssh: &Options,
+    local: &LocalConfig,
+    tunnel: tunnel::Managed,
+    started: Instant,
+) -> ResultType<cli::Connection> {
+    if tunnel.peer.platform != "Linux" && is_peer_loopback(&ssh.host) {
+        bail!("SSH Bash transport requires a Linux target");
+    }
+    let username = match ssh.username.as_deref() {
+        Some(value) => value.trim(),
+        None if tunnel.peer.platform == "Linux" && is_peer_loopback(&ssh.host) => {
+            tunnel.peer.username.trim()
+        }
+        None => "",
+    };
+    if username.is_empty() || username.chars().any(char::is_control) {
+        bail!("Set --ssh-user to the target SSH login name");
+    }
+    let ssh_host = ssh.host.trim();
+    let destination = format_ssh_destination(username, ssh_host, ssh.port);
+    let known_hosts = &local.known_hosts;
     let marker = uuid::Uuid::new_v4().simple().to_string();
     let worker = include_str!("ssh_worker.sh").replace("__SESSION__", &marker);
     let remote = format!(
-        "env -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS bash --noprofile --norc -c \"$(printf %s {} | base64 -d)\"",
-        base64::encode(worker)
+        "env -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS bash --noprofile --norc -c 'eval \"$(printf %s {} | base64 -d)\"'",
+        crate::encode64(worker)
     );
-    let mut command = tokio::process::Command::new(program);
+    let mut command = tokio::process::Command::new(&local.program);
+    command.env("LC_ALL", "C");
     command.args([
         "-T",
         "-F",
@@ -273,6 +369,11 @@ pub(super) async fn open(
         "-p",
         &tunnel.port().to_string(),
     ]);
+    let host_key_id = if is_peer_loopback(ssh_host) {
+        options.id.clone()
+    } else {
+        format!("{}:{}", options.id, ssh_host.to_ascii_lowercase())
+    };
     for option in [
         "ServerAliveInterval=5".to_owned(),
         "ServerAliveCountMax=2".into(),
@@ -283,9 +384,16 @@ pub(super) async fn open(
         "ConnectionAttempts=1".into(),
         format!("ConnectTimeout={}", options.timeout),
         "LogLevel=ERROR".into(),
+        "UpdateHostKeys=no".into(),
+        "CheckHostIP=no".into(),
+        "GSSAPIAuthentication=no".into(),
+        "VerifyHostKeyDNS=no".into(),
+        "IPQoS=none".into(),
+        "Compression=yes".into(),
+        "TCPKeepAlive=yes".into(),
         format!(
             "HostKeyAlias=geodomdesk-{:x}-ssh-{}",
-            Sha256::digest(options.id.as_bytes()),
+            Sha256::digest(host_key_id.as_bytes()),
             ssh.port
         ),
         format!("UserKnownHostsFile=\"{known_hosts}\""),
@@ -304,7 +412,7 @@ pub(super) async fn open(
     ] {
         command.arg("-o").arg(option);
     }
-    if let Some(identity) = &identity {
+    if let Some(identity) = &local.identity {
         command
             .arg("-i")
             .arg(identity)
@@ -313,7 +421,7 @@ pub(super) async fn open(
     if let Some(password) = &ssh.password {
         command.args([
             "-o",
-            if ssh.identity.is_some() {
+            if local.identity.is_some() {
                 "PreferredAuthentications=publickey,password,keyboard-interactive"
             } else {
                 "PreferredAuthentications=password,keyboard-interactive"
@@ -350,7 +458,8 @@ pub(super) async fn open(
         command
             .env_remove("SSH_ASKPASS")
             .env_remove("SSH_ASKPASS_REQUIRE")
-            .env_remove("GEODOMDESK_CLI_SSH_ASKPASS");
+            .env_remove("GEODOMDESK_CLI_SSH_ASKPASS")
+            .env_remove("GEODOMDESK_SSH_PASSWORD");
     }
     for name in [
         "GEODOMDESK_ACCOUNT_PASSWORD",
@@ -370,6 +479,7 @@ pub(super) async fn open(
         let parent = std::process::id();
         unsafe {
             command.as_std_mut().pre_exec(move || {
+                hbb_common::libc::setsid();
                 if hbb_common::libc::prctl(
                     hbb_common::libc::PR_SET_PDEATHSIG,
                     hbb_common::libc::SIGKILL,
@@ -392,9 +502,13 @@ pub(super) async fn open(
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .context(
-            "Cannot start OpenSSH; install the system OpenSSH client or use --transport terminal",
-        )?;
+        .map_err(|error| -> hbb_common::anyhow::Error {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                MissingProgram.into()
+            } else {
+                anyhow!(error).context("Cannot start OpenSSH")
+            }
+        })?;
     let stdin = child.stdin.take().context("Missing SSH input")?;
     let stdout = BufReader::new(child.stdout.take().context("Missing SSH output")?);
     let mut stderr = child.stderr.take().context("Missing SSH error output")?;
@@ -407,8 +521,12 @@ pub(super) async fn open(
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
                     let mut out = captured.lock().unwrap_or_else(|poison| poison.into_inner());
-                    let remaining = 8192usize.saturating_sub(out.len());
-                    out.extend_from_slice(&bytes[..n.min(remaining)]);
+                    let take = n.min(8192);
+                    let overflow = (out.len() + take).saturating_sub(8192);
+                    if overflow > 0 {
+                        out.drain(..overflow);
+                    }
+                    out.extend_from_slice(&bytes[n - take..n]);
                 }
             }
         }
@@ -419,11 +537,24 @@ pub(super) async fn open(
         stdout,
         errors,
         stderr_task,
+        destination,
         tunnel,
     };
-    let ready = session.line().await?;
-    if ready != format!("{marker}:READY") {
-        bail!("SSH worker did not become ready (requires Bash and coreutils)");
+    let expected = format!("{marker}:READY");
+    let mut ready = false;
+    for _ in 0..64 {
+        let line = session.line().await?;
+        if line == expected {
+            ready = true;
+            break;
+        }
+    }
+    if !ready {
+        let diag = session.diagnostic();
+        if diag.is_empty() {
+            bail!("SSH worker did not become ready (requires Bash and coreutils)");
+        }
+        bail!("SSH worker did not become ready (requires Bash and coreutils): {diag}");
     }
     Ok(cli::Connection::from_ssh(session, started.elapsed()))
 }
@@ -469,7 +600,7 @@ mod tests {
                 format!(
                     "RUN {marker} {timeout} {:x}\n{}\n",
                     Sha256::digest(script.as_bytes()),
-                    base64::encode(script)
+                    crate::encode64(script)
                 )
                 .as_bytes(),
             )
@@ -487,9 +618,9 @@ mod tests {
                     assert!(!started);
                     started = true;
                 } else if let Some(data) = record.strip_prefix("O:") {
-                    stdout.extend(base64::decode(data).unwrap());
+                    stdout.extend(crate::decode64(data).unwrap());
                 } else if let Some(data) = record.strip_prefix("E:") {
-                    stderr.extend(base64::decode(data).unwrap());
+                    stderr.extend(crate::decode64(data).unwrap());
                 } else if let Some(end) = record.strip_prefix("END:") {
                     assert!(started);
                     let (code, error) = end.split_once(':').unwrap();
@@ -568,5 +699,31 @@ mod tests {
         assert_eq!(value, (b"AFTER_TIMEOUT".to_vec(), vec![], 0, 0));
         drop(input);
         assert!(child.wait().await.unwrap().success());
+    }
+    #[tokio::test]
+    async fn ssh_worker_writes_files_larger_than_output_limit_without_sigxfsz() {
+        let (mut child, mut input, mut out) = worker().await;
+        let path = std::env::temp_dir().join(format!("geodomdesk-ssh-bigfile-{}", uuid::Uuid::new_v4()));
+        let script = format!(
+            "dd if=/dev/zero of='{}' bs=1024 count=1024 status=none && wc -c < '{}'",
+            path.display(),
+            path.display()
+        );
+        let value = invoke(&mut input, &mut out, &script, 5).await;
+        let _ = std::fs::remove_file(&path);
+        assert_eq!((value.2, value.3), (0, 0));
+        assert_eq!(String::from_utf8_lossy(&value.0).trim(), "1048576");
+        drop(input);
+        assert!(child.wait().await.unwrap().success());
+    }
+    #[test]
+    fn validates_loopback_aliases_and_brackets_ipv6_ssh_destinations() {
+        for host in ["127.0.0.1", "localhost", "::1", "[::1]", "LOCALHOST"] {
+            assert!(is_peer_loopback(host), "{host}");
+        }
+        assert!(!is_peer_loopback("10.0.0.5"));
+        assert_eq!(format_ssh_destination("alice", "127.0.0.1", 22), "alice@127.0.0.1:22");
+        assert_eq!(format_ssh_destination("alice", "::1", 2222), "alice@[::1]:2222");
+        assert_eq!(format_ssh_destination("alice", "[::1]", 2222), "alice@[::1]:2222");
     }
 }

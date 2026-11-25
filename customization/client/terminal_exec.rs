@@ -8,18 +8,19 @@ mod session;
 mod stage;
 mod tunnel;
 mod ssh;
+#[cfg(feature = "flutter")]
 pub(crate) use tunnel::{list as list_tunnels, close as close_tunnel};
 #[cfg(windows)]
 mod windows;
 
-pub use cli::run_cli;
+use cli::run_cli;
 #[cfg(windows)]
 pub(crate) use windows::run_helper;
 
 use base::message_proto::{
     ExecShell, Message, TerminalExecRequest, TerminalExecResult, TerminalResponse,
 };
-use hbb_common::{anyhow::Context, bail, tokio, ResultType, Stream};
+use hbb_common::{anyhow::Context, bail, protobuf::Message as _, tokio, ResultType, Stream};
 
 const MAX_SCRIPT: usize = 64 * 1024;
 const MAX_OUTPUT: usize = 256 * 1024;
@@ -65,6 +66,7 @@ pub(crate) fn validate(request: &TerminalExecRequest) -> ResultType<()> {
 pub(crate) async fn execute(
     request: TerminalExecRequest,
     #[cfg(windows)] token: Option<crate::server::terminal_helper::UserToken>,
+    #[cfg(windows)] token_guard: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
 ) -> TerminalExecResult {
     let result = async {
         validate(&request)?;
@@ -88,6 +90,7 @@ pub(crate) async fn execute(
             let cancelled = cancel.0.clone();
             return tokio::task::spawn_blocking(move || {
                 let _slot = slot;
+                let _token_guard = token_guard;
                 windows::execute(request, token, &cancelled)
             })
             .await?;
@@ -105,27 +108,50 @@ pub(crate) async fn execute(
     })
 }
 
+#[allow(dead_code)]
 pub(crate) async fn serve(
     stream: &mut Stream,
     request: TerminalExecRequest,
+    last_test_delay: &mut Option<hbb_common::tokio::time::Instant>,
     #[cfg(windows)] token: Option<crate::server::terminal_helper::UserToken>,
 ) -> ResultType<()> {
     let execute = execute(
         request,
         #[cfg(windows)]
         token,
+        #[cfg(windows)]
+        None,
     );
     tokio::pin!(execute);
     let interval = std::time::Duration::from_secs(5);
     let mut keepalive = tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
+    let mut last_recv = hbb_common::tokio::time::Instant::now();
     let result = loop {
         tokio::select! {
             result = &mut execute => break result,
             incoming = stream.next() => {
-                incoming.context("Command client disconnected")??;
+                let bytes = incoming.context("Command client disconnected")??;
+                last_recv = hbb_common::tokio::time::Instant::now();
+                if !bytes.is_empty() {
+                    if let Ok(msg) = Message::parse_from_bytes(&bytes) {
+                        if let Some(base::message_proto::message::Union::TestDelay(delay)) = &msg.union {
+                            if delay.from_client {
+                                stream.send(&msg).await?;
+                            } else {
+                                *last_test_delay = None;
+                            }
+                        }
+                    }
+                }
             }
             _ = keepalive.tick() => {
-                stream.send(&Message::new()).await?;
+                if last_recv.elapsed() >= std::time::Duration::from_secs(30) {
+                    bail!("Command stream timed out waiting for client");
+                }
+                let mut delay = Message::new();
+                delay.set_test_delay(Default::default());
+                *last_test_delay = Some(hbb_common::tokio::time::Instant::now());
+                stream.send(&delay).await?;
             }
         }
     };
@@ -253,6 +279,7 @@ mod tests {
         server.set_key(key.clone());
         client.set_key(key);
         let peer = async {
+            let mut last_test_delay = None;
             for _ in 0..2 {
                 let Some(message::Union::TerminalAction(mut action)) =
                     cli::receive(&mut server).await.unwrap().union
@@ -260,8 +287,11 @@ mod tests {
                     panic!("Expected terminal action");
                 };
                 assert!(action.has_exec());
-                serve(&mut server, action.take_exec()).await.unwrap();
+                serve(&mut server, action.take_exec(), &mut last_test_delay)
+                    .await
+                    .unwrap();
             }
+            assert!(last_test_delay.is_none());
         };
         let command = async {
             let first = cli::exchange(&mut client, request("sleep 5.2; printf 'first'", 8))

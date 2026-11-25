@@ -224,12 +224,12 @@ mod geodomdesk_contract_tests {
     fn verify(name: &str, platform: &str, format: &str, key: [u8;32]) -> ResultType<VerifiedUpdateArtifact> {
         let metadata = std::fs::read(format!("fixtures/{name}.json"))?;
         let signature = std::fs::read(format!("fixtures/{name}.sig"))?;
-        let keys = [TrustedUpdateKey { key_id: "geodomdesk-2026-01", algorithm: "ed25519", public_key: key }];
+        let keys = [TrustedUpdateKey { key_id: "{KEY_ID}", algorithm: "ed25519", public_key: key }];
         verify_update_metadata_with_options(&metadata, &signature, VerificationOptions {
             requirements: MetadataRequirements { expected_version: "1.5.2", expected_release_id: "1.5.2-r102",
                 artifact: UpdateArtifactQuery { platform, arch: if platform == "android" { "aarch64" } else { "x86_64" }, format } },
             expected_package_id: PUBLIC_UPDATE_PACKAGE_ID,
-            artifact_url_policy: ArtifactUrlPolicy::ExactPrefix("https://www.qcjcpt.com/downloads/geodomdesk/releases/1.5.2-r102/"),
+            artifact_url_policy: ArtifactUrlPolicy::ExactPrefix("{BASE_URL}/releases/1.5.2-r102/"),
             trusted_keys: &keys,
         })
     }
@@ -243,14 +243,14 @@ mod geodomdesk_contract_tests {
     #[test] fn rejects_wrong_public_key() { assert!(verify("valid","windows","exe",[0;32]).is_err()); }
     #[test] fn rejects_wrong_platform_format() { assert!(verify("valid","windows","deb",TEST_KEY).is_err()); }
 }
-""".replace(
+""".replace("{KEY_ID}", channel.KEY_ID).replace("{BASE_URL}", channel.BASE_URL.rstrip("/")).replace(
             "KEY_BYTES", str(list(channel.public_key(seed)))
         )
         with (crate / "src/update_metadata.rs").open("a") as stream:
             stream.write(verifier_test)
         cargo = shutil.which("cargo")
         if not cargo:
-            candidate = Path("/home/xp/.cargo/bin/cargo")
+            candidate = Path.home() / ".cargo/bin/cargo"
             cargo = str(candidate) if candidate.is_file() else "cargo"
         lock_path = ROOT / "tests/rust/Cargo.lock"
         if lock_path.exists():
@@ -263,8 +263,9 @@ mod geodomdesk_contract_tests {
             check=True,
             env=env,
         )
-        lock_path.parent.mkdir(exist_ok=True)
-        shutil.copyfile(crate / "Cargo.lock", lock_path)
+        if update_lock or not lock_path.exists():
+            lock_path.parent.mkdir(exist_ok=True)
+            shutil.copyfile(crate / "Cargo.lock", lock_path)
 
 
 if __name__ == "__main__":

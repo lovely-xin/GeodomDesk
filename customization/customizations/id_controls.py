@@ -41,10 +41,25 @@ def apply(changes, root):
 
     pub fn set_id(id: &str) {""")
     change(name, """    pub fn set(cfg: Config) -> bool {
-        let mut lock = CONFIG.write().unwrap();""", """    pub fn set(mut cfg: Config) -> bool {
+        let mut lock = CONFIG.write().unwrap();""", """    pub fn preserve_host_identity(cfg: &mut Config) {
+        let lock = CONFIG.read().unwrap();
+        cfg.default_id = lock.default_id.clone();
+        #[cfg(target_os = "linux")]
+        {
+            cfg.device_binding = lock.device_binding.clone();
+        }
+    }
+
+    pub fn set(mut cfg: Config) -> bool {
         let mut lock = CONFIG.write().unwrap();
-        // Default identity belongs to this host, not to a synchronized settings snapshot.
-        cfg.default_id = lock.default_id.clone();""")
+        // Default identity belongs to the host service, not an empty/unprivileged snapshot.
+        if cfg.default_id.is_empty() {
+            cfg.default_id = lock.default_id.clone();
+        }
+        #[cfg(target_os = "linux")]
+        if cfg.device_binding.is_empty() {
+            cfg.device_binding = lock.device_binding.clone();
+        }""")
     change(name, """        Config::set_id(&new_id);
         log::info!("id updated from {} to {}", id, new_id);""", """        let mut config = CONFIG.write().unwrap();
         if config.default_id == id {
@@ -71,13 +86,32 @@ def apply(changes, root):
 }
 
 pub async fn set_config_async(name: &str, value: String) -> ResultType<()> {""")
+    change(
+        "src/ipc.rs",
+        "        Data::SyncConfig(Some(configs)) => {\n            let (config, config2) = *configs;",
+        "        Data::SyncConfig(Some(configs)) => {\n            let (mut config, config2) = *configs;\n            Config::preserve_host_identity(&mut config);",
+    )
     change("src/ui_interface.rs", """    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    let uuid = Bytes::from(""", """    change_id_registered(id, old_id).await
+    let uuid = Bytes::from(
+        hbb_common::machine_uid::get()
+            .unwrap_or("".to_owned())
+            .as_bytes()
+            .to_vec(),
+    );
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    let uuid = Bytes::from(hbb_common::get_uuid());""", """    change_id_registered(id, old_id).await
 }
 
 pub(crate) async fn change_id_registered(id: String, old_id: String) -> &'static str {
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    let uuid = Bytes::from(""")
+    let uuid = Bytes::from(hbb_common::get_uuid());""")
+    change("src/ui_interface.rs", """                            Ok(register_pk_response::Result::INVALID_ID_FORMAT) => {
+                                return INVALID_FORMAT;
+                            }""", """                            Ok(register_pk_response::Result::INVALID_ID_FORMAT) => {
+                                return INVALID_FORMAT;
+                            }
+                            Ok(register_pk_response::Result::UUID_MISMATCH) => {
+                                return "Device identity is not registered yet; wait for connection status Ready and retry";
+                            }""")
     change("src/ui_interface.rs", """        crate::ipc::set_config_async("id", id.to_owned()).await.ok();""", """        if crate::ipc::set_id_verified(id.to_owned()).await.is_err() {
             return "Failed to update local ID";
         }""")
@@ -123,6 +157,7 @@ pub fn main_change_id(new_id: String) {""")
         "Unable to read default ID": "无法读取默认 ID，请确认服务已启动。",
         "Failed to restore default ID": "恢复默认 ID 失败，请稍后重试。",
         "Failed to update local ID": "本机 ID 更新失败，请确认服务正常运行后重试。",
+        "Device identity is not registered yet; wait for connection status Ready and retry": "设备身份尚未完成注册，请等待状态就绪后重试。",
     }
     text = "".join("        (" + json.dumps(k) + ", " + json.dumps(v, ensure_ascii=False) + "),\n"
                    for k, v in entries.items())

@@ -17,11 +17,14 @@ use hbb_common::{
 };
 use std::{
     io::Write,
-    sync::{Arc, RwLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, RwLock,
+    },
     time::{Duration, Instant},
 };
 
-const USAGE: &str =
+pub(super) const USAGE: &str =
     "Usage: geodomdesk-cli exec --id ID --shell bash|powershell|pwsh --script PATH|-
        geodomdesk-cli exec --id ID --shell bash|powershell|pwsh --command TEXT
        geodomdesk-cli session --id ID [--shell SHELL] [authentication options]
@@ -30,7 +33,7 @@ const USAGE: &str =
                           {\"shell\":\"bash\",\"script\":\"pwd\",\"timeout\":120}
                           Results: JSON Lines; stdout/stderr are Base64 encoded
   tunnel open --id ID --remote-port PORT [--remote-host HOST] [--local-port PORT]
-                          Own a loopback TCP mapping (default: free local port, forced relay)
+                          Own a loopback TCP mapping (default: free local port; use --relay to force relay)
                           Keep stdin open; JSON controls status/close; EOF or exit cleans up
   tunnel list [--id ID]    List only live CLI-owned tunnels; includes owner and real status
   tunnel close --tunnel-id UUID [--id ID]
@@ -39,6 +42,7 @@ const USAGE: &str =
                           terminal: use GeodomDesk terminal; ssh: require SSH Bash
                           Session without --shell keeps the terminal transport
   --ssh-user USER         Target SSH login (default: authenticated peer username)
+  --ssh-host HOST         Target SSH host inside peer relay (default 127.0.0.1)
   --ssh-port PORT         Target SSH service port (default 22)
   --ssh-identity PATH     Use an SSH private key; otherwise agent/default keys or password
   --ask-ssh-password      Prompt without echo; automation: GEODOMDESK_SSH_PASSWORD
@@ -53,7 +57,7 @@ const USAGE: &str =
   --continue-on-error     Session only: keep queued commands after a completed command fails
                           Default: cancel unsent queued commands on failure; never replay
   --command TEXT          Execute an inline script instead of --script
-  session controls        {\"op\":\"status|reconnect|cancel|close\",\"id\":\"request-id\"}
+  session controls        {\"op\":\"status|reconnect|cancel|close|exit\",\"id\":\"request-id\"}
                           Commands may set \"connection\":\"fresh\" to replace the transport
                           exec processes always create independent fresh connections
   probe                   Authenticate and report capabilities; no user script is run
@@ -69,6 +73,7 @@ Environment: GEODOMDESK_ACCOUNT_PASSWORD, GEODOMDESK_DEVICE_PASSWORD,
 pub(super) enum Backend {
     Terminal(Stream),
     Ssh(super::ssh::Session),
+    Detached,
 }
 pub(super) struct Connection {
     pub(super) id: String,
@@ -82,22 +87,61 @@ pub(super) struct Connection {
     pub(super) setup_errors: Vec<super::stage::SetupError>,
     connect_elapsed: Duration,
 }
+impl Drop for Connection {
+    fn drop(&mut self) {
+        if let Backend::Terminal(stream) = &self.backend {
+            stream.close_webrtc();
+        }
+    }
+}
 
 impl Connection {
     pub(super) fn from_ssh(session:super::ssh::Session,elapsed:Duration)->Self {
+        let direct = session.tunnel.direct();
+        let transport = session.tunnel.transport();
         Self{id:uuid::Uuid::new_v4().to_string(),peer:session.tunnel.peer.clone(),
             setup_errors:session.tunnel.setup_errors.clone(),
-            backend:Backend::Ssh(session),direct:false,transport:"Relay",_keep_alive:None,_kcp:None,
+            backend:Backend::Ssh(session),direct,transport,_keep_alive:None,_kcp:None,
             connect_elapsed:elapsed}
     }
-    pub(super) fn encrypted(&self)->bool {match &self.backend {Backend::Terminal(stream)=>stream.is_secured(),Backend::Ssh(_)=>true}}
+    pub(super) fn direct(&self) -> bool {
+        self.direct
+    }
+    pub(super) fn transport(&self) -> &'static str {
+        self.transport
+    }
+    pub(super) fn into_forward_parts(
+        mut self,
+    ) -> ResultType<(
+        Stream,
+        Option<tokio::sync::mpsc::UnboundedSender<()>>,
+        Option<crate::kcp_stream::KcpStream>,
+        PeerInfo,
+        bool,
+        &'static str,
+    )> {
+        let stream = match std::mem::replace(&mut self.backend, Backend::Detached) {
+            Backend::Terminal(stream) => stream,
+            _ => bail!("Port forwarding requires a raw or multiplexed terminal stream"),
+        };
+        Ok((
+            stream,
+            self._keep_alive.take(),
+            self._kcp.take(),
+            std::mem::take(&mut self.peer),
+            self.direct,
+            self.transport,
+        ))
+    }
+    pub(super) fn encrypted(&self)->bool {match &self.backend {Backend::Terminal(stream)=>stream.is_secured(),Backend::Ssh(_)=>true,Backend::Detached=>false}}
     pub(super) fn terminal_stream(&mut self)->ResultType<&mut Stream> {
-        match &mut self.backend {Backend::Terminal(stream)=>Ok(stream),Backend::Ssh(_)=>bail!("This connection uses SSH")}
+        match &mut self.backend {Backend::Terminal(stream)=>Ok(stream),_=>bail!("This connection has no terminal stream")}
     }
     pub(super) async fn receive_idle(&mut self)->ResultType<Message> {
         match &mut self.backend {
             Backend::Terminal(stream)=>receive(stream).await,
             Backend::Ssh(session)=>{session.idle().await?;bail!("SSH channel closed")},
+            Backend::Detached => bail!("Connection detached"),
         }
     }
     pub(super) fn command_error(
@@ -118,11 +162,60 @@ impl Connection {
     }
 }
 
+pub(super) fn normalize_device_id(raw: &str) -> (String, String, bool) {
+    let trimmed = raw.trim();
+    let (peer_raw, server_opt) = match trimmed.split_once('@') {
+        Some((peer, server)) => (peer.trim(), Some(server.trim())),
+        None => (trimmed, None),
+    };
+    let (peer_stripped, peer_relay_suffix) = if let Some(prefix) = peer_raw.strip_suffix("/r") {
+        (prefix.trim(), true)
+    } else if let Some(prefix) = peer_raw.strip_suffix(r"\r") {
+        (prefix.trim(), true)
+    } else {
+        (peer_raw, false)
+    };
+    let (server_opt, server_relay_suffix) = match server_opt {
+        Some(server) if !server.contains('?') => {
+            if let Some(prefix) = server.strip_suffix("/r") {
+                (Some(prefix.trim()), true)
+            } else if let Some(prefix) = server.strip_suffix(r"\r") {
+                (Some(prefix.trim()), true)
+            } else {
+                (Some(server), false)
+            }
+        }
+        other => (other, false),
+    };
+    let relay_suffix = peer_relay_suffix || server_relay_suffix;
+    let peer = if !peer_stripped.is_empty()
+        && peer_stripped
+            .chars()
+            .all(|c| c.is_ascii_digit() || c.is_whitespace())
+    {
+        peer_stripped
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+    } else {
+        peer_stripped.to_owned()
+    };
+    let (connect_id, canonical_id) = match server_opt {
+        Some(server) if !server.is_empty() => {
+            let server_host = server.split('?').next().unwrap_or(server);
+            (format!("{peer}@{server}"), format!("{peer}@{server_host}"))
+        }
+        _ => (peer.clone(), peer),
+    };
+    (connect_id, canonical_id, relay_suffix)
+}
+
 #[derive(Clone)]
 pub(super) struct ConnectOptions {
+    pub(super) connect_id: String,
     pub(super) id: String,
     pub(super) relay: bool,
-    pub(super) token: String,
+    pub(super) token_override: Option<String>,
     pub(super) device_password: String,
     pub(super) admin: Option<auth::Credentials>,
     pub(super) timeout: u32,
@@ -131,42 +224,20 @@ pub(super) struct ConnectOptions {
     pub(super) ssh: Option<super::ssh::Options>,
 }
 impl ConnectOptions {
-    fn credential_bound(&self) -> bool {
+    fn current_token(&self) -> ResultType<String> {
+        if let Some(token) = &self.token_override {
+            return Ok(token.clone());
+        }
+        let token = hbb_common::config::LocalConfig::get_option_from_file("access_token");
+        if token.is_empty() {
+            bail!("Sign in to GeodomDesk first or supply --account-user");
+        }
+        Ok(token)
+    }
+    pub(super) fn credential_bound(&self) -> bool {
         self.admin.is_some() || !self.device_password.is_empty() || std::env::var_os("GEODOMDESK_DEVICE_CODE").is_some()
     }
-    pub(super) async fn open_forward(&self, host:&str, port:u16)->ResultType<Connection> {
-        let started=Instant::now();
-        let (mut connection,history)=super::stage::connect_with_recovery(Duration::from_secs(self.timeout.into()), self.credential_bound(), || {
-            connect_for(self.id.clone(),self.relay,self.token.clone(),self.device_password.clone(),None,Some((host,port)))
-        }).await?;
-        connection.connect_elapsed=started.elapsed();connection.setup_errors=history;
-        for (expected,actual,label) in [(&self.expected_platform,&connection.peer.platform,"platform"),(&self.expected_hostname,&connection.peer.hostname,"hostname")] {
-            if let Some(expected)=expected {if !expected.eq_ignore_ascii_case(actual) {
-                return Err(connection.command_error(super::stage::wrap(anyhow!("Target {label} mismatch: expected {expected}, received {actual}"),"target","not_started")));
-            }}
-        }
-        Ok(connection)
-    }
-    pub(super) async fn open(&self) -> ResultType<Connection> {
-        if let Some(ssh)=&self.ssh {
-            return tokio::time::timeout(Duration::from_secs(self.timeout.into()),super::ssh::open(self,ssh)).await
-                .context("SSH setup timed out before script dispatch").and_then(|v|v)
-                .map_err(|error|super::stage::wrap(error,"ssh","not_started"));
-        }
-        let started = Instant::now();
-        let (mut connection, history) =
-            super::stage::connect_with_recovery(Duration::from_secs(self.timeout.into()), self.credential_bound(), || {
-                connect(
-                    self.id.clone(),
-                    self.relay,
-                    self.token.clone(),
-                    self.device_password.clone(),
-                    self.admin.clone(),
-                )
-            })
-            .await?;
-        connection.connect_elapsed = started.elapsed();
-        connection.setup_errors = history;
+    fn verify_target(&self, connection: &Connection) -> ResultType<()> {
         for (expected, actual, label) in [
             (
                 &self.expected_platform,
@@ -189,6 +260,88 @@ impl ConnectOptions {
                 }
             }
         }
+        Ok(())
+    }
+    pub(super) async fn open_forward(&self, host: &str, port: u16, allow_mux: bool) -> ResultType<Connection> {
+        let started = Instant::now();
+        let token = self.current_token()?;
+        let (mut connection, history) = super::stage::connect_with_recovery(
+            Duration::from_secs(self.timeout.into()),
+            self.credential_bound(),
+            || {
+                connect_for(
+                    self.connect_id.clone(),
+                    self.relay,
+                    token.clone(),
+                    self.device_password.clone(),
+                    None,
+                    Some((host, port, allow_mux)),
+                    true,
+                )
+            },
+        )
+        .await?;
+        connection.connect_elapsed = started.elapsed();
+        connection.setup_errors = history;
+        self.verify_target(&connection)?;
+        Ok(connection)
+    }
+    pub(super) async fn open(&self) -> ResultType<Connection> {
+        self.open_with_keep_alive(true).await
+    }
+    pub(super) async fn open_with_keep_alive(&self, keep_alive: bool) -> ResultType<Connection> {
+        let mut ssh_fallback_errors = Vec::new();
+        if let Some(ssh) = &self.ssh {
+            let ssh_started = Instant::now();
+            let attempt = tokio::time::timeout(
+                Duration::from_secs(self.timeout.into()),
+                super::ssh::open(self, ssh),
+            )
+            .await
+            .context("SSH setup timed out before script dispatch")
+            .and_then(|v| v);
+            match attempt {
+                Ok(connection) => return Ok(connection),
+                Err(error) => {
+                    let wrapped = if error.downcast_ref::<super::stage::Stage>().is_none() {
+                        super::stage::wrap(error, "ssh", "not_started")
+                    } else {
+                        error
+                    };
+                    if !ssh.allow_fallback
+                        || !(wrapped.is::<ForwardUnavailable>() || wrapped.is::<super::ssh::MissingProgram>())
+                    {
+                        return Err(wrapped);
+                    }
+                    ssh_fallback_errors.push(super::stage::SetupError::new(
+                        &wrapped,
+                        ssh_started.elapsed(),
+                    ));
+                }
+            }
+        }
+        let started = Instant::now();
+        let token = self.current_token()?;
+        let (mut connection, history) = super::stage::connect_with_recovery(
+            Duration::from_secs(self.timeout.into()),
+            self.credential_bound(),
+            || {
+                connect_for(
+                    self.connect_id.clone(),
+                    self.relay,
+                    token.clone(),
+                    self.device_password.clone(),
+                    self.admin.clone(),
+                    None,
+                    keep_alive,
+                )
+            },
+        )
+        .await?;
+        connection.connect_elapsed = started.elapsed();
+        ssh_fallback_errors.extend(history);
+        connection.setup_errors = ssh_fallback_errors;
+        self.verify_target(&connection)?;
         Ok(connection)
     }
 }
@@ -208,13 +361,13 @@ pub(super) fn connection_info(
         "terminal":connection.peer.features.terminal,"terminal_exec":connection.peer.features.terminal_exec,
         "protocol":if connection.peer.features.terminal_exec {"exec"} else if connection.peer.features.terminal {"legacy"} else {"none"},
         "max_script_bytes":MAX_SCRIPT,"max_output_bytes":MAX_OUTPUT,"default_timeout":timeout,
-        "session_controls":["status","reconnect","cancel","close"],"connection_policy":["reuse","fresh"]
+        "session_controls":["status","reconnect","cancel","close","exit"],"connection_policy":["reuse","fresh"]
     });
     if let Backend::Ssh(session)=&connection.backend {
         info["protocol"]=serde_json::json!("ssh");
         info["command_transport"]=serde_json::json!("ssh-relay");
+        info["ssh_destination"]=serde_json::json!(session.destination);
         info["tunnel"]=session.tunnel.snapshot();
-        info["terminal"]=serde_json::json!(true);
     } else {info["command_transport"]=serde_json::json!("terminal");}
     if !connection.setup_errors.is_empty() {
         info["setup_errors"] = serde_json::json!(connection.setup_errors);
@@ -223,13 +376,27 @@ pub(super) fn connection_info(
 }
 
 #[derive(Clone)]
-struct TerminalClient(Arc<RwLock<LoginConfigHandler>>);
+struct TerminalClient {
+    lch: Arc<RwLock<LoginConfigHandler>>,
+    prompted_password: Arc<AtomicBool>,
+}
+
+impl TerminalClient {
+    fn new(login: LoginConfigHandler) -> Self {
+        Self {
+            lch: Arc::new(RwLock::new(login)),
+            prompted_password: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
 
 #[async_trait::async_trait]
 impl Interface for TerminalClient {
     fn send(&self, _: Data) {}
     fn msgbox(&self, kind: &str, title: &str, text: &str, _: &str) {
-        if kind == "error" {
+        if kind == "input-password" {
+            self.prompted_password.store(true, Ordering::Release);
+        } else if kind == "error" {
             eprintln!("{title}: {text}");
         }
     }
@@ -239,7 +406,7 @@ impl Interface for TerminalClient {
     fn handle_peer_info(&self, _: PeerInfo) {}
     fn set_multiple_windows_session(&self, _: Vec<WindowsSession>) {}
     fn get_lch(&self) -> Arc<RwLock<LoginConfigHandler>> {
-        self.0.clone()
+        self.lch.clone()
     }
     async fn handle_hash(
         &self,
@@ -284,53 +451,110 @@ pub(super) async fn receive(stream: &mut Stream) -> ResultType<Message> {
     }
 }
 
-async fn connect(
+#[derive(Debug)]
+pub(super) struct ForwardUnavailable(String);
+
+impl std::fmt::Display for ForwardUnavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+impl std::error::Error for ForwardUnavailable {}
+
+fn forward_unavailable(error: &str, host: &str, port: u16) -> bool {
+    let address = format!("{host}:{port}");
+    error == format!("Failed to access remote {address}, please make sure if it is open")
+        || error == format!("Failed to access remote {address}. Please make sure it is reachable/open.")
+}
+
+async fn connect_for(
     id: String,
     relay: bool,
     token: String,
     device_password: String,
-    admin: Option<auth::Credentials>,
+    mut admin: Option<auth::Credentials>,
+    forward: Option<(&str, u16, bool)>,
+    keep_alive: bool,
 ) -> ResultType<Connection> {
-    connect_for(id, relay, token, device_password, admin, None).await
-}
-
-async fn connect_for(
-    id: String, relay: bool, token: String, device_password: String,
-    mut admin: Option<auth::Credentials>, forward: Option<(&str,u16)>,
-) -> ResultType<Connection> {
-    let conn_type=if forward.is_some(){ConnType::PORT_FORWARD}else{ConnType::TERMINAL};
+    let conn_type = if forward.is_some() {
+        ConnType::PORT_FORWARD
+    } else {
+        ConnType::TERMINAL
+    };
     let mut login = LoginConfigHandler::default();
     login.initialize(id, conn_type, None, relay, None, None, None, "");
-    if let Some((host,port))=forward {login.port_forward=(host.to_owned(),i32::from(port));}
+    if let Some((host, port, allow_mux)) = forward {
+        login.port_forward = (host.to_owned(), i32::from(port));
+        login.port_forward_multiplex = allow_mux;
+    }
     login.terminal_one_shot = true;
     login.is_terminal_admin = admin.is_some();
     let is_admin = login.is_terminal_admin;
-    let interface = TerminalClient(Arc::new(RwLock::new(login)));
+    let interface = TerminalClient::new(login);
     let id = interface.get_id();
-    let key = crate::get_key(false).await;
+    let key = crate::get_key(true).await;
     let ((mut stream, direct, pk, kcp, transport), (feedback, rendezvous)) =
-        Client::start(&id, &key, &token, conn_type, interface.clone()).await?;
+        Client::start(&id, &key, &token, conn_type, interface.clone())
+            .await
+            .map_err(|err| super::stage::wrap(err, "connect", "not_started"))?;
     if !stream.is_secured() {
         return Err(super::stage::wrap(anyhow!("Remote command execution requires an encrypted peer connection"), "security", "not_started"));
     }
     interface.update_direct(Some(direct));
     let mut trust = {
         let login = interface
-            .0
+            .lch
             .read()
             .map_err(|_| anyhow!("Login state unavailable"))?;
         Session::new(&login, true, pk.as_deref())?
     };
-    let keep_alive = client::hc_connection(feedback, rendezvous, &token).await;
+    let keep_alive = if keep_alive {
+        client::hc_connection(feedback, rendezvous, &token).await
+    } else {
+        None
+    };
     let mut sent_device_code = false;
+    let mut credentials_sent = false;
     loop {
-        match receive(&mut stream).await?.union {
+        let msg = if interface.prompted_password.load(Ordering::Acquire)
+            && !is_admin
+            && device_password.is_empty()
+        {
+            match tokio::time::timeout(Duration::from_secs(10), receive(&mut stream)).await {
+                Ok(res) => res.map_err(|err| {
+                    super::stage::wrap(
+                        anyhow!("{err} (No saved device password; use --ask-device-password or set GEODOMDESK_DEVICE_PASSWORD)"),
+                        "authentication",
+                        "not_started",
+                    )
+                })?,
+                Err(_) => {
+                    return Err(super::stage::wrap(
+                        anyhow!("No saved device password; use --ask-device-password or set GEODOMDESK_DEVICE_PASSWORD"),
+                        "authentication",
+                        "not_started",
+                    ));
+                }
+            }
+        } else {
+            receive(&mut stream).await.map_err(|err| {
+                let phase = if credentials_sent { "authentication" } else { "connect" };
+                super::stage::wrap(err, phase, "not_started")
+            })?
+        };
+        match msg.union {
             Some(message::Union::Hash(hash)) => {
+                if !device_password.is_empty() || is_admin {
+                    credentials_sent = true;
+                }
                 if !interface
                     .handle_hash(&device_password, hash, &mut trust, &mut stream)
                     .await
                 {
                     return Err(super::stage::wrap(anyhow!("Device authentication could not be started"), "authentication", "not_started"));
+                }
+                if !interface.prompted_password.load(Ordering::Acquire) {
+                    credentials_sent = true;
                 }
                 if is_admin {
                     let credentials = admin.take().context("Administrator login was rejected")?;
@@ -342,7 +566,11 @@ async fn connect_for(
                 match trust.respond(response, &interface).await.union {
                     Some(login_response::Union::PeerInfo(info)) => {
                         if is_admin && (admin.is_some() || info.platform != "Windows") {
-                            bail!("Administrator terminal login requires a Windows target");
+                            return Err(super::stage::wrap(
+                                anyhow!("Administrator terminal login requires a Windows target"),
+                                "capability",
+                                "not_started",
+                            ));
                         }
                         stream.set_max_packet_length(1024 * 1024);
                         return Ok(Connection {
@@ -359,6 +587,7 @@ async fn connect_for(
                     }
                     Some(login_response::Union::Error(error)) => match error.as_str() {
                         client::REQUIRE_2FA if !sent_device_code => {
+                            credentials_sent = true;
                             let mut message = Message::new();
                             message.set_auth_2fa(Auth2FA {
                                 code: auth::device_code().map_err(|error| super::stage::wrap(error,"authentication","not_started"))?,
@@ -369,6 +598,19 @@ async fn connect_for(
                         }
                         client::LOGIN_MSG_PASSWORD_EMPTY | client::LOGIN_MSG_PASSWORD_WRONG => {
                             return Err(super::stage::wrap(anyhow!("{error}. Use --ask-device-password or set GEODOMDESK_DEVICE_PASSWORD"),"authentication","not_started"));
+                        }
+                        _ if forward.is_some_and(|(host, port, _)| forward_unavailable(&error, host, port)) => {
+                            return Err(super::stage::wrap(ForwardUnavailable(error).into(), "forward_target", "not_started"));
+                        }
+                        _ if error.starts_with("Failed to access remote ") => {
+                            return Err(super::stage::wrap(anyhow!("{error}"), "connect", "not_started"));
+                        }
+                        _ if error.contains("not allowed")
+                            || error.contains("disabled")
+                            || error.contains("permission")
+                            || error.contains("Unsupported") =>
+                        {
+                            return Err(super::stage::wrap(anyhow!("{error}"), "capability", "not_started"));
                         }
                         _ => return Err(super::stage::wrap(anyhow!("{error}"),"authentication","not_started")),
                     },
@@ -420,7 +662,7 @@ pub(super) async fn receive_terminal_response(stream: &mut Stream) -> ResultType
     }
 }
 
-pub async fn run_cli(args: impl Iterator<Item = String>) -> ResultType<i32> {
+pub(super) async fn run_cli(args: impl Iterator<Item = String>) -> ResultType<i32> {
     let args: Vec<_> = args.collect();
     let json = input::wants_json(&args)
         || matches!(args.first().map(String::as_str), Some("session" | "probe" | "tunnel"));
@@ -457,44 +699,80 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
     }
     let (mut id, mut shell, mut script) = (None, None, None);
     let mut command = None;
-    let mut local_port=0u16;
-    let mut remote_port=None;
-    let mut remote_host="127.0.0.1".to_owned();
-    let mut command_transport="auto".to_owned();
-    let mut ssh_user=None;
-    let mut ssh_port=22u16;
-    let mut ssh_identity=None;
-    let mut ssh_known_hosts=None;
+    let mut ssh_user = None;
+    let mut ssh_host = None;
+    let mut ssh_port = None;
+    let mut ssh_identity = None;
+    let mut ssh_known_hosts = None;
     let mut ssh_strict=false;
     let mut ask_ssh_password=false;
     let mut json = false;
-    let mut connect_timeout = 60u32;
+    let mut connect_timeout = None;
     let mut expected_platform = None;
     let mut expected_hostname = None;
     let mut continue_on_error = false;
     let (mut account_user, mut admin_user) = (None, None);
-    let mut timeout = 15u32;
+    let mut timeout = None;
+    let mut local_port = None;
+    let mut remote_port = None;
+    let mut remote_host = None;
+    let mut command_transport = None;
     let mut relay = false;
     let mut ask_device_password = false;
     let mut non_interactive = false;
-    while let Some(flag) = args.next() {
-        match flag.as_str() {
+    while let Some(arg) = args.next() {
+        let (flag, inline) = match arg.split_once('=') {
+            Some((name, val)) => (name, Some(val.to_owned())),
+            None => (arg.as_str(), None),
+        };
+        let reject_inline = || -> ResultType<()> {
+            if inline.is_some() {
+                bail!("Option {flag} does not take a value");
+            }
+            Ok(())
+        };
+        match flag {
             "--help" | "-h" => {
                 println!("{USAGE}");
                 return Ok(0);
             }
-            "--relay" => relay = true,
-            "--ssh-strict-host-key"=>ssh_strict=true,
-            "--ask-ssh-password"=>ask_ssh_password=true,
-            "--json" => json = true,
-            "--continue-on-error" => continue_on_error = true,
-            "--ask-device-password" => ask_device_password = true,
-            "--non-interactive" => non_interactive = true,
+            "--relay" => {
+                reject_inline()?;
+                relay = true;
+            }
+            "--ssh-strict-host-key" => {
+                reject_inline()?;
+                ssh_strict = true;
+            }
+            "--ask-ssh-password" => {
+                reject_inline()?;
+                ask_ssh_password = true;
+            }
+            "--json" => {
+                reject_inline()?;
+                json = true;
+            }
+            "--continue-on-error" => {
+                reject_inline()?;
+                continue_on_error = true;
+            }
+            "--ask-device-password" => {
+                reject_inline()?;
+                ask_device_password = true;
+            }
+            "--non-interactive" => {
+                reject_inline()?;
+                non_interactive = true;
+            }
             _ => {
-                let value = args
-                    .next()
-                    .with_context(|| format!("Missing value for {flag}"))?;
-                match flag.as_str() {
+                if !input::takes_value(flag) {
+                    bail!("Unknown option: {flag}");
+                }
+                let value = match inline {
+                    Some(v) => v,
+                    None => args.next().with_context(|| format!("Missing value for {flag}"))?,
+                };
+                match flag {
                     "--id" => {
                         if id.is_some() {
                             bail!("Specify --id exactly once; the target must not be silently replaced");
@@ -514,6 +792,9 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
                         expected_hostname = Some(value);
                     }
                     "--shell" => {
+                        if shell.is_some() {
+                            bail!("Specify --shell only once");
+                        }
                         shell = Some(match value.as_str() {
                             "bash" => ExecShell::BASH,
                             "powershell" => ExecShell::WINDOWS_POWERSHELL,
@@ -533,30 +814,115 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
                         }
                         command = Some(value);
                     }
-                    "--transport"=>{if !matches!(value.as_str(),"auto"|"terminal"|"ssh"){bail!("transport must be auto, terminal or ssh");}command_transport=value;},
-                    "--ssh-user"=>{if ssh_user.is_some(){bail!("Specify --ssh-user only once");}ssh_user=Some(value);},
-                    "--ssh-port"=>ssh_port=value.parse().context("Invalid SSH port")?,
-                    "--ssh-identity"=>ssh_identity=Some(std::path::PathBuf::from(value)),
-                    "--ssh-known-hosts"=>ssh_known_hosts=Some(std::path::PathBuf::from(value)),
-                    "--local-port" if tunnel=>local_port=value.parse().context("Invalid local port")?,
-                    "--remote-port" if tunnel=>{if remote_port.is_some(){bail!("Specify --remote-port only once");}remote_port=Some(value.parse::<u16>().context("Invalid remote port")?);},
-                    "--remote-host" if tunnel=>remote_host=value,
-                    "--connect-timeout" => {
-                        connect_timeout = value.parse().context("Invalid connection timeout")?
+                    "--transport" => {
+                        if command_transport.is_some() {
+                            bail!("Specify --transport only once");
+                        }
+                        if !matches!(value.as_str(), "auto" | "terminal" | "ssh") {
+                            bail!("transport must be auto, terminal or ssh");
+                        }
+                        command_transport = Some(value);
                     }
-                    "--timeout" => timeout = value.parse().context("Invalid timeout")?,
-                    "--account-user" => account_user = Some(value),
-                    "--admin-user" => admin_user = Some(value),
+                    "--ssh-user" => {
+                        if ssh_user.is_some() {
+                            bail!("Specify --ssh-user only once");
+                        }
+                        ssh_user = Some(value);
+                    }
+                    "--ssh-host" => {
+                        if ssh_host.is_some() {
+                            bail!("Specify --ssh-host only once");
+                        }
+                        ssh_host = Some(value);
+                    }
+                    "--ssh-port" => {
+                        if ssh_port.is_some() {
+                            bail!("Specify --ssh-port only once");
+                        }
+                        ssh_port = Some(value.parse().context("Invalid SSH port")?);
+                    }
+                    "--ssh-identity" => {
+                        if ssh_identity.is_some() {
+                            bail!("Specify --ssh-identity only once");
+                        }
+                        ssh_identity = Some(std::path::PathBuf::from(value));
+                    }
+                    "--ssh-known-hosts" => {
+                        if ssh_known_hosts.is_some() {
+                            bail!("Specify --ssh-known-hosts only once");
+                        }
+                        ssh_known_hosts = Some(std::path::PathBuf::from(value));
+                    }
+                    "--local-port" if tunnel => {
+                        if local_port.is_some() {
+                            bail!("Specify --local-port only once");
+                        }
+                        local_port = Some(value.parse().context("Invalid local port")?);
+                    }
+                    "--remote-port" if tunnel => {
+                        if remote_port.is_some() {
+                            bail!("Specify --remote-port only once");
+                        }
+                        remote_port = Some(value.parse::<u16>().context("Invalid remote port")?);
+                    }
+                    "--remote-host" if tunnel => {
+                        if remote_host.is_some() {
+                            bail!("Specify --remote-host only once");
+                        }
+                        remote_host = Some(value);
+                    }
+                    "--connect-timeout" => {
+                        if connect_timeout.is_some() {
+                            bail!("Specify --connect-timeout only once");
+                        }
+                        connect_timeout = Some(value.parse().context("Invalid connection timeout")?);
+                    }
+                    "--timeout" => {
+                        if timeout.is_some() {
+                            bail!("Specify --timeout only once");
+                        }
+                        timeout = Some(value.parse().context("Invalid timeout")?);
+                    }
+                    "--account-user" => {
+                        if account_user.is_some() {
+                            bail!("Specify --account-user only once");
+                        }
+                        account_user = Some(value);
+                    }
+                    "--admin-user" => {
+                        if admin_user.is_some() {
+                            bail!("Specify --admin-user only once");
+                        }
+                        admin_user = Some(value);
+                    }
                     _ => bail!("Unknown option: {flag}"),
                 }
             }
         }
     }
-    let id = id.map(|id|id.trim().to_owned())
+    if tunnel && timeout.is_some() {
+        bail!("tunnel open uses --connect-timeout, not --timeout");
+    }
+    let timeout = timeout.unwrap_or(15u32);
+    let connect_timeout = connect_timeout.unwrap_or(60u32);
+    let local_port = local_port.unwrap_or(0u16);
+    let remote_host = remote_host
+        .map(|h| h.trim().to_owned())
+        .unwrap_or_else(|| "127.0.0.1".to_owned());
+    let command_transport = command_transport.unwrap_or_else(|| "auto".to_owned());
+    let ssh_host_set = ssh_host.is_some();
+    let ssh_host = ssh_host
+        .map(|h| h.trim().to_owned())
+        .unwrap_or_else(|| "127.0.0.1".to_owned());
+    let ssh_port_set = ssh_port.is_some();
+    let ssh_port = ssh_port.unwrap_or(22u16);
+    let raw_id = id.map(|id| id.trim().to_owned())
         .filter(|id| !id.is_empty()).context("Missing --id")?;
-    let id=if id.chars().all(|c|c.is_ascii_digit() || c.is_ascii_whitespace()) {
-        id.chars().filter(|c|!c.is_ascii_whitespace()).collect()
-    } else {id};
+    let (connect_id, id, relay_suffix) = normalize_device_id(&raw_id);
+    if id.is_empty() {
+        bail!("Missing --id");
+    }
+    relay |= relay_suffix;
     if !(1..=super::MAX_TIMEOUT).contains(&timeout) {
         bail!(
             "Timeout must be between 1 and {} seconds",
@@ -590,8 +956,17 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
         }
     }
     let use_ssh=!tunnel && (command_transport=="ssh" || (command_transport=="auto" && shell==Some(ExecShell::BASH)));
-    if use_ssh && (ssh_port==0 || admin_user.is_some() || shell.is_some_and(|shell|shell!=ExecShell::BASH)) {bail!("SSH transport requires Bash, a valid SSH port and a Linux login");}
-    if !use_ssh && (ssh_user.is_some() || ssh_identity.is_some() || ssh_known_hosts.is_some() || ssh_strict || ask_ssh_password || ssh_port!=22) {bail!("SSH options require --shell bash or --transport ssh");}
+    let ssh_fallback_to_terminal = use_ssh
+        && command_transport == "auto"
+        && ssh_user.is_none()
+        && !ssh_host_set
+        && ssh_identity.is_none()
+        && ssh_known_hosts.is_none()
+        && !ssh_strict
+        && !ask_ssh_password
+        && !ssh_port_set;
+    if use_ssh && (ssh_port==0 || admin_user.is_some() || shell.is_some_and(|shell|shell!=ExecShell::BASH) || ssh_host.trim().is_empty() || ssh_host.len()>253 || ssh_host.chars().any(char::is_control)) {bail!("SSH transport requires Bash, a valid SSH host/port and a Linux login");}
+    if !use_ssh && (ssh_user.is_some() || ssh_host_set || ssh_identity.is_some() || ssh_known_hosts.is_some() || ssh_strict || ask_ssh_password || ssh_port_set) {bail!("SSH options require --shell bash or --transport ssh");}
     if use_ssh && shell.is_none(){shell=Some(ExecShell::BASH);}
     let ssh=if use_ssh {
         let password=match std::env::var("GEODOMDESK_SSH_PASSWORD") {
@@ -601,7 +976,8 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
             },Err(std::env::VarError::NotPresent)=>None,Err(std::env::VarError::NotUnicode(_))=>bail!("GEODOMDESK_SSH_PASSWORD must be valid Unicode"),
         };
         let mut askpass=std::env::current_exe()?;askpass.set_file_name(if cfg!(windows){"geodomdesk-cli.exe"}else{"geodomdesk-cli"});
-        Some(super::ssh::Options{username:ssh_user,port:ssh_port,identity:ssh_identity,
+        Some(super::ssh::Options{host:ssh_host,username:ssh_user,port:ssh_port,identity:ssh_identity,
+            allow_fallback:ssh_fallback_to_terminal && password.is_none(),
             known_hosts:ssh_known_hosts.unwrap_or_else(||hbb_common::config::Config::path("cli-ssh-known_hosts")),strict_host_key:ssh_strict,password,askpass})
     } else {None};
     let is_admin = admin_user.is_some();
@@ -626,17 +1002,24 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
         validate(&request)?;
         Some(request)
     };
+    sync_local_service_config().await;
     if hbb_common::config::is_incoming_only() {
         bail!("Incoming-only mode");
     }
-    let token = auth::account_token(account_user, non_interactive).await?;
+    let token_override = if account_user.is_some() {
+        Some(auth::account_token(account_user, non_interactive).await?)
+    } else {
+        let _ = auth::account_token(None, non_interactive).await?;
+        None
+    };
     let device_password = auth::device_password(ask_device_password, non_interactive)?;
     let admin = auth::admin_credentials(admin_user, non_interactive)?;
     let connecting = Instant::now();
     let options = ConnectOptions {
+        connect_id,
         id,
         relay,
-        token,
+        token_override,
         device_password,
         admin,
         timeout: connect_timeout,
@@ -645,17 +1028,27 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
         ssh,
     };
     if tunnel {
-        return super::tunnel::Managed::start(&options,local_port,remote_host,remote_port.context("Missing --remote-port")?,"port proxy").await?.serve().await;
+        let port = remote_port.context("Missing --remote-port")?;
+        return Box::pin(async move {
+            super::tunnel::Managed::start(&options, local_port, remote_host, port, "port proxy")
+                .await?
+                .serve()
+                .await
+        })
+        .await;
     }
-    let mut connection = options.open().await?;
+    let keep_alive = session || options.ssh.is_some();
+    let mut connection =
+        wait_or_interrupt(Box::pin(options.open_with_keep_alive(keep_alive))).await?;
     let setup_elapsed = started.elapsed();
     let info = connection_info(&connection, timeout, connecting.elapsed(), setup_elapsed);
+    connection.setup_errors.clear();
     if probe {
         output::write(info)?;
         return Ok(0);
     }
     if session {
-        return session::run(
+        return Box::pin(session::run(
             connection,
             options,
             is_admin,
@@ -663,14 +1056,24 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
             shell,
             info,
             continue_on_error,
-        )
+        ))
         .await;
     }
     let execution = Instant::now();
     let request = request.context("Missing command")?;
-    let result = session::execute_with_setup_recovery(&mut connection, &options, request, 1)
-        .await
-        .map_err(|error| connection.command_error(error))?;
+    let result = match wait_or_interrupt(Box::pin(async {
+        session::execute_with_setup_recovery(&mut connection, &options, request, 1)
+            .await
+            .map_err(|error| connection.command_error(error))
+    }))
+    .await
+    {
+        Ok(res) => res,
+        Err(error) => {
+            drop(connection);
+            return Err(error);
+        }
+    };
     if json {
         let mut value = output::result(None, &result, execution.elapsed());
         value["connection"] = connection_info(
@@ -681,7 +1084,7 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
         );
         output::write(value)?;
         return Ok(if result.error.is_empty() {
-            result.exit_code
+            process_exit_code(result.exit_code)
         } else {
             1
         });
@@ -691,7 +1094,55 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
     }
     std::io::stdout().write_all(&result.stdout)?;
     std::io::stderr().write_all(&result.stderr)?;
-    Ok(result.exit_code)
+    std::io::stdout().flush()?;
+    std::io::stderr().flush()?;
+    Ok(process_exit_code(result.exit_code))
+}
+
+async fn wait_or_interrupt<T>(
+    fut: std::pin::Pin<Box<dyn std::future::Future<Output = ResultType<T>> + Send + '_>>,
+) -> ResultType<T> {
+    #[cfg(unix)]
+    let mut sigterm =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    tokio::select! {
+        res = fut => res,
+        sig = tokio::signal::ctrl_c() => {
+            sig?;
+            bail!("Interrupted");
+        }
+        _ = async {
+            #[cfg(unix)]
+            { sigterm.recv().await; }
+            #[cfg(not(unix))]
+            { std::future::pending::<()>().await; }
+        } => {
+            bail!("Terminated");
+        }
+    }
+}
+
+fn process_exit_code(code: i32) -> i32 {
+    #[cfg(unix)]
+    if code != 0 && (code & 0xff) == 0 {
+        return 1;
+    }
+    code
+}
+
+async fn sync_local_service_config() {
+    if let Ok(mut conn) = crate::ipc::connect(150, "").await {
+        if conn.send(&crate::ipc::Data::SyncConfig(None)).await.is_ok() {
+            if let Ok(Some(crate::ipc::Data::SyncConfig(Some(configs)))) =
+                conn.next_timeout(150).await
+            {
+                let (mut config, config2) = *configs;
+                hbb_common::config::Config::preserve_host_identity(&mut config);
+                hbb_common::config::Config::set(config);
+                hbb_common::config::Config2::set(config2);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -807,7 +1258,7 @@ mod tests {
         );
         login.is_terminal_admin = true;
         login.terminal_one_shot = true;
-        let interface = TerminalClient(Arc::new(RwLock::new(login)));
+        let interface = TerminalClient::new(login);
         let mut trust = Session::default();
         let hash = Hash {
             salt: "salt".into(),

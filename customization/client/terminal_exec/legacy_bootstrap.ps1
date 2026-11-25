@@ -42,19 +42,32 @@ $parts = $payload.Split(':', 2)
 $script = $utf8.GetString([Convert]::FromBase64String($parts[1]))
 [Console]::WriteLine("`n${marker}:START")
 $window = 0
-$script | & $shell -NoLogo -NoProfile -NonInteractive -EncodedCommand $parts[0] 2>&1 | ForEach-Object {
-    $bytes = $utf8.GetBytes($_.ToString() + "`n")
-    # Base64 plus the marker must fit the 160-column ConPTY to preserve scrollback.
-    for ($offset = 0; $offset -lt $bytes.Length; $offset += 84) {
-        $record = [Convert]::ToBase64String($bytes, $offset, [Math]::Min(84, $bytes.Length - $offset))
-        [Console]::WriteLine("`n${marker}:DATA:$record")
-        $window++
-        # Keep records and separators inside the old 24-row console viewport.
-        if ($window % 8 -eq 0) {
-            [Console]::WriteLine("`n${marker}:WINDOW`n")
-            if ([Console]::ReadLine() -ne 'GDOUTPUT') { exit 1 }
-        }
+$buf = [Collections.Generic.List[byte]]::new(168)
+function Flush-GdChunk([byte[]]$chunk) {
+    $record = [Convert]::ToBase64String($chunk)
+    [Console]::WriteLine("`n${marker}:DATA:$record")
+    $script:window++
+    # Keep records and separators inside the old 24-row console viewport.
+    if ($script:window % 8 -eq 0) {
+        [Console]::WriteLine("`n${marker}:WINDOW`n")
+        if ([Console]::ReadLine() -ne 'GDOUTPUT') { exit 1 }
     }
 }
-$code = $LASTEXITCODE
+$script | & $shell -NoLogo -NoProfile -NonInteractive -EncodedCommand $parts[0] 2>&1 | ForEach-Object {
+    $bytes = $utf8.GetBytes($_.ToString() + "`n")
+    $buf.AddRange($bytes)
+    $off = 0
+    while ($buf.Count - $off -ge 84) {
+        $chunk = $buf.GetRange($off, 84).ToArray()
+        $off += 84
+        Flush-GdChunk $chunk
+    }
+    if ($off -gt 0) {
+        $buf.RemoveRange(0, $off)
+    }
+}
+if ($buf.Count -gt 0) {
+    Flush-GdChunk ($buf.ToArray())
+}
+$code = if ($null -eq $LASTEXITCODE) { 0 } else { $LASTEXITCODE }
 [Console]::WriteLine("`n${marker}:END:$code`n")

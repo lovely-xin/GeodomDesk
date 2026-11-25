@@ -6,12 +6,23 @@ use std::{
 
 #[cfg(any(windows, target_os = "linux"))]
 fn run() -> io::Result<i32> {
-    let mut executable = env::current_exe()?;
-    executable.set_file_name(if cfg!(windows) {
+    let name = if cfg!(windows) {
         "GeodomDesk.exe"
     } else {
         "geodomdesk"
-    });
+    };
+    let current = env::current_exe()?;
+    let mut executable = current.clone();
+    executable.set_file_name(name);
+    if !executable.is_file() {
+        if let Ok(resolved) = std::fs::canonicalize(&current) {
+            let mut candidate = resolved;
+            candidate.set_file_name(name);
+            if candidate.is_file() {
+                executable = candidate;
+            }
+        }
+    }
     let mut command = Command::new(executable);
     command
         .arg("--terminal-cli")
@@ -26,7 +37,18 @@ fn run() -> io::Result<i32> {
     }
     #[cfg(windows)]
     {
-        Ok(command.status()?.code().unwrap_or(1))
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn SetConsoleCtrlHandler(
+                handler: Option<unsafe extern "system" fn(u32) -> i32>,
+                add: i32,
+            ) -> i32;
+        }
+        let mut child = command.spawn()?;
+        unsafe {
+            let _ = SetConsoleCtrlHandler(None, 1);
+        }
+        Ok(child.wait()?.code().unwrap_or(1))
     }
 }
 
@@ -35,7 +57,13 @@ fn main() {
     if env::var("GEODOMDESK_CLI_SSH_ASKPASS").as_deref()==Ok("1") {
         use std::io::Write;
         let prompt=env::args().nth(1).unwrap_or_default().to_ascii_lowercase();
-        if !prompt.contains("password:") {std::process::exit(1);}
+        if !prompt.contains("password")
+            || prompt.contains("passphrase")
+            || prompt.contains("yes/no")
+            || prompt.contains("fingerprint")
+        {
+            std::process::exit(1);
+        }
         let password=env::var("GEODOMDESK_SSH_PASSWORD").unwrap_or_default();
         if password.contains(['\r','\n']) {std::process::exit(1);}
         std::process::exit(if writeln!(io::stdout().lock(),"{password}").is_ok(){0}else{1});

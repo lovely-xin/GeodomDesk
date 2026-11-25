@@ -81,7 +81,8 @@ class DownloadTests(unittest.TestCase):
                     return
                 result = publisher.download(asset, cache, {"Authorization": "Bearer test-only"})
                 self.assertEqual(result.read_bytes(), data)
-            self.assertEqual(len(requests), 6)
+            expected_ranges = (len(data) + publisher.RANGE_CHUNK_BYTES - 1) // publisher.RANGE_CHUNK_BYTES
+            self.assertEqual(len(requests), 1 + expected_ranges)
             self.assertTrue(requests[0].get_header("Authorization"))
             self.assertTrue(all(not r.get_header("Authorization") for r in requests[1:]))
             with mock.patch.object(
@@ -90,6 +91,64 @@ class DownloadTests(unittest.TestCase):
                 side_effect=AssertionError("Unexpected download"),
             ):
                 self.assertEqual(publisher.download(asset, cache, {}), result)
+
+    def test_range_retries_refresh_expired_redirect_and_prune_cache(self):
+        import publisher
+
+        data = b"R" * (publisher.RANGE_CHUNK_BYTES + 128)
+        calls = []
+
+        class Response(io.BytesIO):
+            status = 206
+
+            def __init__(self, start, end, redirect_url):
+                super().__init__(data[start : end + 1])
+                self.headers = {"Content-Range": f"bytes {start}-{end}/{len(data)}"}
+                self._url = redirect_url
+
+            def geturl(self):
+                return self._url
+
+        class Opener:
+            def __init__(self):
+                self.version = 1
+                self.failed_once = False
+
+            def open(self, request, **kwargs):
+                url = request.full_url
+                calls.append(url)
+                start, end = map(int, request.get_header("Range").removeprefix("bytes=").split("-"))
+                if url.startswith("https://api.github.com/"):
+                    return Response(start, end, f"https://cdn.example/v{self.version}")
+                if not self.failed_once and start > 0:
+                    self.failed_once = True
+                    self.version = 2
+                    raise publisher.urllib.error.HTTPError(
+                        url, 403, "Expired redirect", {}, None
+                    )
+                return Response(start, end, url)
+
+        with tempfile.TemporaryDirectory(prefix="geodomdesk-retry-test-") as tmp:
+            cache = Path(tmp)
+            asset = {
+                "name": "fixture.exe",
+                "url": "https://api.github.com/repos/owner/repo/releases/assets/9",
+                "size": len(data),
+                "digest": "sha256:" + hashlib.sha256(data).hexdigest(),
+            }
+            with mock.patch.object(publisher.urllib.request, "build_opener", return_value=Opener()):
+                result = publisher.download(asset, cache, {"Authorization": "Bearer test-only"})
+            self.assertEqual(result.read_bytes(), data)
+            self.assertGreaterEqual(sum(u.startswith("https://api.github.com/") for u in calls), 2)
+            stale = []
+            for idx in range(6):
+                p = cache / f"stale-{idx}.bin"
+                p.write_bytes(b"old")
+                os.utime(p, (1000 + idx, 1000 + idx))
+                stale.append(p)
+            publisher.prune_cache(cache, [result], max_extra=2)
+            self.assertTrue(result.exists())
+            self.assertEqual(sorted(p.name for p in cache.glob("stale-*.bin")), ["stale-4.bin", "stale-5.bin"])
 
 
 class ChannelTests(unittest.TestCase):
@@ -201,8 +260,10 @@ class ChannelTests(unittest.TestCase):
             ):
                 default_settings = config.split(f"pub static ref {default_map}:", 1)[1].split("]));", 1)[0]
                 self.assertIn(f'({option}.to_owned(), "Y".to_owned())', default_settings)
-            self.assertNotIn('"enable-webrtc"', default_settings)
+            self.assertIn('("enable-webrtc".to_owned(), "Y".to_owned())', default_settings)
             self.assertIn('("enable-tcp-punch".to_owned(), "N".to_owned())', default_settings)
+            self.assertIn('("enable-ipv6-punch".to_owned(), "Y".to_owned())', default_settings)
+            self.assertNotIn("https://rustdesk.com/docs/en/", config)
             self.assertIn('("Restore default ID", "Bestehende Übersetzung")', german.read_text(encoding="utf-8"))
             self.assertIn('("Data and permissions", "")', german.read_text(encoding="utf-8"))
             ffi = (source / "src/flutter_ffi.rs").read_text(encoding="utf-8")
@@ -263,6 +324,26 @@ class ChannelTests(unittest.TestCase):
                 "GEODOMDESK_RUNNER_WIN32_WINDOW",
                 (source / "flutter/windows/runner/win32_window.cpp").read_text(),
             )
+            self.assertIn(
+                '"GEODOMDESK_RUNNER_WIN32_WINDOW"',
+                windows,
+            )
+            common_rs = bad.read_text(encoding="utf-8")
+            self.assertLess(
+                common_rs.index("*SOFTWARE_UPDATE_URL.lock().unwrap() = response_url.clone();"),
+                common_rs.index("push_global_event(crate::flutter::APP_TYPE_MAIN, data)"),
+            )
+            self.assertIn(
+                "let disable_nagle = true;",
+                (source / "libs/hbb_common/src/websocket.rs").read_text(encoding="utf-8"),
+            )
+            mux_rs = (source / "src/port_forward_mux.rs").read_text(encoding="utf-8")
+            self.assertIn("pub const CHANNEL_WINDOW: u32 = 1024 * 1024;", mux_rs)
+            self.assertIn("pub const UPDATE_THRESHOLD: u32 = 128 * 1024;", mux_rs)
+            login_dart = (source / "flutter/lib/common/widgets/login.dart").read_text(encoding="utf-8")
+            self.assertNotIn("if (!isWeb && close != null) close(false);", login_dart)
+            self.assertGreaterEqual(login_dart.count("if (res == true) {"), 2)
+            self.assertGreaterEqual(login_dart.count("close(true);"), 2)
             self.assertNotIn(
                 "if (!bind.isCustomClient()) {",
                 (source / "flutter/lib/common.dart").read_text(encoding="utf-8"),
@@ -667,6 +748,31 @@ class PublisherTests(unittest.TestCase):
             self.p.select_asset(
                 release, asset["name"], "https://api.github.com/repos/owner/GeodomDesk"
             )
+
+    def test_unchanged_release_skips_pointer_rewrite_and_failure_writes_locked_status(self):
+        release, _, local = self.build_fixture("1.5.2", 5)
+        with self.mocks(release, local):
+            self.p.run(self.config)
+        with self.mocks(release, local), mock.patch.object(
+            self.p, "publish_pointer", side_effect=AssertionError("Unexpected pointer rewrite")
+        ):
+            self.p.run(self.config)
+        status = json.loads((self.state / "status.json").read_text())
+        self.assertEqual(status["status"], "published")
+
+        latest_path = self.public / "latest.json"
+        latest_data = json.loads(latest_path.read_text())
+        latest_data["build_number"] = None
+        latest_path.write_text(json.dumps(latest_data))
+
+        bad_release, _, bad_local = self.build_fixture("1.5.3", 6)
+        with self.mocks(bad_release, bad_local), mock.patch.object(
+            self.p, "check_deb", side_effect=RuntimeError("boom")
+        ):
+            with self.assertRaises(RuntimeError):
+                self.p.run(self.config)
+        failed = json.loads((self.state / "status.json").read_text())
+        self.assertEqual(failed["status"], "failed")
 
 
 if __name__ == "__main__":

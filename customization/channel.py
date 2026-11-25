@@ -6,8 +6,11 @@ import json
 import re
 from pathlib import Path
 
-BASE_URL = "https://www.qcjcpt.com/downloads/geodomdesk"
-KEY_ID = "geodomdesk-2026-01"
+_CHANNEL_CONFIG = json.loads(
+    (Path(__file__).resolve().parent / "config/client-channel.json").read_text(encoding="utf-8")
+)
+BASE_URL = _CHANNEL_CONFIG["base_url"].rstrip("/")
+KEY_ID = _CHANNEL_CONFIG["key_id"]
 SIGNATURE_CONTEXT = b"GeodomDesk update metadata v1\n"
 METADATA_NAME = "geodomdesk-update.json"
 APP = "geodomdesk"
@@ -129,7 +132,7 @@ def signed_metadata(version, published_at, artifacts, seed):
     return metadata, sidecar
 
 
-def artifact(path, version, platform, arch, fmt):
+def artifact(path, version, platform, arch, fmt, digest=None):
     path = Path(path)
     if path.name != file_name(version, platform, fmt):
         raise ValueError("Unexpected artifact name")
@@ -139,6 +142,6 @@ def artifact(path, version, platform, arch, fmt):
         "format": fmt,
         "file_name": path.name,
         "size": path.stat().st_size,
-        "sha256": sha256(path),
+        "sha256": digest or sha256(path),
         "url": release_url(version) + path.name,
     }

@@ -18,6 +18,7 @@ from . import (
     localization,
     native_test_compat,
     p2p,
+    performance,
     printer,
     recent_sync,
     server_config,
@@ -49,6 +50,7 @@ def prepare(source, version, build_number=1, *, standalone=False):
     id_controls.apply(changes, ROOT)
     account_login.apply(changes)
     p2p.apply(changes)
+    performance.apply(changes)
     update_channel.apply(changes, cfg)
     user_data.apply(changes, ROOT)
     settings_cleanup.apply(changes)
@@ -92,8 +94,20 @@ def prepare(source, version, build_number=1, *, standalone=False):
         merged["flutter/pubspec.yaml"].decode(),
         count=1,
     ).encode()
+    base_url = cfg["base_url"].rstrip("/")
+    update_rs = merged["src/geodomdesk_update.rs"].decode()
+    update_rs = replace_once(
+        update_rs,
+        'pub(crate) const BASE_URL: &str = "https://www.qcjcpt.com/downloads/geodomdesk";',
+        f'pub(crate) const BASE_URL: &str = "{base_url}";',
+    )
+    update_rs = replace_once(
+        update_rs,
+        'pub(crate) const LATEST_URL: &str = "https://www.qcjcpt.com/downloads/geodomdesk/latest.json";',
+        f'pub(crate) const LATEST_URL: &str = "{base_url}/latest.json";',
+    )
     merged["src/geodomdesk_update.rs"] = replace_once(
-        merged["src/geodomdesk_update.rs"].decode(),
+        update_rs,
         "const BUILD_NUMBER: u64 = 1;",
         "const BUILD_NUMBER: u64 = " + str(build_number) + ";",
     ).encode()

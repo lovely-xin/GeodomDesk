@@ -41,6 +41,8 @@ def apply(changes, config):
         """pub static ref DEFAULT_LOCAL_SETTINGS: RwLock<HashMap<String, String>> = RwLock::new(HashMap::from([
         ("enable-tcp-punch".to_owned(), "N".to_owned()),
         ("enable-udp-punch".to_owned(), "Y".to_owned()),
+        ("enable-ipv6-punch".to_owned(), "Y".to_owned()),
+        ("enable-webrtc".to_owned(), "Y".to_owned()),
     ]));""",
     )
     changes.replace(

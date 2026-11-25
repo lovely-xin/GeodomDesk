@@ -14,12 +14,14 @@ const LOCAL_OWNER_OPTION: &str = "geodom-recent-sync-local-owner";
 const DISABLED_OPTION: &str = "geodom-recent-sync-disabled";
 const PEER_OWNER: &str = "geodom-recent-owner";
 const REMOVALS_OPTION: &str = "geodom-recent-sync-removals";
+const FORGOTTEN_OPTION: &str = "geodom-recent-sync-forgotten";
 const MAX_PROFILE_BYTES: usize = 2048;
 
 #[derive(Default, Deserialize, Serialize)]
 #[serde(default)]
 struct Profile {
     timestamp: u64,
+    hash_updated_at: Option<u64>,
     removed: bool,
     view_style: String,
     scroll_style: String,
@@ -112,6 +114,16 @@ pub(crate) fn export_record(id: &str, modified: SystemTime, peer: &PeerConfig) -
         .flatten()
 }
 
+struct CachedAbPeers {
+    token_digest: [u8; 32],
+    owner: String,
+    modified: Option<SystemTime>,
+    len: u64,
+    peers: Vec<AbPeer>,
+}
+
+static AB_CACHE: std::sync::Mutex<Option<CachedAbPeers>> = std::sync::Mutex::new(None);
+
 pub(crate) fn account_peers() -> Vec<AbPeer> {
     let token = LocalConfig::get_option("access_token");
     let owner = LocalConfig::get_option(ACCOUNT_OPTION);
@@ -124,11 +136,30 @@ pub(crate) fn account_peers() -> Vec<AbPeer> {
     {
         return Vec::new();
     }
+    let token_digest = hbb_common::sodiumoxide::crypto::hash::sha256::hash(token.as_bytes()).0;
+    let ab_path = Ab::path();
+    let (modified, len) = match std::fs::metadata(&ab_path) {
+        Ok(meta) => (meta.modified().ok(), meta.len()),
+        Err(_) => (None, 0),
+    };
+    if let Some(cached) = AB_CACHE
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .as_ref()
+    {
+        if cached.token_digest == token_digest
+            && cached.owner == owner
+            && cached.modified == modified
+            && cached.len == len
+        {
+            return cached.peers.clone();
+        }
+    }
     let account = Ab::load();
     if account.access_token != token {
         return Vec::new();
     }
-    account
+    let peers: Vec<AbPeer> = account
         .ab_entries
         .into_iter()
         .find(|entry| entry.personal())
@@ -139,7 +170,15 @@ pub(crate) fn account_peers() -> Vec<AbPeer> {
                 .filter(|peer| device_id(&peer.id) && !peer.geodom_recent.is_empty())
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    *AB_CACHE.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(CachedAbPeers {
+        token_digest,
+        owner,
+        modified,
+        len,
+        peers: peers.clone(),
+    });
+    peers
 }
 
 pub(crate) fn merge_list(
@@ -171,30 +210,36 @@ pub(crate) fn merge_list(
             continue;
         };
         let local_timestamp = times.get(peer.id.as_str()).copied().unwrap_or_default();
-        if profile.timestamp <= local_timestamp {
+        let pending_removal = pending
+            .get(&peer.id)
+            .map_or(false, |&timestamp| timestamp >= profile.timestamp);
+        if profile.removed || pending_removal {
+            if profile.timestamp > local_timestamp {
+                peers.remove(&peer.id);
+            }
             continue;
         }
-        if profile.removed
-            || pending
-                .get(&peer.id)
-                .is_some_and(|timestamp| *timestamp >= profile.timestamp)
-        {
-            peers.remove(&peer.id);
-        } else {
-            peers.insert(
-                peer.id.clone(),
-                (
-                    profile.timestamp,
-                    HashMap::from([
-                        ("id", peer.id),
-                        ("username", peer.username),
-                        ("hostname", peer.hostname),
-                        ("platform", peer.platform),
-                        ("alias", peer.alias),
-                    ]),
-                ),
-            );
+        let local_blank_placeholder = peers
+            .get(&peer.id)
+            .and_then(|(_, existing)| existing.get("platform"))
+            .map_or(false, String::is_empty);
+        if profile.timestamp <= local_timestamp && !local_blank_placeholder {
+            continue;
         }
+        let sort_timestamp = local_timestamp.max(profile.timestamp);
+        peers.insert(
+            peer.id.clone(),
+            (
+                sort_timestamp,
+                HashMap::from([
+                    ("id", peer.id),
+                    ("username", peer.username),
+                    ("hostname", peer.hostname),
+                    ("platform", peer.platform),
+                    ("alias", peer.alias),
+                ]),
+            ),
+        );
     }
     let mut peers: Vec<_> = peers.into_iter().collect();
     peers.sort_by(|(a, (at, _)), (b, (bt, _))| bt.cmp(at).then_with(|| a.cmp(b)));
@@ -208,28 +253,42 @@ pub(crate) fn apply_settings(id: &str, local: &mut PeerConfig) {
     let Some(peer) = account_peers().into_iter().find(|peer| peer.id == id) else {
         return;
     };
-    apply_peer(peer, millis(PeerConfig::last_modified(id)), local);
+    let forgotten: HashMap<String, u64> =
+        serde_json::from_str(&LocalConfig::get_option(FORGOTTEN_OPTION)).unwrap_or_default();
+    let forgotten_at = forgotten.get(id).copied().unwrap_or(0);
+    apply_peer(peer, millis(PeerConfig::last_modified(id)), forgotten_at, local);
 }
 
-fn apply_peer(peer: AbPeer, local_timestamp: u64, local: &mut PeerConfig) {
+fn apply_peer(peer: AbPeer, local_timestamp: u64, forgotten_at: u64, local: &mut PeerConfig) {
     let Some(profile) = parse(&peer.geodom_recent) else {
         return;
     };
-    if profile.timestamp <= local_timestamp {
+    if profile.timestamp <= local_timestamp && forgotten_at == 0 {
         return;
     }
+    let hash_ts = profile.hash_updated_at.unwrap_or(profile.timestamp);
     if profile.removed {
-        if peer.geodom_recent_hash_present && peer.hash.is_empty() {
+        if peer.geodom_recent_hash_present && peer.hash.is_empty() && hash_ts > local_timestamp {
             local.password.clear();
         }
         return;
     }
+    let allow_hash = forgotten_at == 0 || hash_ts > forgotten_at;
     if peer.geodom_recent_hash_present && peer.hash.is_empty() {
-        local.password.clear();
-    } else if let Ok(password) = decode(&peer.hash, Variant::Original) {
-        if password.len() == 32 {
-            local.password = password;
+        if hash_ts > local_timestamp {
+            local.password.clear();
         }
+    } else if !allow_hash {
+        local.password.clear();
+    } else if profile.timestamp > local_timestamp {
+        if let Ok(password) = decode(&peer.hash, Variant::Original) {
+            if password.len() == 32 {
+                local.password = password;
+            }
+        }
+    }
+    if profile.timestamp <= local_timestamp {
+        return;
     }
     for (setting, value) in [
         (&mut local.view_style, profile.view_style),
@@ -318,15 +377,15 @@ mod tests {
             hash: hbb_common::sodiumoxide::base64::encode([2; 32], Variant::Original),
             ..AbPeer::default()
         };
-        apply_peer(peer.clone(), 200, &mut local);
+        apply_peer(peer.clone(), 200, 0, &mut local);
         assert_eq!(local.password, vec![1; 32]);
-        apply_peer(peer.clone(), 199, &mut local);
+        apply_peer(peer.clone(), 199, 0, &mut local);
         assert_eq!(local.password, vec![2; 32]);
         let cleared = AbPeer {
             hash: String::new(),
             ..peer.clone()
         };
-        apply_peer(cleared.clone(), 199, &mut local);
+        apply_peer(cleared.clone(), 199, 0, &mut local);
         assert_eq!(local.password, vec![2; 32]);
         apply_peer(
             AbPeer {
@@ -334,6 +393,7 @@ mod tests {
                 ..cleared
             },
             199,
+            0,
             &mut local,
         );
         assert!(local.password.is_empty());
@@ -346,8 +406,66 @@ mod tests {
                 ..peer
             },
             199,
+            0,
             &mut local,
         );
         assert!(local.password.is_empty());
+    }
+
+    #[test]
+    fn hash_updated_at_and_forgotten_protect_credentials_and_blank_placeholders_retain_cloud_fields() {
+        // Stale empty hash from hash_updated_at=100 must not wipe a local credential saved at 150
+        // even when a subsequent alias edit bumps timestamp to 250.
+        let mut local = PeerConfig {
+            password: vec![9; 32],
+            ..PeerConfig::default()
+        };
+        let alias_edit = AbPeer {
+            alias: "UpdatedAlias".to_owned(),
+            geodom_recent: r#"{"timestamp":250,"hash_updated_at":100}"#.to_owned(),
+            geodom_recent_hash_present: true,
+            hash: String::new(),
+            ..AbPeer::default()
+        };
+        apply_peer(alias_edit, 150, 0, &mut local);
+        assert_eq!(local.password, vec![9; 32]);
+        assert_eq!(local.options.get("alias").map(String::as_str), Some("UpdatedAlias"));
+
+        // Pending forgotten_at=180 blocks stale Ab cache hash with hash_updated_at=150 even on newer alias edit.
+        let stale_cached = AbPeer {
+            geodom_recent: r#"{"timestamp":260,"hash_updated_at":150}"#.to_owned(),
+            hash: hbb_common::sodiumoxide::base64::encode([7; 32], Variant::Original),
+            ..AbPeer::default()
+        };
+        apply_peer(stale_cached, 100, 180, &mut local);
+        assert!(local.password.is_empty());
+
+        // Blank local placeholder (empty platform) touched at 300 still displays cloud metadata from 200.
+        let local_blank = HashMap::from([
+            ("id", "834502176".to_owned()),
+            ("platform", String::new()),
+            ("username", String::new()),
+            ("hostname", String::new()),
+            ("alias", String::new()),
+        ]);
+        let paths = vec![(
+            "834502176".to_owned(),
+            UNIX_EPOCH + Duration::from_millis(300),
+            PathBuf::new(),
+        )];
+        let remote = AbPeer {
+            id: "834502176".to_owned(),
+            platform: "Linux".to_owned(),
+            username: "ops".to_owned(),
+            hostname: "prod-1".to_owned(),
+            alias: "Prod".to_owned(),
+            geodom_recent: r#"{"timestamp":200}"#.to_owned(),
+            ..AbPeer::default()
+        };
+        let merged = merge_list(vec![local_blank], &paths, vec![remote]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0]["platform"], "Linux");
+        assert_eq!(merged[0]["alias"], "Prod");
+        assert_eq!(merged[0]["hostname"], "prod-1");
     }
 }

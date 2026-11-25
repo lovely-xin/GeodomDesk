@@ -38,22 +38,45 @@ pub(super) fn read_script(path: &str, stdin: bool) -> ResultType<Vec<u8>> {
     Ok(script)
 }
 
+pub(super) const VALUE_FLAGS: &[&str] = &[
+    "--id",
+    "--shell",
+    "--script",
+    "--command",
+    "--transport",
+    "--ssh-user",
+    "--ssh-host",
+    "--ssh-port",
+    "--ssh-identity",
+    "--ssh-known-hosts",
+    "--local-port",
+    "--remote-port",
+    "--remote-host",
+    "--connect-timeout",
+    "--timeout",
+    "--account-user",
+    "--admin-user",
+    "--expect-platform",
+    "--expect-hostname",
+    "--tunnel-id",
+];
+
+pub(super) fn takes_value(flag: &str) -> bool {
+    VALUE_FLAGS.contains(&flag)
+}
+
 pub(super) fn wants_json(args: &[String]) -> bool {
-    let mut args = args.iter().skip(1);
-    while let Some(flag) = args.next() {
-        match flag.as_str() {
-            "--json" => return true,
-            "--relay"
-            | "--ask-device-password"
-            | "--ask-ssh-password"
-            | "--ssh-strict-host-key"
-            | "--non-interactive"
-            | "--help"
-            | "-h"
-            | "--continue-on-error" => {}
-            _ => {
-                args.next();
-            }
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        let flag = arg.split_once('=').map_or(arg, |(name, _)| name);
+        if flag == "--json" {
+            return true;
+        }
+        if !arg.contains('=') && takes_value(flag) {
+            index += 2;
+        } else {
+            index += 1;
         }
     }
     false
@@ -100,9 +123,15 @@ mod json_flag_tests {
     use super::*;
     #[test]
     fn ssh_switches_preserve_json_failures_without_treating_script_text_as_flags() {
-        for args in [vec!["exec","--ask-ssh-password","--json"],vec!["exec","--ssh-strict-host-key","--json"]] {
+        for args in [
+            vec!["--json", "--help"],
+            vec!["exec", "--ask-ssh-password", "--json"],
+            vec!["exec", "--ssh-strict-host-key", "--json"],
+            vec!["exec", "--unknown-flag", "--json"],
+        ] {
             assert!(wants_json(&args.into_iter().map(str::to_owned).collect::<Vec<_>>()));
         }
         assert!(!wants_json(&["exec","--command","--json"].into_iter().map(str::to_owned).collect::<Vec<_>>()));
+        assert!(!wants_json(&["exec","--ssh-host","--json"].into_iter().map(str::to_owned).collect::<Vec<_>>()));
     }
 }

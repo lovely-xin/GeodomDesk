@@ -26,6 +26,10 @@ impl ConnectionDeadline {
         }
     }
 
+    pub(super) fn window(&self) -> Duration {
+        self.window
+    }
+
     pub(super) async fn run<T>(
         &self,
         attempt: impl Future<Output = ResultType<T>>,
@@ -43,7 +47,8 @@ impl ConnectionDeadline {
     }
 
     pub(super) async fn wait_for_direct<T>(&self, direct: impl Future<Output = T>) -> Option<T> {
-        tokio::time::timeout(self.window, direct).await.ok()
+        let deadline = self.when_relay_is_ready();
+        tokio::time::timeout_at(deadline, direct).await.ok()
     }
 
     fn when_relay_is_ready(&self) -> Instant {
@@ -650,5 +655,26 @@ mod tests {
         let key_exchange =
             PeerMessage::parse_from_bytes(&peer.next().await.unwrap().unwrap()).unwrap();
         assert_eq!(key_exchange.public_key().kx_version, 0);
+    }
+
+    #[tokio::test]
+    async fn wait_for_direct_and_race_authorized_share_one_window() {
+        let deadline = ConnectionDeadline::new(80);
+        let fast = deadline.wait_for_direct(async {
+            tokio::time::sleep(Duration::from_millis(15)).await;
+            42u8
+        });
+        assert_eq!(fast.await, Some(42));
+        let winner = deadline
+            .race_authorized(
+                Box::pin(std::future::pending::<ResultType<&'static str>>()),
+                Box::pin(std::future::ready(Ok::<_, hbb_common::anyhow::Error>(
+                    "relay",
+                ))),
+                |_| true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(winner, "relay");
     }
 }

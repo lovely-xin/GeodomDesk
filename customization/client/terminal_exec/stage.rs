@@ -126,8 +126,7 @@ where
 {
     let started = Instant::now();
     let mut last_attempt = started;
-    // Explicit credentials and one-time codes get one full-budget authentication attempt.
-    let max_attempts = if credential_bound { 1 } else { (budget.as_secs() / 5).clamp(1, 3) as usize };
+    let max_attempts = (budget.as_secs() / 5).clamp(1, 3) as usize;
     let setup_phase = if credential_bound { "authentication" } else { "connect" };
     let mut history = Vec::new();
     let outcome = tokio::time::timeout(budget, async {
@@ -148,7 +147,9 @@ where
                     let error = if error.downcast_ref::<Stage>().is_none() {
                         wrap(error, setup_phase, "not_started")
                     } else { error };
-                    let retry = attempt < max_attempts && transient_setup_error(&error);
+                    let pre_auth_phase = describe(&error).1 == "connect";
+                    let allow_retry = !credential_bound || pre_auth_phase;
+                    let retry = allow_retry && attempt < max_attempts && transient_setup_error(&error);
                     history.push(SetupError::new(&error, connecting.elapsed()));
                     if !retry { return Err(error); }
                     eprintln!("Temporary connection setup failure; retrying before command execution ({attempt}/{max_attempts}): {error:#}");

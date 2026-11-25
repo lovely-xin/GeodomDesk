@@ -49,18 +49,44 @@ def repack(payload, output, version, build_number=0, cli=None):
             "postinst": """#!/bin/sh
 set -e
 if [ "$1" = configure ]; then
-  systemctl daemon-reload
-  systemctl enable --now geodomdesk.service
+  if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload
+    if [ -z "$2" ]; then
+      systemctl enable --now geodomdesk.service
+    else
+      if systemctl is-enabled --quiet geodomdesk.service; then
+        systemctl restart --no-block geodomdesk.service
+      else
+        systemctl try-restart --no-block geodomdesk.service
+      fi
+    fi
+  fi
+  if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database -q /usr/share/applications || true
+  fi
+  if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -q /usr/share/icons/hicolor || true
+  fi
 fi
 """,
             "prerm": """#!/bin/sh
 set -e
-case "$1" in remove|upgrade) systemctl stop geodomdesk.service || true;; esac
-case "$1" in remove) systemctl disable geodomdesk.service || true;; esac
+if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+  case "$1" in remove|deconfigure) systemctl stop geodomdesk.service || true;; esac
+  case "$1" in remove) systemctl disable geodomdesk.service || true;; esac
+fi
 """,
             "postrm": """#!/bin/sh
 set -e
-systemctl daemon-reload || true
+if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+  systemctl daemon-reload || true
+fi
+if command -v update-desktop-database >/dev/null 2>&1; then
+  update-desktop-database -q /usr/share/applications || true
+fi
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+  gtk-update-icon-cache -q /usr/share/icons/hicolor || true
+fi
 """,
         }
         for name, content in scripts.items():
@@ -95,7 +121,7 @@ After=network.target systemd-user-sessions.service
 [Service]
 Type=simple
 ExecStart=/usr/bin/geodomdesk --service
-KillMode=control-group
+KillMode=mixed
 TimeoutStopSec=30
 Restart=on-failure
 RestartSec=5

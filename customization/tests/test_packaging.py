@@ -100,6 +100,11 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(subprocess.run([str(extracted / "usr/bin/geodomdesk-cli")]).returncode, 37)
         self.assertFalse((extracted / "usr/bin/rustdesk").exists())
         self.assertFalse((extracted / "DEBIAN/preinst").exists())
+        service_unit = (extracted / "usr/lib/systemd/system/geodomdesk.service").read_text()
+        self.assertIn("KillMode=mixed", service_unit)
+        postinst = (extracted / "DEBIAN/postinst").read_text()
+        self.assertIn("[ -d /run/systemd/system ]", postinst)
+        self.assertIn("update-desktop-database", postinst)
         fakebin = self.root / "fakebin"
         fakebin.mkdir()
         log = self.root / "systemctl.log"
@@ -111,17 +116,25 @@ class PackagingTests(unittest.TestCase):
             "PATH": str(fakebin) + ":" + os.environ["PATH"],
             "TEST_SYSTEMCTL_LOG": str(log),
         }
+        subprocess.run(["sh", str(extracted / "DEBIAN/prerm"), "upgrade", "1.5.2"], check=True, env=env)
+        subprocess.run(["sh", str(extracted / "DEBIAN/postinst"), "configure", "1.5.1"], check=True, env=env)
         subprocess.run(["sh", str(extracted / "DEBIAN/postinst"), "configure"], check=True, env=env)
         subprocess.run(["sh", str(extracted / "DEBIAN/prerm"), "remove"], check=True, env=env)
-        self.assertEqual(
-            log.read_text().splitlines(),
-            [
-                "daemon-reload",
-                "enable --now geodomdesk.service",
-                "stop geodomdesk.service",
-                "disable geodomdesk.service",
-            ],
-        )
+        if Path("/run/systemd/system").is_dir():
+            self.assertEqual(
+                log.read_text().splitlines(),
+                [
+                    "daemon-reload",
+                    "is-enabled --quiet geodomdesk.service",
+                    "restart --no-block geodomdesk.service",
+                    "daemon-reload",
+                    "enable --now geodomdesk.service",
+                    "stop geodomdesk.service",
+                    "disable geodomdesk.service",
+                ],
+            )
+        else:
+            self.assertFalse(log.exists())
 
     def test_source_archive_includes_new_modules_and_baseline(self):
         import tarfile
@@ -148,7 +161,10 @@ class PackagingTests(unittest.TestCase):
             "src/terminal_exec/exec_bootstrap.ps1",
             "src/terminal_exec/legacy.rs",
             "src/terminal_exec/session.rs",
-    "src/terminal_exec/stage.rs",
+            "src/terminal_exec/stage.rs",
+            "src/terminal_exec/tunnel.rs",
+            "src/terminal_exec/ssh.rs",
+            "src/terminal_exec/ssh_worker.sh",
             "src/terminal_exec/legacy_bootstrap.ps1",
             "src/terminal_exec/legacy_bootstrap.sh",
             "src/terminal_exec/windows.rs",
