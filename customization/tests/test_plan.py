@@ -152,6 +152,12 @@ class PlanTests(unittest.TestCase):
                 before = plan_upstream.customization_hash(root)
                 path.write_text("updated\n")
                 self.assertNotEqual(before, plan_upstream.customization_hash(root))
+            dart = root / "client/flutter/geodom_recent_sync.dart"
+            dart.parent.mkdir(parents=True)
+            dart.write_text("class Sync {}\n")
+            before_dart = plan_upstream.customization_hash(root)
+            dart.write_text("class Sync { int v = 1; }\n")
+            self.assertNotEqual(before_dart, plan_upstream.customization_hash(root))
 
     def test_desktop_reuse_ignores_only_android_sources_and_checks_build_recipe(self):
         with tempfile.TemporaryDirectory() as tmp:

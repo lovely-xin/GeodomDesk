@@ -222,6 +222,7 @@ pub(super) struct ConnectOptions {
     pub(super) expected_platform: Option<String>,
     pub(super) expected_hostname: Option<String>,
     pub(super) ssh: Option<super::ssh::Options>,
+    pub(super) ssh_fallback_to_terminal: bool,
 }
 impl ConnectOptions {
     fn current_token(&self) -> ResultType<String> {
@@ -290,21 +291,35 @@ impl ConnectOptions {
         self.open_with_keep_alive(true).await
     }
     pub(super) async fn open_with_keep_alive(&self, keep_alive: bool) -> ResultType<Connection> {
+        let mut ssh_fallback_errors = Vec::new();
         if let Some(ssh) = &self.ssh {
-            return tokio::time::timeout(
+            let ssh_started = Instant::now();
+            let attempt = tokio::time::timeout(
                 Duration::from_secs(self.timeout.into()),
                 super::ssh::open(self, ssh),
             )
             .await
             .context("SSH setup timed out before script dispatch")
-            .and_then(|v| v)
-            .map_err(|error| {
-                if error.downcast_ref::<super::stage::Stage>().is_none() {
-                    super::stage::wrap(error, "ssh", "not_started")
-                } else {
-                    error
+            .and_then(|v| v);
+            match attempt {
+                Ok(connection) => return Ok(connection),
+                Err(error) => {
+                    let wrapped = if error.downcast_ref::<super::stage::Stage>().is_none() {
+                        super::stage::wrap(error, "ssh", "not_started")
+                    } else {
+                        error
+                    };
+                    if !self.ssh_fallback_to_terminal
+                        || !(wrapped.is::<ForwardUnavailable>() || wrapped.is::<super::ssh::MissingProgram>())
+                    {
+                        return Err(wrapped);
+                    }
+                    ssh_fallback_errors.push(super::stage::SetupError::new(
+                        &wrapped,
+                        ssh_started.elapsed(),
+                    ));
                 }
-            });
+            }
         }
         let started = Instant::now();
         let token = self.current_token()?;
@@ -325,7 +340,8 @@ impl ConnectOptions {
         )
         .await?;
         connection.connect_elapsed = started.elapsed();
-        connection.setup_errors = history;
+        ssh_fallback_errors.extend(history);
+        connection.setup_errors = ssh_fallback_errors;
         self.verify_target(&connection)?;
         Ok(connection)
     }
@@ -434,6 +450,22 @@ pub(super) async fn receive(stream: &mut Stream) -> ResultType<Message> {
         }
         return Ok(message);
     }
+}
+
+#[derive(Debug)]
+pub(super) struct ForwardUnavailable(String);
+
+impl std::fmt::Display for ForwardUnavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+impl std::error::Error for ForwardUnavailable {}
+
+fn forward_unavailable(error: &str, host: &str, port: u16) -> bool {
+    let address = format!("{host}:{port}");
+    error == format!("Failed to access remote {address}, please make sure if it is open")
+        || error == format!("Failed to access remote {address}. Please make sure it is reachable/open.")
 }
 
 async fn connect_for(
@@ -568,6 +600,9 @@ async fn connect_for(
                         client::LOGIN_MSG_PASSWORD_EMPTY | client::LOGIN_MSG_PASSWORD_WRONG => {
                             return Err(super::stage::wrap(anyhow!("{error}. Use --ask-device-password or set GEODOMDESK_DEVICE_PASSWORD"),"authentication","not_started"));
                         }
+                        _ if forward.is_some_and(|(host, port, _)| forward_unavailable(&error, host, port)) => {
+                            return Err(super::stage::wrap(ForwardUnavailable(error).into(), "forward_target", "not_started"));
+                        }
                         _ if error.starts_with("Failed to access remote ") => {
                             return Err(super::stage::wrap(anyhow!("{error}"), "connect", "not_started"));
                         }
@@ -628,30 +663,7 @@ pub(super) async fn receive_terminal_response(stream: &mut Stream) -> ResultType
     }
 }
 
-pub fn run_cli_sync(args: &[String]) -> Option<i32> {
-    let first = args.first().map(String::as_str);
-    if matches!(first, Some("--help" | "-h")) {
-        println!("{USAGE}");
-        return Some(0);
-    }
-    if matches!(first, Some("--version" | "-V")) {
-        println!(
-            "GeodomDesk {}-r{}",
-            crate::VERSION,
-            crate::geodomdesk_update::BUILD_NUMBER
-        );
-        return Some(0);
-    }
-    if first == Some("tunnel")
-        && matches!(args.get(1).map(String::as_str), Some("--help" | "-h"))
-    {
-        println!("{USAGE}");
-        return Some(0);
-    }
-    None
-}
-
-pub async fn run_cli(args: impl Iterator<Item = String>) -> ResultType<i32> {
+pub(super) async fn run_cli(args: impl Iterator<Item = String>) -> ResultType<i32> {
     let args: Vec<_> = args.collect();
     let json = input::wants_json(&args)
         || matches!(args.first().map(String::as_str), Some("session" | "probe" | "tunnel"));
@@ -945,6 +957,15 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
         }
     }
     let use_ssh=!tunnel && (command_transport=="ssh" || (command_transport=="auto" && shell==Some(ExecShell::BASH)));
+    let ssh_fallback_to_terminal = use_ssh
+        && command_transport == "auto"
+        && ssh_user.is_none()
+        && !ssh_host_set
+        && ssh_identity.is_none()
+        && ssh_known_hosts.is_none()
+        && !ssh_strict
+        && !ask_ssh_password
+        && !ssh_port_set;
     if use_ssh && (ssh_port==0 || admin_user.is_some() || shell.is_some_and(|shell|shell!=ExecShell::BASH) || ssh_host.trim().is_empty() || ssh_host.len()>253 || ssh_host.chars().any(char::is_control)) {bail!("SSH transport requires Bash, a valid SSH host/port and a Linux login");}
     if !use_ssh && (ssh_user.is_some() || ssh_host_set || ssh_identity.is_some() || ssh_known_hosts.is_some() || ssh_strict || ask_ssh_password || ssh_port_set) {bail!("SSH options require --shell bash or --transport ssh");}
     if use_ssh && shell.is_none(){shell=Some(ExecShell::BASH);}
@@ -1005,6 +1026,7 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
         expected_platform,
         expected_hostname,
         ssh,
+        ssh_fallback_to_terminal,
     };
     if tunnel {
         let port = remote_port.context("Missing --remote-port")?;

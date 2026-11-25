@@ -244,3 +244,45 @@ fn main() {
         ).read_text(encoding="utf-8")
         self.assertIn("Flush-GdChunk", legacy_ps1)
         self.assertIn("if ($null -eq $LASTEXITCODE)", legacy_ps1)
+
+
+class CustomizationContractTests(unittest.TestCase):
+    def test_port_forward_mux_retains_kcp_close_reason_for_1_5_3(self):
+        from customizations import performance
+
+        root = Path(__file__).resolve().parents[1]
+        source_file = root / "reference/src/port_forward_mux.rs"
+        lifetime_file = root / "reference/src/port_forward.rs"
+        tunnel_src = (root / "client/terminal_exec/tunnel.rs").read_text(encoding="utf-8")
+        perf_text = (root / "customizations/performance.py").read_text(encoding="utf-8")
+        self.assertIn("send_kcp_close_reason(&mut stream).await;", perf_text)
+        self.assertIn("kcp: Option<crate::kcp_stream::KcpStream>,", perf_text)
+        self.assertIn("TunnelInterface::new(state.clone()),", tunnel_src)
+        self.assertIn("TunnelInterface::new(status.clone()),", tunnel_src)
+        if source_file.is_file() and lifetime_file.is_file():
+            class MapChanges(dict):
+                def replace(self, path, old, new):
+                    self[path] = self[path].replace(old, new, 1)
+
+            changes = MapChanges({
+                "src/port_forward_mux.rs": source_file.read_text(encoding="utf-8"),
+                "src/port_forward.rs": lifetime_file.read_text(encoding="utf-8"),
+            })
+            performance.apply_port_forward_mux(changes)
+            performance.apply_port_forward_lifetime(changes)
+            mux_out = changes["src/port_forward_mux.rs"]
+            self.assertIn("if kcp.is_some() {\n                        send_kcp_close_reason(&mut stream).await;\n                    }", mux_out)
+            self.assertIn("set_muxed_with_guard<G: Send + 'static>(\n            &self,\n            mut stream: Stream,\n            kcp: Option<crate::kcp_stream::KcpStream>,", mux_out)
+
+    def test_standalone_cli_patches_usage_fingerprint_and_cli_tests(self):
+        root = Path(__file__).resolve().parents[1]
+        cli_mod = (root / "customizations/standalone_cli.py").read_text(encoding="utf-8")
+        input_rs = (root / "client/terminal_exec/input.rs").read_text(encoding="utf-8")
+        cli_rs = (root / "client/terminal_exec/cli.rs").read_text(encoding="utf-8")
+        tunnel_rs = (root / "client/terminal_exec/tunnel.rs").read_text(encoding="utf-8")
+        self.assertIn("embedded SSH over TCP, then GeodomDesk terminal", cli_mod)
+        self.assertIn('"--ssh-host-fingerprint"', cli_mod)
+        self.assertIn('"--ssh-host requires an explicit --ssh-user and --shell"', cli_mod)
+        self.assertIn('"--ssh-known-hosts",\n', input_rs)
+        self.assertIn('(vec!["exec","--id","1","--transport","ssh","--shell","powershell"],"SSH transport requires Bash"),', cli_rs)
+        self.assertGreaterEqual(tunnel_rs.count('#[cfg(feature = "embedded-ssh")]'), 4)

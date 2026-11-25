@@ -346,7 +346,7 @@ async fn rpc(record: &Record, op: &str) -> ResultType<Value> {
     let socket = tokio::time::timeout(Duration::from_secs(3),
         TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, record.control_port)))
         .await.context("Tunnel control connection timed out")??;
-    tokio::time::timeout(Duration::from_millis(400), async {
+    tokio::time::timeout(Duration::from_millis(1500), async {
         let mut socket = BufReader::new(socket);
         socket.get_mut().set_nodelay(true)?;
         let nonce = uuid::Uuid::new_v4().simple().to_string();
@@ -429,7 +429,7 @@ pub(crate) async fn list(device: &str) -> ResultType<Value> {
     let records = records()?;
     let requests = records
         .into_iter()
-        .filter(|(_, r)| device.is_empty() || r.device_id == device)
+        .filter(|(_, r)| r.local_port != 0 && (device.is_empty() || r.device_id == device))
         .map(|(path, r)| async move {
             match rpc(&r, "status").await {
                 Ok(value) => Some(value),
@@ -647,16 +647,21 @@ impl Managed {
             info["setup_errors"] = json!(setup_errors);
         }
         let mux_tunnel = Arc::new(MuxTunnel::new());
+        let used_kcp = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let connect_epoch = Arc::new(AtomicU64::new(0));
         let mux_connect_lock: Arc<AsyncMutex<Option<(u64, String)>>> =
             Arc::new(AsyncMutex::new(None));
         let initial_legacy = if initial_mux {
             let (stream, keep_alive, kcp, _, _, _) = first.into_forward_parts()?;
             if matches!(mux_tunnel.claim(), Claim::Claimed) {
+                if kcp.is_some() {
+                    used_kcp.store(true, Ordering::Relaxed);
+                }
                 let handle = mux_tunnel.set_muxed_with_guard(
                     stream,
+                    kcp,
                     TunnelInterface::new(state.clone()),
-                    (keep_alive, kcp),
+                    keep_alive,
                 );
                 state.store_mux(Some(handle));
             }
@@ -734,14 +739,53 @@ impl Managed {
                         };
                         match claim {
                             Claim::Muxed(handle) => {
-                                status.store_mux(Some(handle.clone()));
-                                if let Err(error) = handle.open(
-                                    &record.remote_host,
-                                    i32::from(record.remote_port),
-                                    socket,
-                                    Vec::new(),
-                                ) {
-                                    status.set_error(format!("{error:#}"));
+                                #[cfg(not(feature = "embedded-ssh"))]
+                                {
+                                    status.store_mux(Some(handle.clone()));
+                                    if let Err(error) = handle.open(
+                                        &record.remote_host,
+                                        i32::from(record.remote_port),
+                                        socket,
+                                        Vec::new(),
+                                    ) {
+                                        status.set_error(format!("{error:#}"));
+                                    }
+                                }
+                                #[cfg(feature = "embedded-ssh")]
+                                {
+                                    if channels.len() >= port_forward_mux::MAX_CHANNELS {
+                                        status.set_error(format!(
+                                            "Tunnel reached maximum pending/active channels ({})",
+                                            port_forward_mux::MAX_CHANNELS
+                                        ));
+                                        drop(socket);
+                                        continue;
+                                    }
+                                    let options = options.clone();
+                                    let record = record.clone();
+                                    let status = status.clone();
+                                    channels.spawn(async move {
+                                        let checked = match options.current_token() {
+                                            Ok(token) => super::auth::verify_ssh_account(&token).await,
+                                            Err(error) => Err(error),
+                                        };
+                                        if let Err(error) = checked {
+                                            status.set_error(format!("{error:#}"));
+                                            return;
+                                        }
+                                        if status.closed.load(Ordering::Relaxed) || handle.is_closed() {
+                                            return;
+                                        }
+                                        status.store_mux(Some(handle.clone()));
+                                        if let Err(error) = handle.open(
+                                            &record.remote_host,
+                                            i32::from(record.remote_port),
+                                            socket,
+                                            Vec::new(),
+                                        ) {
+                                            status.set_error(format!("{error:#}"));
+                                        }
+                                    });
                                 }
                                 continue;
                             }
@@ -760,9 +804,24 @@ impl Managed {
                                 let record = record.clone();
                                 let status = status.clone();
                                 let mux_tunnel = mux_tunnel.clone();
+                                let used_kcp = used_kcp.clone();
                                 let connect_epoch = connect_epoch.clone();
                                 let mux_connect_lock = mux_connect_lock.clone();
                                 channels.spawn(async move {
+                                    #[cfg(feature = "embedded-ssh")]
+                                    {
+                                        let checked = match options.current_token() {
+                                            Ok(token) => super::auth::verify_ssh_account(&token).await,
+                                            Err(error) => Err(error),
+                                        };
+                                        if let Err(error) = checked {
+                                            status.set_error(format!("{error:#}"));
+                                            return;
+                                        }
+                                        if status.closed.load(Ordering::Relaxed) {
+                                            return;
+                                        }
+                                    }
                                     let mut last_attempt = mux_connect_lock.lock().await;
                                     let inner_claim = match mux_tunnel.claim() {
                                         Claim::Muxed(handle) if handle.is_closed() => {
@@ -842,10 +901,14 @@ impl Managed {
                                                 connect_epoch.fetch_add(1, Ordering::AcqRel);
                                                 *last_attempt = None;
                                                 status.set_transport(direct, transport, true);
+                                                if kcp.is_some() {
+                                                    used_kcp.store(true, Ordering::Relaxed);
+                                                }
                                                 let handle = mux_tunnel.set_muxed_with_guard(
                                                     stream,
+                                                    kcp,
                                                     TunnelInterface::new(status.clone()),
-                                                    (keep_alive, kcp),
+                                                    keep_alive,
                                                 );
                                                 status.store_mux(Some(handle.clone()));
                                                 drop(last_attempt);
@@ -958,6 +1021,9 @@ impl Managed {
             status.active.store(0, Ordering::Relaxed);
             drop(registration);
             drop(mux_tunnel);
+            if used_kcp.load(Ordering::Relaxed) {
+                crate::port_forward::wait_for_tunnel_close_reasons().await;
+            }
             status.store_mux(None);
             drop(control);
             status.mark_closed();
@@ -1340,6 +1406,7 @@ mod tests {
             expected_platform: None,
             expected_hostname: None,
             ssh: None,
+            ssh_fallback_to_terminal: false,
         };
         let error = match Managed::start(
             &options,

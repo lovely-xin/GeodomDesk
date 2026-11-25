@@ -103,11 +103,18 @@ pub(crate) async fn post_terminal_account(
             .body(body)
             .send()
             .await?;''',
-         '''        let request = reqwest::Client::builder()
-            .use_rustls_tls()
-            .https_only(true)
-            .redirect(reqwest::redirect::Policy::none())
-            .build()?
+         '''        static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+        let client = if let Some(client) = CLIENT.get() {
+            client.clone()
+        } else {
+            let built = reqwest::Client::builder()
+                .use_rustls_tls()
+                .https_only(true)
+                .redirect(reqwest::redirect::Policy::none())
+                .build()?;
+            CLIENT.get_or_init(|| built).clone()
+        };
+        let request = client
             .post(url)
             .header("Content-Type", "application/json")
             .body(body);
@@ -147,8 +154,10 @@ pub fn run_standalone_cli() -> ResultType<i32> {
     }
     let use_ssh = !tunnel && (command_transport == "ssh"
         || (command_transport == "auto" && shell.is_some() && admin_user.is_none()));
-    if use_ssh && (ssh_port == 0 || admin_user.is_some()) {
-        bail!("SSH requires a valid port and uses --ssh-user for operating system authentication");
+    if use_ssh && (ssh_port == 0 || admin_user.is_some()
+        || (ssh_host_set && (ssh_host.trim().is_empty() || ssh_host.len() > 253 || ssh_host.chars().any(char::is_control))))
+    {
+        bail!("SSH requires a valid port and host, and uses --ssh-user for operating system authentication");
     }
     if !use_ssh && (ssh_user.is_some() || ssh_host_set || ssh_identity.is_some()
         || ssh_known_hosts.is_some() || ssh_fingerprint.is_some() || ssh_strict
@@ -160,7 +169,7 @@ pub fn run_standalone_cli() -> ResultType<i32> {
         shell = Some(ExecShell::BASH);
     }
 ''' + cli_text[after:]
-    beginning = cli_text.index("        if let Some(ssh) = &self.ssh {", cli_text.index("pub(super) async fn open_with_keep_alive"))
+    beginning = cli_text.index("        let mut ssh_fallback_errors = Vec::new();", cli_text.index("pub(super) async fn open_with_keep_alive"))
     boundary = cli_text.index("        let token = self.current_token()?;", beginning)
     cli_text = cli_text[:beginning] + '''        let started = Instant::now();
         let budget = Duration::from_secs(self.timeout.into());
@@ -184,15 +193,39 @@ pub fn run_standalone_cli() -> ResultType<i32> {
     connect = cli_text.index("        let token = self.current_token()?;", beginning)
     body = cli_text[connect:]
     body = body.replace("            Duration::from_secs(self.timeout.into()),", "            remaining,", 1)
-    body = body.replace("        connection.setup_errors = history;",
+    body = body.replace("        ssh_fallback_errors.extend(history);\n        connection.setup_errors = ssh_fallback_errors;",
                         "        prior_errors.extend(history);\n        connection.setup_errors = prior_errors;", 1)
     files[cli_path] = (cli_text[:connect] + body).encode()
     edit(files, f"{terminal}/auth.rs", [("fn saved_cli_account(", "pub(super) fn saved_cli_account(")])
+    edit(files, f"{terminal}/input.rs", [
+        ('    "--ssh-known-hosts",\n', '    "--ssh-known-hosts",\n    "--ssh-host-fingerprint",\n'),
+        ('        assert!(!wants_json(&["exec","--ssh-host","--json"].into_iter().map(str::to_owned).collect::<Vec<_>>()));',
+         '        assert!(!wants_json(&["exec","--ssh-host","--json"].into_iter().map(str::to_owned).collect::<Vec<_>>()));\n'
+         '        assert!(!wants_json(&["exec","--ssh-host-fingerprint","--json"].into_iter().map(str::to_owned).collect::<Vec<_>>()));'),
+    ])
     edit(files, cli_path, [
         ("       geodomdesk-cli probe --id ID [authentication options]\n",
          "       geodomdesk-cli probe --id ID [authentication options]\n"
          "       geodomdesk-cli account login --user USER [--non-interactive]\n"
          "       geodomdesk-cli account logout\n"),
+        ("""  --transport MODE        auto (default): Bash uses SSH over a managed TCP relay
+                          terminal: use GeodomDesk terminal; ssh: require SSH Bash
+                          Session without --shell keeps the terminal transport
+  --ssh-user USER         Target SSH login (default: authenticated peer username)
+  --ssh-host HOST         Target SSH host inside peer relay (default 127.0.0.1)
+  --ssh-port PORT         Target SSH service port (default 22)
+  --ssh-identity PATH     Use an SSH private key; otherwise agent/default keys or password""",
+         """  --transport MODE        auto (default): embedded SSH over TCP, then GeodomDesk terminal
+                          terminal: require GeodomDesk terminal; ssh: require SSH
+                          Session without --shell uses the GeodomDesk terminal
+  --ssh-user USER         SSH login (default: authenticated peer username)
+  --ssh-host HOST         Destination as reached from the device selected by --id
+                          Requires --ssh-user, --shell and a trusted destination host key
+  --ssh-port PORT         Target SSH service port (default 22)
+  --ssh-identity PATH     Use an SSH private key; otherwise default key or password"""),
+        ('            (vec!["exec","--id","1","--transport","ssh","--shell","powershell"],"SSH transport requires Bash"),',
+         '            (vec!["exec","--id","1","--transport","ssh","--ssh-host","10.0.0.2","--shell","powershell"],"--ssh-host requires an explicit --ssh-user and --shell"),\n'
+         '            (vec!["exec","--id","1","--transport","ssh","--ssh-host-fingerprint","bad"],"Expected an SSH SHA256 fingerprint"),'),
         ('    let tunnel=first.as_deref()==Some("tunnel");',
          '    if first.as_deref() == Some("account") { return auth::manage_account(args).await; }\n'
          '    let tunnel=first.as_deref()==Some("tunnel");'),
@@ -255,29 +288,6 @@ pub fn run_standalone_cli() -> ResultType<i32> {
         ('             GEODOMDESK_ADMIN_PASSWORD, GEODOMDESK_DEVICE_CODE, GEODOMDESK_SSH_PASSWORD',
          '             GEODOMDESK_ADMIN_PASSWORD, GEODOMDESK_DEVICE_CODE, GEODOMDESK_SSH_PASSWORD,\n'
          '             GEODOMDESK_SSH_KEY_PASSPHRASE'),
-        ('async fn connect_for(\n', '''#[derive(Debug)]
-pub(super) struct ForwardUnavailable(String);
-
-impl std::fmt::Display for ForwardUnavailable {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-impl std::error::Error for ForwardUnavailable {}
-
-fn forward_unavailable(error: &str, host: &str, port: u16) -> bool {
-    let address = format!("{host}:{port}");
-    error == format!("Failed to access remote {address}, please make sure if it is open")
-        || error == format!("Failed to access remote {address}. Please make sure it is reachable/open.")
-}
-
-async fn connect_for(
-'''),
-        ('''                        _ if error.starts_with("Failed to access remote ") => {''',
-         '''                        _ if forward.is_some_and(|(host, port, _)| forward_unavailable(&error, host, port)) => {
-                            return Err(super::stage::wrap(ForwardUnavailable(error).into(), "forward_target", "not_started"));
-                        }
-                        _ if error.starts_with("Failed to access remote ") => {'''),
     ])
     edit(files, f"{terminal}/session.rs", [
         ("    let error = match execute(connection, request.clone(), terminal_id).await {",

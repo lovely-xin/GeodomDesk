@@ -38,6 +38,11 @@ def apply(changes, root):
     )
     edit(
         "libs/hbb_common/src/config.rs",
+        "impl Ab {\n    fn path() -> PathBuf {",
+        "impl Ab {\n    pub fn path() -> PathBuf {",
+    )
+    edit(
+        "libs/hbb_common/src/config.rs",
         """    pub fn store(json: String) {
         if let Ok(mut file) = std::fs::File::create(Self::path()) {
             let data = compress(json.as_bytes());
@@ -73,7 +78,20 @@ def apply(changes, root):
             let mut file = options.open(&temporary)?;
             let written = file.write_all(&data).and_then(|_| file.sync_all());
             drop(file);
-            let committed = written.and_then(|_| fs::rename(&temporary, &path));
+            let committed = written.and_then(|_| {
+                for attempt in 0..3 {
+                    match fs::rename(&temporary, &path) {
+                        Ok(()) => return Ok(()),
+                        Err(error) => {
+                            if !cfg!(windows) || attempt == 2 {
+                                return Err(error);
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(25));
+                        }
+                    }
+                }
+                unreachable!()
+            });
             if committed.is_err() {
                 let _ = fs::remove_file(&temporary);
             }

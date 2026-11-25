@@ -160,6 +160,16 @@ impl Session {
     }
 }
 
+#[derive(Debug)]
+pub(super) struct MissingProgram;
+
+impl std::fmt::Display for MissingProgram {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("OpenSSH Client is unavailable; install it or use --transport terminal")
+    }
+}
+impl std::error::Error for MissingProgram {}
+
 fn ssh_program() -> ResultType<PathBuf> {
     #[cfg(windows)]
     {
@@ -181,7 +191,7 @@ fn ssh_program() -> ResultType<PathBuf> {
         let path =
             PathBuf::from(std::ffi::OsString::from_wide(&buffer[..len])).join(r"OpenSSH\ssh.exe");
         if !path.is_file() {
-            bail!("Windows OpenSSH Client is unavailable; enable it or use --transport terminal");
+            return Err(MissingProgram.into());
         }
         return Ok(path);
     }
@@ -491,9 +501,13 @@ async fn open_with_tunnel(
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .context(
-            "Cannot start OpenSSH; install the system OpenSSH client or use --transport terminal",
-        )?;
+        .map_err(|error| -> hbb_common::anyhow::Error {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                MissingProgram.into()
+            } else {
+                anyhow!(error).context("Cannot start OpenSSH")
+            }
+        })?;
     let stdin = child.stdin.take().context("Missing SSH input")?;
     let stdout = BufReader::new(child.stdout.take().context("Missing SSH output")?);
     let mut stderr = child.stderr.take().context("Missing SSH error output")?;

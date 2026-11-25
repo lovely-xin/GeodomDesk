@@ -335,8 +335,14 @@ fn run_script_bounded(
     let overflow = Arc::new(AtomicBool::new(false));
     let out_flag = overflow.clone();
     let err_flag = overflow.clone();
-    let stdout = thread::spawn(move || read_output(stdout, MAX_OUTPUT + READY.len(), out_flag));
-    let stderr = thread::spawn(move || read_output(stderr, MAX_OUTPUT, err_flag));
+    let (out_tx, out_rx) = std::sync::mpsc::sync_channel(1);
+    let (err_tx, err_rx) = std::sync::mpsc::sync_channel(1);
+    thread::spawn(move || {
+        let _ = out_tx.send(read_output(stdout, MAX_OUTPUT + READY.len(), out_flag));
+    });
+    thread::spawn(move || {
+        let _ = err_tx.send(read_output(stderr, MAX_OUTPUT, err_flag));
+    });
     let started = Instant::now();
     let status = loop {
         if overflow.load(Ordering::Acquire) {
@@ -361,13 +367,19 @@ fn run_script_bounded(
         }
         thread::sleep(Duration::from_millis(20));
     };
-    let join = |thread: thread::JoinHandle<ResultType<Vec<u8>>>| {
-        thread
-            .join()
-            .map_err(|_| hbb_common::anyhow::anyhow!("Output reader stopped"))?
+    let recv_output = |rx: std::sync::mpsc::Receiver<ResultType<Vec<u8>>>, name: &str| {
+        match rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(res) => res,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                bail!("PowerShell exited but a child process kept {name} open")
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                bail!("Output reader stopped")
+            }
+        }
     };
-    let mut stdout = join(stdout)?;
-    let stderr = join(stderr)?;
+    let mut stdout = recv_output(out_rx, "stdout")?;
+    let stderr = recv_output(err_rx, "stderr")?;
     let exit_code = status.code().context("Missing PowerShell exit code")?;
     if !stdout.starts_with(READY) {
         let diagnostic = String::from_utf8_lossy(&stderr);

@@ -248,6 +248,9 @@ def download_ranges(url, size, fd, headers, opener=None, resolve_url=None):
     url_lock = threading.Lock()
     state = {"url": url}
 
+    class _IncompleteRangeError(ValueError):
+        pass
+
     def part(start):
         end = min(start + RANGE_CHUNK_BYTES, size) - 1
         for attempt in range(3):
@@ -267,7 +270,7 @@ def download_ranges(url, size, fd, headers, opener=None, resolve_url=None):
                         raise ValueError("GitHub did not honor the requested download range")
                     data = response.read(end - start + 2)
                 if len(data) != end - start + 1 or os.pwrite(fd, data, start) != len(data):
-                    raise ValueError("Incomplete release asset download range")
+                    raise _IncompleteRangeError("Incomplete release asset download range")
                 return
             except urllib.error.HTTPError as err:
                 if attempt >= 2 or err.code not in (401, 403, 410, 429, 500, 502, 503, 504):
@@ -278,7 +281,7 @@ def download_ranges(url, size, fd, headers, opener=None, resolve_url=None):
                             state["url"] = resolve_url()
                 else:
                     time.sleep(0.2 * (attempt + 1))
-            except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError):
+            except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError, _IncompleteRangeError):
                 if attempt >= 2:
                     raise
                 time.sleep(0.2 * (attempt + 1))
@@ -555,9 +558,12 @@ def _run_locked(config, state):
         else:
             if build.get("native_config") is not True:
                 raise ValueError("New releases must contain compiled fixed connection settings")
-            if shutil.disk_usage(state).free < 1024 * 1024 * 1024:
-                raise ValueError("At least 1 GiB free disk is required")
             destination.parent.mkdir(parents=True, exist_ok=True)
+            if (
+                shutil.disk_usage(state).free < 1024 * 1024 * 1024
+                or shutil.disk_usage(destination.parent).free < 1024 * 1024 * 1024
+            ):
+                raise ValueError("At least 1 GiB free disk is required")
             # Build privately, then publish atomically on the destination mount.
             with tempfile.TemporaryDirectory(prefix="build-", dir=state) as temporary:
                 stage = Path(temporary) / "release"

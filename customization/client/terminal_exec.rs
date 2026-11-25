@@ -13,7 +13,7 @@ pub(crate) use tunnel::{list as list_tunnels, close as close_tunnel};
 #[cfg(windows)]
 mod windows;
 
-pub use cli::{run_cli, run_cli_sync};
+use cli::run_cli;
 #[cfg(windows)]
 pub(crate) use windows::run_helper;
 

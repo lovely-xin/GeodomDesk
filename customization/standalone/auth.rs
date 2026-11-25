@@ -57,12 +57,16 @@ pub(super) async fn manage_account(mut args: impl Iterator<Item = String>) -> Re
         }
         Some("logout") if args.next().is_none() => {
             if let Some((saved, token)) = saved_cli_account()? {
-                revoke_account(&token).await?;
-                let path = account_path()?;
-                let _lock = lock_account(&path)?;
-                if read_account(&path)?.as_deref() == Some(&saved) {
-                    std::fs::remove_file(path)?;
+                {
+                    let path = account_path()?;
+                    let _lock = lock_account(&path)?;
+                    if read_account(&path)?.as_deref() == Some(&saved) {
+                        std::fs::remove_file(path)?;
+                    }
                 }
+                revoke_account(&token).await.context(
+                    "CLI account cache cleared. The server did not confirm token revocation",
+                )?;
             }
             println!("GeodomDesk CLI signed out.");
         }
@@ -181,13 +185,20 @@ async fn save_cli_account(token: &str) -> ResultType<()> {
     let path = account_path()?;
     let authority = account_authority();
     std::fs::create_dir_all(path.parent().context("Invalid CLI account cache path")?)?;
-    let _lock = lock_account(&path)?;
-    if let Ok(Some((_, previous))) = read_cli_account(&path, &authority) {
-        if previous != token {
-            revoke_account(&previous).await?;
-        }
+    let previous = {
+        let _lock = lock_account(&path)?;
+        let previous = read_cli_account(&path, &authority)
+            .ok()
+            .flatten()
+            .map(|(_, prev)| prev)
+            .filter(|prev| prev != token);
+        write_cli_account(&path, &authority, token)?;
+        previous
+    };
+    if let Some(previous) = previous {
+        let _ = revoke_account(&previous).await;
     }
-    write_cli_account(&path, &authority, token)
+    Ok(())
 }
 
 fn write_cli_account(
@@ -208,7 +219,17 @@ fn write_cli_account(
         file.write_all(&protected)?;
         file.sync_all()?;
         drop(file);
-        std::fs::rename(&temporary, path)?;
+        for attempt in 0..3 {
+            match std::fs::rename(&temporary, path) {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    if !cfg!(windows) || attempt == 2 {
+                        return Err(error.into());
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+            }
+        }
         Ok(())
     })();
     if result.is_err() {

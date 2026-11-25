@@ -40,12 +40,13 @@ def apply_port_forward_mux(changes):
             handle
         }"""
     new = """        pub fn set_muxed(&self, stream: Stream, kcp: Option<crate::kcp_stream::KcpStream>, interface: impl Interface) -> Arc<TunnelHandle> {
-            self.set_muxed_with_guard(stream, interface, kcp)
+            self.set_muxed_with_guard(stream, kcp, interface, ())
         }
 
         pub fn set_muxed_with_guard<G: Send + 'static>(
             &self,
             mut stream: Stream,
+            kcp: Option<crate::kcp_stream::KcpStream>,
             interface: impl Interface,
             guard: G,
         ) -> Arc<TunnelHandle> {
@@ -66,6 +67,7 @@ def apply_port_forward_mux(changes):
             self.state.send_replace(TunnelState::Muxed(handle.clone()));
             tokio::spawn(tunnel_loop(
                 stream,
+                kcp,
                 handle.clone(),
                 data_rx,
                 control_rx,
@@ -138,6 +140,8 @@ def apply_port_forward_mux(changes):
     }"""
     new_loop = """    async fn tunnel_loop<G: Send + 'static>(
         mut stream: Stream,
+        // Drives a KCP stream's UDP I/O; dropping it kills the stream.
+        kcp: Option<crate::kcp_stream::KcpStream>,
         handle: Arc<TunnelHandle>,
         mut data_rx: mpsc::Receiver<Message>,
         mut control_rx: mpsc::UnboundedReceiver<Message>,
@@ -149,21 +153,25 @@ def apply_port_forward_mux(changes):
         let _guard = guard;
         let read_timeout = Duration::from_millis(READ_TIMEOUT);
         let mut last_recv = Instant::now();
+        let mut webrtc_suspect: Option<Instant> = None;
         let mut watchdog = tokio::time::interval_at(
-            Instant::now() + Duration::from_secs(5),
-            Duration::from_secs(5),
+            Instant::now() + Duration::from_secs(1),
+            Duration::from_secs(1),
         );
         watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let err = loop {
             tokio::select! {
                 Some(msg) = control_rx.recv() => {
-                    if let Err(e) = stream.send(&msg).await {
-                        break format!("send failed: {}", e);
+                    match tokio::time::timeout(Duration::from_secs(10), stream.send(&msg)).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => break format!("send failed: {}", e),
+                        Err(_) => break "send timed out".to_owned(),
                     }
                 }
                 res = stream.next() => match res {
                     Some(Ok(bytes)) => {
                         last_recv = Instant::now();
+                        webrtc_suspect = None;
                         let Ok(msg) = Message::parse_from_bytes(&bytes) else { continue };
                         match msg.union {
                             Some(message::Union::PortForwardChannel(ch)) => {
@@ -186,30 +194,63 @@ def apply_port_forward_mux(changes):
                     None => break "reset by the peer".to_owned(),
                 },
                 _ = watchdog.tick() => {
+                    if stream.webrtc_disconnected() {
+                        let since = *webrtc_suspect.get_or_insert_with(Instant::now);
+                        if since.elapsed() >= Duration::from_secs(3) {
+                            break "webrtc disconnected".to_owned();
+                        }
+                    } else {
+                        webrtc_suspect = None;
+                    }
+                    if kcp
+                        .as_ref()
+                        .and_then(|k| k.peer_silent_for())
+                        .is_some_and(|silent| silent >= Duration::from_secs(8))
+                    {
+                        break "kcp peer silent".to_owned();
+                    }
                     if last_recv.elapsed() >= read_timeout {
                         break "timeout or reset by the peer".to_owned();
                     }
                 }
                 Some(msg) = data_rx.recv() => {
-                    let mut send_err = None;
-                    while let Ok(ctrl) = control_rx.try_recv() {
-                        if let Err(e) = stream.send(&ctrl).await {
-                            send_err = Some(e);
+                    let mut send_err: Option<String> = None;
+                    for _ in 0..16 {
+                        let Ok(ctrl) = control_rx.try_recv() else {
                             break;
+                        };
+                        match tokio::time::timeout(Duration::from_secs(10), stream.send(&ctrl)).await {
+                            Ok(Ok(())) => {}
+                            Ok(Err(e)) => {
+                                send_err = Some(format!("send failed: {}", e));
+                                break;
+                            }
+                            Err(_) => {
+                                send_err = Some("send timed out".to_owned());
+                                break;
+                            }
                         }
                     }
                     if let Some(e) = send_err {
-                        break format!("send failed: {}", e);
+                        break e;
                     }
-                    if let Err(e) = stream.send(&msg).await {
-                        break format!("send failed: {}", e);
+                    match tokio::time::timeout(Duration::from_secs(10), stream.send(&msg)).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => break format!("send failed: {}", e),
+                        Err(_) => break "send timed out".to_owned(),
                     }
                 }
-                _ = lifetime.changed() => break "window closed".to_owned(),
+                _ = lifetime.changed() => {
+                    if kcp.is_some() {
+                        send_kcp_close_reason(&mut stream).await;
+                    }
+                    break "window closed".to_owned();
+                }
             }
         };
         stream.close_webrtc();
         drop(stream);
+        drop(kcp);
         drop(_guard);
         log::info!("port forward tunnel ended: {}", err);
         handle.close_all();
@@ -251,7 +292,7 @@ def apply_port_forward_lifetime(changes):
         ("Ok(Some((stream, kcp))) =>", "Ok(Some((stream, keep_alive, kcp))) =>"),
         ("let _kcp = kcp;", "let _retainer = (keep_alive, kcp);"),
         ("let handle = tunnel.set_muxed(outcome.stream, outcome.kcp, interface.clone());",
-         "let handle = tunnel.set_muxed_with_guard(outcome.stream, interface.clone(), (outcome.keep_alive, outcome.kcp));"),
+         "let handle = tunnel.set_muxed_with_guard(outcome.stream, outcome.kcp, interface.clone(), outcome.keep_alive);"),
         ("Ok(Some(LoginOutcome {\n        stream,", "Ok(Some(LoginOutcome {\n        stream,\n        keep_alive,"),
         ("let kcp = outcome.kcp;", "let retainer = (outcome.keep_alive, outcome.kcp);"),
         ("struct LoginOutcome {\n    stream: Stream,", "struct LoginOutcome {\n    stream: Stream,\n    keep_alive: Option<mpsc::UnboundedSender<()>>,"),
@@ -1031,19 +1072,19 @@ pub async fn new_direct_udp_for_unverified(
         """            Err(e) => match (tls_type, is_tls_type_cached, danger_accept_invalid_cert) {
                 (TlsType::Rustls, _, None) => {""",
         """            Err(e) => match (tls_type, is_tls_type_cached, danger_accept_invalid_cert) {
-                (TlsType::Rustls, _, None) if is_tls_handshake_or_cert_error(&e) => {""",
+                (TlsType::Rustls, _, None) if url.starts_with("wss://") && is_tls_handshake_or_cert_error(&e) => {""",
     )
     _replace_once(
         changes,
         ws_rs,
         """                (TlsType::NativeTls, _, None) => {""",
-        """                (TlsType::NativeTls, _, None) if is_tls_handshake_or_cert_error(&e) => {""",
+        """                (TlsType::NativeTls, _, None) if url.starts_with("wss://") && is_tls_handshake_or_cert_error(&e) => {""",
     )
     _replace_once(
         changes,
         ws_rs,
         """                (TlsType::Rustls, false, Some(_)) => {""",
-        """                (TlsType::Rustls, false, Some(_)) if is_tls_handshake_or_cert_error(&e) => {""",
+        """                (TlsType::Rustls, false, Some(_)) if url.starts_with("wss://") && is_tls_handshake_or_cert_error(&e) => {""",
     )
     _replace_once(
         changes,
@@ -1052,15 +1093,15 @@ pub async fn new_direct_udp_for_unverified(
         """fn is_tls_handshake_or_cert_error(err: &tungstenite::Error) -> bool {
     match err {
         tungstenite::Error::Tls(_) => true,
-        tungstenite::Error::Io(io_err) => !matches!(
-            io_err.kind(),
-            ErrorKind::ConnectionRefused
-                | ErrorKind::TimedOut
-                | ErrorKind::NotFound
-                | ErrorKind::AddrNotAvailable
-                | ErrorKind::NetworkUnreachable
-                | ErrorKind::HostUnreachable
-        ),
+        tungstenite::Error::Io(io_err) => {
+            !matches!(
+                io_err.kind(),
+                ErrorKind::ConnectionRefused
+                    | ErrorKind::TimedOut
+                    | ErrorKind::NotFound
+                    | ErrorKind::AddrNotAvailable
+            ) && !matches!(io_err.raw_os_error(), Some(101 | 113 | 10051 | 10065))
+        }
         _ => false,
     }
 }
@@ -1278,8 +1319,29 @@ def apply_network_discovery_and_lifecycle(changes):
         use hbb_common::futures::future::{select_ok, FutureExt};
         let mut servers: Vec<String> = Config::get_option(config::keys::OPTION_ICE_SERVERS)
             .split(',')
-            .filter_map(|raw| raw.trim().strip_prefix("stun:").map(str::to_owned))
-            .filter(|s| !s.is_empty())
+            .filter_map(|raw| {
+                let raw = raw.trim();
+                let bare = raw
+                    .strip_prefix("stun://")
+                    .or_else(|| raw.strip_prefix("stun:"))?
+                    .trim();
+                if bare.is_empty() || bare.chars().any(char::is_whitespace) {
+                    return None;
+                }
+                let with_port = if bare
+                    .rsplit_once(':')
+                    .is_some_and(|(_, port)| port.parse::<u16>().is_ok())
+                {
+                    bare.to_owned()
+                } else if bare.starts_with('[') && bare.ends_with(']') {
+                    format!("{bare}:3478")
+                } else if bare.contains(':') {
+                    format!("[{bare}]:3478")
+                } else {
+                    format!("{bare}:3478")
+                };
+                Some(with_port)
+            })
             .collect();
         if servers.is_empty() {
             servers = hbb_common::webrtc::WebRTCStream::default_stun_servers();
@@ -1313,32 +1375,6 @@ def apply_network_discovery_and_lifecycle(changes):
         "                                    last_dns_check = Some(Instant::now());",
     )
 
-    _replace_once(
-        changes,
-        "src/client/io_loop.rs",
-        """                if kcp.is_some() {
-                    // Attempted rather than skipped even here: if the loss was one-way the peer
-                    // does get it, and drops its side instead of waiting out its own timeout.
-                    if peer_gone {
-                        peer.set_send_timeout(KCP_CLOSE_REASON_GONE_DEADLINE.as_millis() as u64);
-                    }
-                    // Send the close reason if it hasn't been sent yet, as KCP cannot detect the socket close event.
-                    self.send_close_reason(&mut peer, "kcp").await;
-                    // KCP does not send messages immediately, so wait to ensure the last message is sent.
-                    // 1ms works in my test, but 30ms is more reliable.
-                    tokio::time::sleep(KCP_CLOSE_REASON_FLUSH_DELAY).await;
-                }""",
-        """                if peer_gone {
-                    peer.set_send_timeout(KCP_CLOSE_REASON_GONE_DEADLINE.as_millis() as u64);
-                }
-                if kcp.is_some() {
-                    // Send the close reason if it hasn't been sent yet, as KCP cannot detect the socket close event.
-                    self.send_close_reason(&mut peer, "kcp").await;
-                    // KCP does not send messages immediately, so wait to ensure the last message is sent.
-                    // 1ms works in my test, but 30ms is more reliable.
-                    tokio::time::sleep(KCP_CLOSE_REASON_FLUSH_DELAY).await;
-                }""",
-    )
     _replace_once(
         changes,
         "src/client/io_loop.rs",

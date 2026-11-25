@@ -28,12 +28,25 @@ def source_hash(source):
 
 
 def desktop_recipe(workflow):
+    root = Path(__file__).resolve().parent
     sections = []
     for key in ["RUST_VERSION", "FLUTTER_VERSION", "VCPKG_COMMIT"]:
         sections.append(re.search(r"(?m)^  " + key + r": (.+)$", workflow).group(0))
-    for job in ["windows", "ubuntu"]:
-        body = re.search(r"(?ms)^  " + job + r":\n.*?(?=^  [a-zA-Z_]+:\n|\Z)", workflow).group(0)
-        sections.append(body.replace("    if: needs.plan.outputs.reuse_run == ''\n", ""))
+    for job in ["bridge", "windows", "ubuntu"]:
+        match = re.search(r"(?ms)^  " + job + r":\n.*?(?=^  [a-zA-Z_]+:\n|\Z)", workflow)
+        if match:
+            sections.append(match.group(0).replace("    if: needs.plan.outputs.reuse_run == ''\n", ""))
+        elif job in ("windows", "ubuntu"):
+            raise ValueError(f"Missing required desktop job in workflow: {job}")
+    for helper in [
+        "repack_deb.py",
+        "patch_flutter_sdk.py",
+        "prepare_printer.py",
+        "config/printer-assets.json",
+    ]:
+        path = root / helper
+        if path.is_file():
+            sections.append(f"{helper}:{hashlib.sha256(path.read_bytes()).hexdigest()}\n")
     return "".join(sections)
 
 

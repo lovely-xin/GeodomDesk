@@ -79,10 +79,17 @@ jobs:
           path: reused-ubuntu
           run-id: ${{ inputs.reuse_desktop_run }}
           github-token: ${{ github.token }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        if: inputs.reuse_desktop_run != ''
+        with:
+          name: geodomdesk-windows-server-2008-r2
+          path: reused-windows-server-2008-r2
+          run-id: ${{ inputs.reuse_desktop_run }}
+          github-token: ${{ github.token }}
       - name: Check reusable desktop configuration
         if: inputs.reuse_desktop_run != ''
         run: |
-          python3 -c 'import json,pathlib; assert json.loads(pathlib.Path("reused-windows/geodomdesk-build-config.json").read_text()) == json.loads(pathlib.Path("reused-ubuntu/geodomdesk-build-config.json").read_text())'
+          python3 -c 'import json,pathlib; configs=[json.loads(pathlib.Path(p,"geodomdesk-build-config.json").read_text()) for p in ["reused-windows","reused-ubuntu","reused-windows-server-2008-r2"]]; assert all(config == configs[0] for config in configs)'
           python3 -m pip install -r customization/requirements.txt
       - name: Resolve the reviewed official stable source
         id: plan
@@ -156,8 +163,8 @@ jobs:
           sed -i 's/extended_text: 13.0.0/extended_text: 14.0.0/g' flutter/pubspec.yaml
           cd flutter
           flutter pub get
-          dart format lib/common.dart lib/desktop/pages/connection_page.dart lib/desktop/pages/install_page.dart lib/desktop/pages/desktop_home_page.dart lib/desktop/pages/port_forward_page.dart lib/models/model.dart lib/common/widgets/login.dart lib/desktop/pages/desktop_setting_page.dart lib/mobile/pages/connection_page.dart lib/mobile/pages/settings_page.dart lib/mobile/widgets/dialog.dart lib/web/bridge.dart
-          flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings lib/common.dart lib/desktop/pages/connection_page.dart lib/desktop/pages/install_page.dart lib/desktop/pages/desktop_home_page.dart lib/desktop/pages/port_forward_page.dart lib/models/model.dart lib/common/widgets/login.dart lib/desktop/pages/desktop_setting_page.dart lib/mobile/pages/connection_page.dart lib/mobile/pages/settings_page.dart lib/mobile/widgets/dialog.dart lib/web/bridge.dart
+          dart format lib/common.dart lib/desktop/pages/connection_page.dart lib/desktop/pages/install_page.dart lib/desktop/pages/desktop_home_page.dart lib/desktop/pages/port_forward_page.dart lib/models/model.dart lib/common/widgets/dialog.dart lib/common/widgets/login.dart lib/desktop/pages/desktop_setting_page.dart lib/mobile/pages/connection_page.dart lib/mobile/pages/settings_page.dart lib/mobile/widgets/dialog.dart lib/web/bridge.dart
+          flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings lib/common.dart lib/desktop/pages/connection_page.dart lib/desktop/pages/install_page.dart lib/desktop/pages/desktop_home_page.dart lib/desktop/pages/port_forward_page.dart lib/models/model.dart lib/common/widgets/dialog.dart lib/common/widgets/login.dart lib/desktop/pages/desktop_setting_page.dart lib/mobile/pages/connection_page.dart lib/mobile/pages/settings_page.dart lib/mobile/widgets/dialog.dart lib/web/bridge.dart
           flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings lib/models/ab_model.dart lib/models/geodom_recent_sync.dart lib/models/peer_model.dart lib/common/widgets/address_book.dart lib/common/widgets/peer_card.dart lib/utils/http_service.dart
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
@@ -174,6 +181,7 @@ jobs:
             client/flutter/lib/desktop/pages/connection_page.dart
             client/flutter/lib/desktop/pages/install_page.dart
             client/flutter/lib/models/model.dart
+            client/flutter/lib/common/widgets/dialog.dart
             client/flutter/lib/common/widgets/login.dart
             client/flutter/lib/desktop/pages/desktop_setting_page.dart
             client/flutter/lib/mobile/pages/connection_page.dart

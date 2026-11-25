@@ -463,7 +463,7 @@ def prepare_punch_fallback(changes):
         } else {
             let decision = async {
                 // A role switch or an independent TCP punch keeps its original signaling order.
-                if switch_code.is_empty() && !tcp_punch_allowed() {
+                if switch_code.is_empty() && !allow_tcp_punch {
                     relay_deadline.wait_for_direct(try_direct.as_mut()).await
                 } else {
                     Some(try_direct.as_mut().await)
@@ -474,7 +474,7 @@ def prepare_punch_fallback(changes):
                 rendezvous_server,
                 key,
                 !token.is_empty() || !switch_code.is_empty(),
-                if switch_code.is_empty() && !tcp_punch_allowed() {
+                if switch_code.is_empty() && !allow_tcp_punch {
                     relay_deadline.window()
                 } else {
                     Duration::from_millis(CONNECT_TIMEOUT)
@@ -524,7 +524,7 @@ def prepare_punch_fallback(changes):
                         return Err(transport_race::fallback_failure(typ, handshake, error)),
                     (Err(error), None) if crate::geodomdesk_auth::requires_login(&error.to_string()) =>
                         return Err(error),
-                    (Err(error), None) => return Err(error.context("Failed to connect via relay server")),
+                    (Err(error), None) => hbb_common::bail!("Failed to connect via relay server: {}", error),
                 }
             }
         };
@@ -1107,7 +1107,10 @@ pub const UPDATE_THRESHOLD: u32 = 128 * 1024;""",
                     }
                 } => {
                     let mut send_failed = false;
-                    while let Some(ctrl_rx) = conn.mux_ctrl_rx.as_mut() {
+                    for _ in 0..16 {
+                        let Some(ctrl_rx) = conn.mux_ctrl_rx.as_mut() else {
+                            break;
+                        };
                         match ctrl_rx.try_recv() {
                             Ok(ctrl_msg) => {
                                 if let Err(err) = conn.stream.send(&ctrl_msg).await {

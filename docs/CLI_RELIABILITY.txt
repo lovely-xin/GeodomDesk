@@ -117,7 +117,7 @@ geodomdesk-cli tunnel list --id DEVICE_ID
 geodomdesk-cli tunnel close --id DEVICE_ID --tunnel-id TUNNEL_UUID
 （tunnel open 与 exec/session 相同，默认优先尝试 P2P 直连；需要强制走中继时追加 --relay。）
 
-open 默认分配空闲端口，仅监听发起端 127.0.0.1，默认强制经中继。指定的本地端口被占用时直接失败，不挤掉已有隧道。remote-host 是目标机可访问的主机，不是发起端主机。每个映射最多接受 16 个同时进行的 TCP 连接；新连接独立认证，一个通道失败不重放其他通道的数据。
+open 默认分配空闲端口，仅监听发起端 127.0.0.1；支持多路复用的对端复用单条加密隧道承载最多 256 路并发，旧版对端回退为每连接独立通道（最多 16 路并发）；独立 CLI 版每次接受新数据连接都会复核账号，单通道故障不重放其他通道的数据。指定的本地端口被占用时直接失败，不挤掉已有隧道。remote-host 是目标机可访问的主机，不是发起端主机。
 
 等待 tunnel_ready 后读取 local_port/tunnel_id。open 是前台受管进程，自动化需要保持 stdin 打开；stdin EOF、Ctrl+C、正常退出会关闭它创建的映射。向 stdin 发送 JSON Lines：
 {"op":"status"}
