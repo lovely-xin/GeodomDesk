@@ -371,7 +371,8 @@ pub(super) async fn open(
     ssh: &Options,
 ) -> ResultType<cli::Connection> {
     let started = Instant::now();
-    auth::verify_ssh_account(&options.token).await?;
+    let token = options.current_token()?;
+    auth::verify_ssh_account(&token).await?;
     let host = ssh.host.as_deref().unwrap_or("127.0.0.1");
     let (tunnel, stream) = tunnel::Managed::start_stream(options, host.into(), ssh.port)
         .await
@@ -466,7 +467,7 @@ pub(super) async fn open(
         Session {
             handle,
             tunnel,
-            token: options.token.clone(),
+            token,
             shell: ssh.shell,
             alias,
         },

@@ -136,51 +136,33 @@ pub fn run_standalone_cli() -> ResultType<i32> {
 }
 """
 
-    edit(files, f"{terminal}/cli.rs", [
-        ('       geodomdesk-cli probe --id ID [authentication options]\n',
-         '       geodomdesk-cli probe --id ID [authentication options]\n'
-         '       geodomdesk-cli account login --user USER [--non-interactive]\n'
-         '       geodomdesk-cli account logout\n'),
-        ('    let tunnel=first.as_deref()==Some("tunnel");',
-         '    if first.as_deref() == Some("account") { return auth::manage_account(args).await; }\n'
-         '    let tunnel=first.as_deref()==Some("tunnel");'),
-        ('    let admin = auth::admin_credentials(admin_user, non_interactive)?;',
-         '''    let admin = auth::admin_credentials(admin_user, non_interactive)?;
-    // Read interactive SSH credentials once before establishing a connection or
-    // starting session workers. Fresh connections reuse this process's credentials.
-    if use_ssh && !non_interactive && (ask_ssh_password || ssh_identity.is_some()) {
-        auth::verify_ssh_account(&token).await?;
+
+    cli_path = f"{terminal}/cli.rs"
+    cli_text = files[cli_path].decode()
+    # Use the existing transport and account parser around standalone SSH options.
+    select = cli_text.index("    let use_ssh=")
+    after = cli_text.index("    let is_admin =", select)
+    cli_text = cli_text[:select] + '''    if ssh_host_set && (shell.is_none() || ssh_user.is_none()) {
+        bail!("--ssh-host requires an explicit --ssh-user and --shell");
     }
-    let ssh = prepare_ssh().map_err(|error| super::stage::wrap(error, "ssh", "not_started"))?;'''),
-        ('    if tunnel {\n        return super::tunnel::Managed::start(',
-         '    if tunnel {\n        auth::verify_ssh_account(&options.token).await?;\n        return super::tunnel::Managed::start('),
-        ("""  --transport MODE        auto (default): Bash uses SSH over a managed TCP relay
-                          terminal: use GeodomDesk terminal; ssh: require SSH Bash
-                          Session without --shell keeps the terminal transport
-  --ssh-user USER         Target SSH login (default: authenticated peer username)
-  --ssh-port PORT         Target SSH service port (default 22)
-  --ssh-identity PATH     Use an SSH private key; otherwise agent/default keys or password""",
-         """  --transport MODE        auto (default): embedded SSH over TCP, then GeodomDesk terminal
-                          terminal: require GeodomDesk terminal; ssh: require SSH
-                          Session without --shell uses the GeodomDesk terminal
-  --ssh-user USER         SSH login (default: authenticated peer username)
-  --ssh-host HOST         Destination as reached from the device selected by --id
-                          Requires --ssh-user, --shell and a trusted destination host key
-  --ssh-port PORT         Target SSH service port (default 22)
-  --ssh-identity PATH     Use an SSH private key; otherwise default key or password"""),
-        ("GEODOMDESK_ADMIN_PASSWORD, GEODOMDESK_DEVICE_CODE, GEODOMDESK_SSH_PASSWORD",
-         "GEODOMDESK_ADMIN_PASSWORD, GEODOMDESK_DEVICE_CODE, GEODOMDESK_SSH_PASSWORD,\n"
-         "             GEODOMDESK_SSH_KEY_PASSPHRASE"),
-        ("  --ssh-strict-host-key", "  --ssh-host-fingerprint SHA256:HASH  Verify the destination key against a known fingerprint\n"
-         "  --ssh-strict-host-key"),
-        ("""        if let Some(ssh)=&self.ssh {
-            return tokio::time::timeout(Duration::from_secs(self.timeout.into()),super::ssh::open(self,ssh)).await
-                .context("SSH setup timed out before script dispatch").and_then(|v|v)
-                .map_err(|error|super::stage::wrap(error,"ssh","not_started"));
-        }
-        let started = Instant::now();
-        let (mut connection, history) =""",
-         """        let started = Instant::now();
+    let use_ssh = !tunnel && (command_transport == "ssh"
+        || (command_transport == "auto" && shell.is_some() && admin_user.is_none()));
+    if use_ssh && (ssh_port == 0 || admin_user.is_some()) {
+        bail!("SSH requires a valid port and uses --ssh-user for operating system authentication");
+    }
+    if !use_ssh && (ssh_user.is_some() || ssh_host_set || ssh_identity.is_some()
+        || ssh_known_hosts.is_some() || ssh_fingerprint.is_some() || ssh_strict
+        || ask_ssh_password || ssh_port_set)
+    {
+        bail!("SSH options require a shell and SSH transport");
+    }
+    if use_ssh && shell.is_none() {
+        shell = Some(ExecShell::BASH);
+    }
+''' + cli_text[after:]
+    beginning = cli_text.index("        if let Some(ssh) = &self.ssh {", cli_text.index("pub(super) async fn open_with_keep_alive"))
+    boundary = cli_text.index("        let token = self.current_token()?;", beginning)
+    cli_text = cli_text[:beginning] + '''        let started = Instant::now();
         let budget = Duration::from_secs(self.timeout.into());
         let mut prior_errors = Vec::new();
         if let Some(ssh) = &self.ssh {
@@ -198,22 +180,92 @@ pub fn run_standalone_cli() -> ResultType<i32> {
             }
         }
         let remaining = budget.checked_sub(started.elapsed()).context("Connection budget exhausted")?;
-        let (mut connection, history) ="""),
-        ("super::stage::connect_with_recovery(Duration::from_secs(self.timeout.into()), self.credential_bound(), || {\n                connect(",
-         "super::stage::connect_with_recovery(remaining, self.credential_bound(), || {\n                connect("),
-        ("        connection.setup_errors = history;", "        prior_errors.extend(history);\n        connection.setup_errors = prior_errors;"),
-        ("async fn connect_for(\n", '''#[derive(Debug)]
+''' + cli_text[boundary:]
+    connect = cli_text.index("        let token = self.current_token()?;", beginning)
+    body = cli_text[connect:]
+    body = body.replace("            Duration::from_secs(self.timeout.into()),", "            remaining,", 1)
+    body = body.replace("        connection.setup_errors = history;",
+                        "        prior_errors.extend(history);\n        connection.setup_errors = prior_errors;", 1)
+    files[cli_path] = (cli_text[:connect] + body).encode()
+    edit(files, f"{terminal}/auth.rs", [("fn saved_cli_account(", "pub(super) fn saved_cli_account(")])
+    edit(files, cli_path, [
+        ("       geodomdesk-cli probe --id ID [authentication options]\n",
+         "       geodomdesk-cli probe --id ID [authentication options]\n"
+         "       geodomdesk-cli account login --user USER [--non-interactive]\n"
+         "       geodomdesk-cli account logout\n"),
+        ('    let tunnel=first.as_deref()==Some("tunnel");',
+         '    if first.as_deref() == Some("account") { return auth::manage_account(args).await; }\n'
+         '    let tunnel=first.as_deref()==Some("tunnel");'),
+        ("    fn current_token(&self)", "    pub(super) fn current_token(&self)"),
+        ('        let token = hbb_common::config::LocalConfig::get_option_from_file("access_token");',
+         '        if let Some((_, token)) = auth::saved_cli_account()? { return Ok(token); }\n'
+         '        let token = hbb_common::config::LocalConfig::get_option_from_file("access_token");'),
+        ('    let mut ssh_host = None;', '    let mut ssh_host = None;\n    let mut ssh_fingerprint = None;'),
+        ('                    "--ssh-port" => {',
+         '''                    "--ssh-host-fingerprint" => {
+                        if ssh_fingerprint.is_some() { bail!("Specify --ssh-host-fingerprint only once"); }
+                        let hash = value.strip_prefix("SHA256:").context("Expected an SSH SHA256 fingerprint")?;
+                        if hash.len() != 43 || !hash.bytes().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, b'+' | b'/')) {
+                            bail!("Expected an SSH SHA256 fingerprint");
+                        }
+                        ssh_fingerprint = Some(value);
+                    }
+                    "--ssh-port" => {'''),
+        ('    if probe && shell.is_some() {\n        bail!("probe does not execute a shell");\n    }',
+         '    if probe && shell.is_some() && command_transport.as_str() != "ssh" {\n'
+         '        bail!("Select --transport ssh to probe a specific SSH shell");\n    }'),
+        ('    let admin = auth::admin_credentials(admin_user, non_interactive)?;',
+         '''    let admin = auth::admin_credentials(admin_user, non_interactive)?;
+    let ssh = if use_ssh {
+        if !non_interactive && (ask_ssh_password || ssh_identity.is_some()) {
+            let token = match &token_override {
+                Some(token) => token.clone(),
+                None => auth::account_token(None, true).await?,
+            };
+            auth::verify_ssh_account(&token).await?;
+        }
+        let allow_fallback = command_transport == "auto" && !ssh_host_set && ssh_user.is_none()
+            && ssh_port == 22 && ssh_identity.is_none() && ssh_known_hosts.is_none()
+            && ssh_fingerprint.is_none() && !ssh_strict && !ask_ssh_password;
+        let authentication = super::ssh::Authentication::prepare(
+            ssh_identity.as_deref(), ask_ssh_password, non_interactive,
+        ).map_err(|error| super::stage::wrap(error, "ssh", "not_started"))?;
+        Some(super::ssh::Options {
+            username: ssh_user,
+            allow_fallback,
+            host: ssh_host_set.then_some(ssh_host),
+            port: ssh_port,
+            authentication,
+            known_hosts: ssh_known_hosts
+                .unwrap_or_else(|| hbb_common::config::Config::path("cli-ssh-known_hosts")),
+            strict_host_key: ssh_strict || ssh_host_set,
+            fingerprint: ssh_fingerprint,
+            shell: shell.context("Select an SSH shell")?,
+        })
+    } else {
+        None
+    };'''),
+        ('    if tunnel {\n        let port = remote_port.context("Missing --remote-port")?;',
+         '    if tunnel {\n        auth::verify_ssh_account(&options.current_token()?).await?;\n'
+         '        let port = remote_port.context("Missing --remote-port")?;'),
+        ('        info["ssh_destination"]=serde_json::json!(session.destination);',
+         '        info["ssh_destination"]=session.destination();'),
+        ('  --ssh-strict-host-key', '  --ssh-host-fingerprint SHA256:HASH  Verify the destination host key\n'
+         '  --ssh-strict-host-key'),
+        ('             GEODOMDESK_ADMIN_PASSWORD, GEODOMDESK_DEVICE_CODE, GEODOMDESK_SSH_PASSWORD',
+         '             GEODOMDESK_ADMIN_PASSWORD, GEODOMDESK_DEVICE_CODE, GEODOMDESK_SSH_PASSWORD,\n'
+         '             GEODOMDESK_SSH_KEY_PASSPHRASE'),
+        ('async fn connect_for(\n', '''#[derive(Debug)]
 pub(super) struct ForwardUnavailable(String);
 
 impl std::fmt::Display for ForwardUnavailable {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
     }
 }
 impl std::error::Error for ForwardUnavailable {}
 
 fn forward_unavailable(error: &str, host: &str, port: u16) -> bool {
-    // Both spellings are used by supported peers for a failed destination TCP connect.
     let address = format!("{host}:{port}");
     error == format!("Failed to access remote {address}, please make sure if it is open")
         || error == format!("Failed to access remote {address}. Please make sure it is reachable/open.")
@@ -221,118 +273,21 @@ fn forward_unavailable(error: &str, host: &str, port: u16) -> bool {
 
 async fn connect_for(
 '''),
-        ('''                        _ => return Err(super::stage::wrap(anyhow!("{error}"),"authentication","not_started")),
-''',
-         '''                        _ if forward.is_some_and(|(host, port)| forward_unavailable(&error, host, port)) => {
+        ('''                        _ if error.starts_with("Failed to access remote ") => {''',
+         '''                        _ if forward.is_some_and(|(host, port, _)| forward_unavailable(&error, host, port)) => {
                             return Err(super::stage::wrap(ForwardUnavailable(error).into(), "forward_target", "not_started"));
                         }
-                        _ => return Err(super::stage::wrap(anyhow!("{error}"),"authentication","not_started")),
-'''),
-        ("    async fn ambiguous_targets_and_payloads_are_rejected_before_authentication() {",
-         '''    async fn ambiguous_targets_and_payloads_are_rejected_before_authentication() {
-        assert!(forward_unavailable(
-            "Failed to access remote 127.0.0.1:22, please make sure if it is open", "127.0.0.1", 22,
-        ));
-        assert!(forward_unavailable(
-            "Failed to access remote 127.0.0.1:22. Please make sure it is reachable/open.", "127.0.0.1", 22,
-        ));
-        assert!(!forward_unavailable("No permission of IP tunneling", "127.0.0.1", 22));
-        assert!(!forward_unavailable(
-            "Failed to access remote 127.0.0.1:23, please make sure if it is open", "127.0.0.1", 22,
-        ));
-'''),
-        ("    let mut ssh_user=None;", "    let mut ssh_user=None;\n    let mut ssh_host=None;\n    let mut ssh_fingerprint=None;"),
-        ('                    "--ssh-port"=>ssh_port=value.parse().context("Invalid SSH port")?,',
-         '''                    "--ssh-host" => {
-                        if ssh_host.is_some() { bail!("Specify --ssh-host only once"); }
-                        if value.is_empty() || value.len() > 253
-                            || value.chars().any(|ch: char| ch.is_control() || ch.is_whitespace())
-                        { bail!("Invalid SSH destination host"); }
-                        ssh_host = Some(value);
-                    },
-                    "--ssh-host-fingerprint" => {
-                        if ssh_fingerprint.is_some() { bail!("Specify --ssh-host-fingerprint only once"); }
-                        let hash = value.strip_prefix("SHA256:").context("Expected an SSH SHA256 fingerprint")?;
-                        if hash.len() != 43 || !hash.bytes().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, b'+' | b'/')) {
-                            bail!("Expected an SSH SHA256 fingerprint");
-                        }
-                        ssh_fingerprint = Some(value);
-                    },
-                    "--ssh-port"=>ssh_port=value.parse().context("Invalid SSH port")?,'''),
-        ('    if probe && shell.is_some() {\n        bail!("probe does not execute a shell");\n    }',
-         '''    if probe && shell.is_some() && command_transport != "ssh" {
-        bail!("Select --transport ssh to probe a specific SSH shell");
-    }'''),
-        ('''    let use_ssh=!tunnel && (command_transport=="ssh" || (command_transport=="auto" && shell==Some(ExecShell::BASH)));
-    if use_ssh && (ssh_port==0 || admin_user.is_some() || shell.is_some_and(|shell|shell!=ExecShell::BASH)) {bail!("SSH transport requires Bash, a valid SSH port and a Linux login");}
-    if !use_ssh && (ssh_user.is_some() || ssh_identity.is_some() || ssh_known_hosts.is_some() || ssh_strict || ask_ssh_password || ssh_port!=22) {bail!("SSH options require --shell bash or --transport ssh");}
-    if use_ssh && shell.is_none(){shell=Some(ExecShell::BASH);}
-    let ssh=if use_ssh {
-        let password=match std::env::var("GEODOMDESK_SSH_PASSWORD") {
-            Ok(value)=>Some(value),Err(std::env::VarError::NotPresent) if ask_ssh_password=>{
-                if non_interactive {bail!("Set GEODOMDESK_SSH_PASSWORD for non-interactive use");}
-                Some(rpassword::prompt_password("Target SSH password: ")?)
-            },Err(std::env::VarError::NotPresent)=>None,Err(std::env::VarError::NotUnicode(_))=>bail!("GEODOMDESK_SSH_PASSWORD must be valid Unicode"),
-        };
-        let mut askpass=std::env::current_exe()?;askpass.set_file_name(if cfg!(windows){"geodomdesk-cli.exe"}else{"geodomdesk-cli"});
-        Some(super::ssh::Options{username:ssh_user,port:ssh_port,identity:ssh_identity,
-            known_hosts:ssh_known_hosts.unwrap_or_else(||hbb_common::config::Config::path("cli-ssh-known_hosts")),strict_host_key:ssh_strict,password,askpass})
-    } else {None};''',
-         '''    if ssh_host.is_some() && (shell.is_none() || ssh_user.is_none()) {
-        bail!("--ssh-host requires an explicit --ssh-user and --shell");
-    }
-    let use_ssh = !tunnel && (command_transport == "ssh"
-        || (command_transport == "auto" && shell.is_some() && admin_user.is_none()));
-    if use_ssh && (ssh_port == 0 || admin_user.is_some()) {
-        bail!("SSH requires a valid port and uses --ssh-user for operating system authentication");
-    }
-    if !use_ssh && (ssh_user.is_some() || ssh_host.is_some() || ssh_identity.is_some()
-        || ssh_known_hosts.is_some() || ssh_fingerprint.is_some() || ssh_strict || ask_ssh_password || ssh_port != 22)
-    {
-        bail!("SSH options require a shell and SSH transport");
-    }
-    if use_ssh && shell.is_none() {
-        shell = Some(ExecShell::BASH);
-    }
-    let prepare_ssh = || -> ResultType<Option<super::ssh::Options>> {
-        if !use_ssh {
-            return Ok(None);
-        }
-        let allow_fallback = command_transport == "auto" && ssh_host.is_none() && ssh_user.is_none()
-            && ssh_port == 22 && ssh_identity.is_none() && ssh_known_hosts.is_none()
-            && ssh_fingerprint.is_none() && !ssh_strict && !ask_ssh_password;
-        let strict_host_key = ssh_strict || ssh_host.is_some();
-        let authentication = super::ssh::Authentication::prepare(
-            ssh_identity.as_deref(), ask_ssh_password, non_interactive,
-        )?;
-        Ok(Some(super::ssh::Options {
-            username: ssh_user,
-            allow_fallback,
-            host: ssh_host,
-            port: ssh_port,
-            authentication,
-            known_hosts: ssh_known_hosts
-                .unwrap_or_else(|| hbb_common::config::Config::path("cli-ssh-known_hosts")),
-            strict_host_key,
-            fingerprint: ssh_fingerprint,
-            shell: shell.context("Select an SSH shell")?,
-        }))
-    };'''),
-        ('''            (vec!["exec","--id","1","--transport","ssh","--shell","powershell"],"SSH transport requires Bash"),''',
-         '''            (vec!["exec","--id","1","--ssh-host","jump","--shell","powershell"],"--ssh-host requires an explicit --ssh-user and --shell"),'''),
-        ('''        info["command_transport"]=serde_json::json!("ssh-relay");''',
-         '''        info["command_transport"]=serde_json::json!("ssh-relay");
-        info["ssh_destination"]=session.destination();'''),
+                        _ if error.starts_with("Failed to access remote ") => {'''),
     ])
     edit(files, f"{terminal}/session.rs", [
         ("    let error = match execute(connection, request.clone(), terminal_id).await {",
          """    if matches!(&connection.backend, cli::Backend::Terminal(_)) {
-        super::auth::verify_ssh_account(&options.token).await?;
+        super::auth::verify_ssh_account(&options.current_token()?).await?;
     }
     let error = match execute(connection, request.clone(), terminal_id).await {"""),
         ("    execute(connection, request, terminal_id).await\n}",
          """    if matches!(&connection.backend, cli::Backend::Terminal(_)) {
-        super::auth::verify_ssh_account(&options.token).await?;
+        super::auth::verify_ssh_account(&options.current_token()?).await?;
     }
     execute(connection, request, terminal_id).await
 }"""),

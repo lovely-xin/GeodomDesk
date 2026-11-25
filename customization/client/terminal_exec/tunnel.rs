@@ -907,7 +907,7 @@ impl Managed {
                             let _count=Count(status.clone());
                             let result=async {
                                 #[cfg(feature = "embedded-ssh")]
-                                super::auth::verify_ssh_account(&options.token).await?;
+                                super::auth::verify_ssh_account(&options.current_token()?).await?;
                                     let connection=match saved {Some(c)=>c,None=>options.open_forward(&record.remote_host,record.remote_port,false).await?};
                                 status.set_transport(connection.direct(), connection.transport(), false);
                                 forward(socket,connection).await
