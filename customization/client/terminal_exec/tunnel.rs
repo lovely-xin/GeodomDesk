@@ -679,8 +679,6 @@ impl Managed {
                 }
             }
             let _close_guard = MarkClosed(status.clone());
-            let _registration = registration;
-            let _mux_tunnel = mux_tunnel.clone();
             let mut first = initial_legacy.map(|conn| (conn, Instant::now()));
             let mut channels = JoinSet::new();
             let mut controls = JoinSet::new();
@@ -959,10 +957,11 @@ impl Managed {
             channels.shutdown().await;
             status.active.store(0, Ordering::Relaxed);
             drop(registration);
-            status.mark_closed();
+            drop(mux_tunnel);
             status.store_mux(None);
-            released.send_replace(true);
             drop(control);
+            status.mark_closed();
+            released.send_replace(true);
             while controls.join_next().await.is_some() {}
         });
         Ok(Self {
