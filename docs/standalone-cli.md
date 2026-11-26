@@ -60,7 +60,7 @@ geodomdesk-cli session --id DEVICE_ID --shell powershell --expect-hostname HOSTN
 在新的已审核 RustDesk 源码目录中检出递归子模块。按平台安装项目的本地库依赖，使用 Rust 1.89.0 构建。GitHub 的 `Build standalone GeodomDesk CLI` 工作流会在 Windows 和 Ubuntu 上运行测试，解压并核验生成的包。主分支构建通过后发布带 `cli-v` 标签的独立 CLI。
 
 ```text
-python customization/prepare_client.py --source UPSTREAM_DIRECTORY --version UPSTREAM_VERSION --build-number BUILD_NUMBER --standalone-cli
+python customization/packaging/prepare_client.py --source UPSTREAM_DIRECTORY --version UPSTREAM_VERSION --build-number BUILD_NUMBER --standalone-cli
 cd UPSTREAM_DIRECTORY
 cargo +1.89.0 test --locked --release --features embedded-ssh --lib terminal_exec::
 cargo +1.89.0 test --locked --release --features embedded-ssh --lib port_forward::

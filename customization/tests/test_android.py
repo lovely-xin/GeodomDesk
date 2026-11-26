@@ -9,7 +9,7 @@ import zipfile
 from pathlib import Path
 from unittest import mock
 
-import android_release
+from packaging import android_release
 
 
 class AndroidReleaseTests(unittest.TestCase):

@@ -19,8 +19,8 @@ from unittest import mock
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-import channel
-import prepare_client
+from packaging import prepare_client
+from release import channel
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -36,7 +36,7 @@ class DownloadTests(unittest.TestCase):
                 self.check_download(failure)
 
     def check_download(self, failure=None):
-        import publisher
+        from release import publisher
 
         data = bytes(range(256)) * (5 * 1024 * 1024 // 256)
         requests = []
@@ -93,7 +93,7 @@ class DownloadTests(unittest.TestCase):
                 self.assertEqual(publisher.download(asset, cache, {}), result)
 
     def test_range_retries_refresh_expired_redirect_and_prune_cache(self):
-        import publisher
+        from release import publisher
 
         data = b"R" * (publisher.RANGE_CHUNK_BYTES + 128)
         calls = []
@@ -208,7 +208,7 @@ class ChannelTests(unittest.TestCase):
                 channel.signed_metadata("1.5.2", "2026-11-04T00:00:00Z", changed, bytes(32))
 
     def test_changelog_normalization_and_signed_metadata(self):
-        import release_bundle
+        from release import release_bundle
 
         dirty = "\r\n\x00- 修复连接\r\n\r\n\r\n- 提升速度\x1b[0m   \n"
         self.assertEqual(channel.normalize_changelog(dirty), "- 修复连接\n\n- 提升速度[0m")
@@ -580,10 +580,17 @@ class ChannelTests(unittest.TestCase):
             relay_rs = (source / "src/client/relay.rs").read_text(encoding="utf-8")
             self.assertIn("connect_relay_socket(&relay_server, ipv4, false)", relay_rs)
             self.assertIn("connect_relay_socket(&relay_server, ipv4, true)", relay_rs)
+            artifact_rs = (source / "src/updater/artifact.rs").read_text(encoding="utf-8")
+            self.assertIn('"windows-legacy"', artifact_rs)
+            self.assertNotIn("windows-server-2008-r2", artifact_rs)
+            self.assertIn(
+                'if crate::updater::current_update_platform() == "windows-legacy"',
+                common_rs,
+            )
 
     def test_customizations_do_not_change_wire_protocol(self):
-        from customizations import upstream, identity, update_channel, account_login
-        from customizations.edits import SourceEdits
+        from patches import upstream, identity, update_channel, account_login
+        from patches.edits import SourceEdits
 
         baseline = upstream.load_baseline(ROOT)
         changes = SourceEdits({name: data.decode("utf-8") for name, data in baseline.items()})
@@ -602,7 +609,7 @@ class ChannelTests(unittest.TestCase):
             self.assertEqual(changes[name], baseline[name].decode("utf-8").replace(old, new, 1))
 
     def test_terminal_exec_extends_only_the_peer_message_protocol(self):
-        from customizations import upstream, terminal_exec
+        from patches import upstream, terminal_exec
 
         baseline = upstream.load_baseline(ROOT)
         changes = {name: data.decode("utf-8") for name, data in baseline.items()}
@@ -629,7 +636,7 @@ class ChannelTests(unittest.TestCase):
 @unittest.skipUnless(os.name == "posix", "Linux publisher and packaging tests")
 class PublisherTests(unittest.TestCase):
     def setUp(self):
-        import publisher
+        from release import publisher
 
         self.p = publisher
         self.temp = tempfile.TemporaryDirectory()
@@ -660,7 +667,7 @@ class PublisherTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def build_fixture(self, version="1.5.2", build_number=0, windows_server_2008_r2=False):
+    def build_fixture(self, version="1.5.2", build_number=0, extra_targets=()):
         release_id = channel.make_release_id(version, build_number) if build_number else version
         release = {"tag_name": version, "published_at": "2026-11-04T00:00:00Z", "assets": []}
         build = {
@@ -678,14 +685,12 @@ class PublisherTests(unittest.TestCase):
         }
         build.update(release_id=release_id, build_number=build_number)
         local = {}
-        targets = channel.TARGETS
-        if windows_server_2008_r2:
-            targets += (channel.WINDOWS_SERVER_2008_R2,)
+        targets = channel.TARGETS + tuple(extra_targets)
         for platform, arch, fmt in targets:
             name = channel.file_name(release_id, platform, fmt)
             path = self.root / name
-            if (platform, arch, fmt) == channel.WINDOWS_SERVER_2008_R2:
-                path.write_bytes(b"MZ-compatibility-pack")
+            if (platform, arch, fmt) == channel.WINDOWS_LEGACY:
+                path.write_bytes(b"MZ-legacy-compatibility-pack")
             else:
                 path.write_bytes((b"MZ" if fmt == "exe" else b"deb") * 1024)
             if fmt == "apk":
@@ -778,25 +783,99 @@ class PublisherTests(unittest.TestCase):
         self.assertFalse((target / "install-windows.ps1").exists())
         self.assertIn("old client", self.portal.read_text())
 
-    def test_publish_server_2008_r2_as_separate_signed_artifact(self):
-        release, _, local = self.build_fixture(windows_server_2008_r2=True)
+    def test_mainline_release_excludes_legacy_windows_and_stops_legacy_updates(self):
+        mainline = [{"platform": p, "arch": a, "format": f} for p, a, f in channel.TARGETS]
+        self.assertEqual(channel.release_targets(mainline), channel.TARGETS)
+        with self.assertRaises(ValueError):
+            channel.release_targets(mainline + [{"platform": "windows-legacy", "arch": "x64", "format": "exe"}])
+        with self.assertRaises(ValueError):
+            channel.release_targets(
+                mainline + [{"platform": "windows-server-2008-r2", "arch": "x64", "format": "exe"}]
+            )
+        legacy_release, _, legacy_local = self.build_fixture(
+            extra_targets=(channel.WINDOWS_LEGACY,)
+        )
+        with self.mocks(legacy_release, legacy_local):
+            with self.assertRaises(ValueError):
+                self.p.run(self.config)
+
+        release, _, local = self.build_fixture(version="1.5.3")
         with self.mocks(release, local):
             self.p.run(self.config)
+
         latest = json.loads((self.public / "latest.json").read_text())
-        target = self.public / "releases/1.5.2"
+        self.assertNotIn("windows_server_2008_r2_url", latest)
+        self.assertNotIn("windows_legacy_url", latest)
+
+        target = self.public / "releases/1.5.3"
         metadata = (target / channel.METADATA_NAME).read_bytes()
         signature = json.loads((target / (channel.METADATA_NAME + ".sig")).read_bytes())
         Ed25519PublicKey.from_public_bytes(channel.public_key(self.seed.read_bytes())).verify(
             base64.b64decode(signature["signature"]), channel.SIGNATURE_CONTEXT + metadata
         )
         packages = {item["platform"]: item for item in json.loads(metadata)["artifacts"]}
-        compatibility = packages["windows-server-2008-r2"]
-        self.assertEqual(compatibility["url"], latest["windows_server_2008_r2_url"])
-        self.assertEqual(compatibility["sha256"], channel.sha256(target / compatibility["file_name"]))
-        self.assertNotEqual(compatibility["sha256"], packages["windows"]["sha256"])
-        self.assertIn(compatibility["file_name"], (target / "index.html").read_text())
-        self.p.portal_update(self.portal, "1.5.2", windows_server_2008_r2=True)
-        self.assertIn(compatibility["url"], self.portal.read_text())
+        self.assertEqual(set(packages), {"windows", "linux", "android"})
+
+        release_index = (target / "index.html").read_text()
+        self.assertIn("Win10 / 11 / Server 2016+", release_index)
+        self.assertNotIn("windows-legacy", release_index)
+        self.assertNotIn("已停止更新", release_index)
+
+    def test_frozen_legacy_windows_link_stays_decoupled_from_update_pointer(self):
+        with self.assertRaises(ValueError):
+            self.p.validate_legacy_windows(
+                {
+                    "legacy_windows": {
+                        "url": "https://evil.example/geodomdesk-1.5.1-r9-windows-legacy-x64.exe",
+                        "version": "1.5.1-r9",
+                    }
+                }
+            )
+
+        legacy = {
+            "url": channel.BASE_URL + "/releases/1.5.1-r9/geodomdesk-1.5.1-r9-windows-legacy-x64.exe",
+            "version": "1.5.1-r9",
+        }
+        config = dict(self.config, legacy_windows=legacy)
+        release, _, local = self.build_fixture(version="1.5.3")
+        with self.mocks(release, local):
+            self.p.run(config)
+
+        latest_text = (self.public / "latest.json").read_text()
+        latest = json.loads(latest_text)
+        self.assertNotIn("windows_server_2008_r2_url", latest)
+        self.assertNotIn("windows_legacy_url", latest)
+        self.assertNotIn(legacy["url"], latest_text)
+
+        target = self.public / "releases/1.5.3"
+        metadata_text = (target / channel.METADATA_NAME).read_text()
+        packages = {item["platform"]: item for item in json.loads(metadata_text)["artifacts"]}
+        self.assertEqual(set(packages), {"windows", "linux", "android"})
+        self.assertNotIn(legacy["url"], metadata_text)
+
+        release_index = (target / "index.html").read_text()
+        self.assertIn(legacy["url"], release_index)
+        self.assertIn("Win7 / 8 / Server 2008 R2–2012 R2", release_index)
+        self.assertIn("已停止更新", release_index)
+        self.assertIn("1.5.1-r9", release_index)
+
+        self.p.portal_update(self.portal, "1.5.3", legacy_windows=legacy)
+        portal_text = self.portal.read_text()
+        self.assertIn(legacy["url"], portal_text)
+        self.assertIn("Win7 / 8 / Server 2008 R2–2012 R2", portal_text)
+        self.assertIn("已停止更新", portal_text)
+
+        config_updated = dict(
+            self.config,
+            activate_portal=True,
+            legacy_windows={
+                "url": channel.BASE_URL + "/releases/1.5.2-r1/geodomdesk-1.5.2-r1-windows-legacy-x64.exe",
+                "version": "1.5.2-r1",
+            },
+        )
+        with self.mocks(release, local):
+            self.p.run(config_updated)
+        self.assertIn("1.5.2-r1", self.portal.read_text())
 
     def test_failed_build_does_not_switch_current(self):
         release, _, local = self.build_fixture()

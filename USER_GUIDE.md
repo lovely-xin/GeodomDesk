@@ -2,7 +2,7 @@
 
 GeodomDesk 基于 RustDesk 定制。连接服务和更新通道由安装包固定配置，普通使用无需填写服务器、公钥或管理员 API 令牌。
 
-Windows Server 2008 R2 SP1 x64 使用下载页中的 **Server 2008 R2 兼容版**。远程脚本选择 Windows PowerShell，TCP 隧道按目标端的服务地址和端口配置。
+Windows 10 / 11 与 Windows Server 2016+ x64 使用 **Windows 标准版**（随主线持续更新）。Win7 SP1 / Win8 / 8.1 / Windows Server 2008 R2–2012 R2 x64 请下载已停止自动更新的独立归档 **Windows 旧系统兼容版**。远程脚本选择 Windows PowerShell，TCP 隧道按目标端的服务地址和端口配置。
 
 ## 连接与账号
 
@@ -135,7 +135,7 @@ Ubuntu 和 Android 不展示 Windows 专用的打印机驱动安装入口。
 
 通用端口代理使用 `tunnel open --id DEVICE_ID --remote-port PORT --local-port 0`，保持 stdin 打开并读取 `tunnel_ready` 的实际端口；`tunnel list --id DEVICE_ID` 查询，`tunnel close --id DEVICE_ID --tunnel-id UUID` 关闭。仅监听本机回环地址；CLI 退出会清理自己创建的映射。同一系统、用户和配置目录中的新版客户端 TCP 隧道页面会显示 CLI 行并提供关闭按钮，手工映射保持独立。通用 TCP 数据加密由服务协议提供，默认 Bash 使用 SSH。
 
-操作示例、超时预算和故障恢复步骤见 [CLI 实践说明](docs/CLI_RELIABILITY.txt)。
+操作示例、超时预算和故障恢复步骤见 [CLI 实践说明](docs/cli-reliability.md)。
 
 
 脚本文件路径仅接受普通文件，命名管道和设备路径会在执行前拒绝；管道输入使用 `exec --script -`，会话则发送 `script` 文本。Bash 兼容引导程序显式初始化自己的输出窗口计数器，支持开启未定义变量检查的目标环境。

@@ -1,0 +1,281 @@
+name: Build GeodomDesk Windows Legacy (Archive)
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_number:
+        description: Build revision recorded in the frozen legacy archive
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: geodomdesk-windows-legacy-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  LEGACY_RUST_VERSION: '1.75.0'
+  BRIDGE_RUST_VERSION: '1.85.1'
+  FLUTTER_VERSION: '3.24.5'
+  VCPKG_COMMIT: 9e593bb18ea69cc5095e012465dcd675a822ed0d
+  CARGO_INCREMENTAL: '0'
+  CARGO_BUILD_JOBS: '3'
+
+jobs:
+  plan:
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      upstream_commit: ${{ steps.resolve.outputs.upstream_commit }}
+      build_number: ${{ steps.resolve.outputs.build_number }}
+      release_id: ${{ steps.resolve.outputs.release_id }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - id: resolve
+        env:
+          INPUT_BUILD_NUMBER: ${{ inputs.build_number }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, subprocess
+          from pathlib import Path
+
+          cfg = json.loads(Path("customization/config/client-channel.json").read_text(encoding="utf-8"))
+          commit = cfg["upstream_commit"]
+          subprocess.run(["git", "init", "client"], check=True)
+          subprocess.run(["git", "-C", "client", "remote", "add", "origin", "https://github.com/rustdesk/rustdesk.git"], check=True)
+          subprocess.run(["git", "-C", "client", "fetch", "--depth=1", "origin", commit], check=True)
+          subprocess.run(["git", "-C", "client", "checkout", "--detach", "FETCH_HEAD"], check=True)
+          manifest = Path("client/Cargo.toml").read_text(encoding="utf-8")
+          version = re.search(r'(?m)^version\s*=\s*"([^"]+)"', manifest).group(1)
+          raw_build = os.environ["INPUT_BUILD_NUMBER"].strip() or os.environ["RUN_NUMBER"]
+          build_number = int(raw_build)
+          if build_number <= 0:
+              raise ValueError("build_number must be positive")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"version={version}\n")
+              out.write(f"upstream_commit={commit}\n")
+              out.write(f"build_number={build_number}\n")
+              out.write(f"release_id={version}-r{build_number}\n")
+          PY
+
+  bridge:
+    needs: plan
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: client
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+      UPSTREAM_COMMIT: ${{ needs.plan.outputs.upstream_commit }}
+      BUILD_NUMBER: ${{ needs.plan.outputs.build_number }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          repository: rustdesk/rustdesk
+          ref: ${{ env.UPSTREAM_COMMIT }}
+          submodules: recursive
+          path: client
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
+        with:
+          toolchain: ${{ env.BRIDGE_RUST_VERSION }}
+          components: rustfmt
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          workspaces: client
+          prefix-key: geodomdesk-legacy-bridge
+          cache-on-failure: true
+      - uses: subosito/flutter-action@2783a3f08e1baf891508463f8c6653c258246225
+        with:
+          flutter-version: '3.22.3'
+          cache: true
+      - name: Install code generation prerequisites
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y clang cmake libclang-dev libgtk-3-dev ninja-build pkg-config nasm
+          python3 -m pip install -r ../customization/requirements.txt
+      - name: Prepare and validate source
+        run: |
+          python3 ../customization/packaging/prepare_client.py --source . --version "$VERSION" --build-number "$BUILD_NUMBER"
+          CARGO_TARGET_DIR="$PWD/target/geodomdesk-verification" python3 ../customization/packaging/verify_rust.py --source .
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ~/.cargo/bin
+          key: ${{ runner.os }}-cargo-bin-bridge-1.0.95-1.80.1
+      - name: Generate Flutter bridge
+        run: |
+          cargo install cargo-expand --version 1.0.95 --locked
+          cargo install flutter_rust_bridge_codegen --version 1.80.1 --features uuid --locked
+          sed -i 's/extended_text: 14.0.0/extended_text: 13.0.0/g' flutter/pubspec.yaml
+          (cd flutter && flutter pub get)
+          flutter_rust_bridge_codegen --rust-input ./src/flutter_ffi.rs --dart-output ./flutter/lib/generated_bridge.dart --c-output ./flutter/macos/Runner/bridge_generated.h
+      - uses: subosito/flutter-action@2783a3f08e1baf891508463f8c6653c258246225
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - name: Validate customized UI
+        run: |
+          python3 ../customization/packaging/patch_flutter_sdk.py
+          python3 -c 'import build; build.ffi_bindgen_function_refactor()'
+          sed -i 's/extended_text: 13.0.0/extended_text: 14.0.0/g' flutter/pubspec.yaml
+          (cd flutter && flutter pub get)
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: geodomdesk-legacy-bridge
+          if-no-files-found: error
+          path: |
+            client/src/bridge_generated.rs
+            client/src/bridge_generated.io.rs
+            client/flutter/lib/generated_bridge.dart
+            client/flutter/lib/generated_bridge.freezed.dart
+            client/flutter/lib/desktop/pages/desktop_home_page.dart
+            client/flutter/lib/desktop/pages/port_forward_page.dart
+            client/flutter/lib/common.dart
+            client/flutter/lib/desktop/pages/connection_page.dart
+            client/flutter/lib/desktop/pages/install_page.dart
+            client/flutter/lib/models/model.dart
+            client/flutter/lib/common/widgets/dialog.dart
+            client/flutter/lib/common/widgets/login.dart
+            client/flutter/lib/desktop/pages/desktop_setting_page.dart
+            client/flutter/lib/mobile/pages/connection_page.dart
+            client/flutter/lib/mobile/pages/settings_page.dart
+            client/flutter/lib/mobile/widgets/dialog.dart
+            client/flutter/lib/web/bridge.dart
+
+  windows_legacy:
+    name: windows-legacy
+    needs: [plan, bridge]
+    runs-on: windows-2022
+    timeout-minutes: 180
+    defaults:
+      run:
+        working-directory: client
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+      UPSTREAM_COMMIT: ${{ needs.plan.outputs.upstream_commit }}
+      BUILD_NUMBER: ${{ needs.plan.outputs.build_number }}
+      RELEASE_ID: ${{ needs.plan.outputs.release_id }}
+      VCPKG_DEFAULT_TRIPLET: x64-windows-static
+      VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          repository: rustdesk/rustdesk
+          ref: ${{ env.UPSTREAM_COMMIT }}
+          submodules: recursive
+          path: client
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
+        with:
+          toolchain: ${{ env.LEGACY_RUST_VERSION }}
+          components: rustfmt
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          workspaces: client
+          prefix-key: geodomdesk-windows-legacy
+          cache-on-failure: true
+      - uses: subosito/flutter-action@2783a3f08e1baf891508463f8c6653c258246225
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - uses: KyleMayes/install-llvm-action@ebc0426251bc40c7cd31162802432c68818ab8f0
+        with:
+          version: '15.0.6'
+      - name: Install current CMake for pinned vcpkg
+        shell: pwsh
+        run: |
+          python -m pip install cmake==4.3.0
+          python -m pip install -r ../customization/requirements.txt
+          $scripts = python -c "import sysconfig; print(sysconfig.get_path('scripts'))"
+          $scripts | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Prepare independent client identity
+        run: python ../customization/packaging/prepare_client.py --source . --version $env:VERSION --build-number $env:BUILD_NUMBER
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: geodomdesk-legacy-bridge
+          path: client
+      - name: Patch the pinned Flutter SDK with legacy compatibility engine
+        run: python ../customization/packaging/patch_flutter_sdk.py --windows-legacy
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        id: native-cache
+        with:
+          path: ${{ runner.temp }}/vcpkg-binary-cache
+          key: geodomdesk-vcpkg-windows-x64-${{ env.VCPKG_COMMIT }}-${{ hashFiles('client/vcpkg.json', 'client/res/vcpkg/**') }}
+      - uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2
+        with:
+          vcpkgDirectory: C:\vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT }}
+          doNotCache: false
+      - name: Build native dependencies
+        shell: bash
+        env:
+          VCPKG_BINARY_SOURCES: clear;files,${{ runner.temp }}/vcpkg-binary-cache,readwrite
+        run: |
+          mkdir -p "$RUNNER_TEMP/vcpkg-binary-cache"
+          cd "$GITHUB_WORKSPACE/client"
+          "$VCPKG_ROOT/vcpkg" install --triplet x64-windows-static --x-install-root="$VCPKG_ROOT/installed"
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        if: always() && steps.native-cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ runner.temp }}/vcpkg-binary-cache
+          key: ${{ steps.native-cache.outputs.cache-primary-key }}
+      - name: Build legacy Windows Flutter bundle
+        run: |
+          python ./build.py --portable --flutter --skip-portable-pack --hwcodec --vram
+          if ($LASTEXITCODE -ne 0) { throw 'Legacy Windows build failed' }
+      - name: Build legacy Windows terminal CLI
+        run: |
+          $features = python ./build.py --print-features --flutter --hwcodec --vram
+          if ($LASTEXITCODE -ne 0) { throw 'Could not determine native features' }
+          cargo build --locked --release --features $features --bin geodomdesk-cli
+          if ($LASTEXITCODE -ne 0) { throw 'Terminal CLI build failed' }
+          Copy-Item ./target/release/geodomdesk-cli.exe ./flutter/build/windows/x64/runner/Release/
+      - name: Build independent privacy helper
+        shell: pwsh
+        run: |
+          git clone https://github.com/rustdesk-org/RustDeskTempTopMostWindow ../topmost-helper
+          git -C ../topmost-helper checkout ecd8d6a139eee76845ea66423fb739af450fda90
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products '*' -requires Microsoft.Component.MSBuild -property installationPath
+          & "$vs\MSBuild\Current\Bin\MSBuild.exe" ../topmost-helper/WindowInjection/WindowInjection.vcxproj -p:Configuration=Release -p:Platform=x64 -p:TargetVersion=Windows10 -p:PlatformToolset=v143
+          if ($LASTEXITCODE -ne 0) { throw 'Privacy helper build failed' }
+          Copy-Item ../topmost-helper/WindowInjection/x64/Release/WindowInjection.dll ./flutter/build/windows/x64/runner/Release/
+      - name: Create portable legacy archive executable
+        shell: pwsh
+        run: |
+          python ../customization/packaging/prepare_printer.py --destination ./flutter/build/windows/x64/runner/Release --cache "$env:RUNNER_TEMP/printer-assets"
+          if ($LASTEXITCODE -ne 0) { throw 'Printer components missing or unverified' }
+          python -m pip install -r ./libs/portable/requirements.txt
+          Push-Location libs/portable
+          python ./generate.py -f ../../flutter/build/windows/x64/runner/Release -o . -e ../../flutter/build/windows/x64/runner/Release/GeodomDesk.exe
+          if ($LASTEXITCODE -ne 0) { throw 'Portable packer failed' }
+          Pop-Location
+          New-Item -ItemType Directory -Force ../windows-legacy-artifact | Out-Null
+          $outExe = "../windows-legacy-artifact/geodomdesk-$($env:RELEASE_ID)-windows-legacy-x64.exe"
+          Copy-Item ./target/release/rustdesk-portable-packer.exe $outExe
+          Copy-Item ./geodomdesk-build-config.json ../windows-legacy-artifact/
+      - name: Check legacy Windows startup imports (Win7 SP1 / Win8 / Server 2008 R2–2012 R2)
+        run: |
+          $bundle = './flutter/build/windows/x64/runner/Release'
+          $outExe = "../windows-legacy-artifact/geodomdesk-$($env:RELEASE_ID)-windows-legacy-x64.exe"
+          $binaries = @($outExe, "$bundle/GeodomDesk.exe",
+                        "$bundle/geodomdesk-cli.exe", "$bundle/librustdesk.dll", "$bundle/flutter_windows.dll")
+          foreach ($binary in $binaries) {
+            $imports = llvm-readobj --coff-imports $binary
+            if ($LASTEXITCODE -ne 0 -or $imports -match 'WaitOnAddress|WakeByAddressAll|WakeByAddressSingle') {
+              throw "Legacy Windows startup imports failed verification: $binary"
+            }
+          }
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: geodomdesk-windows-legacy
+          if-no-files-found: error
+          path: windows-legacy-artifact/*
+      - name: Verify frozen legacy Windows package
+        run: |
+          $outExe = "../windows-legacy-artifact/geodomdesk-$($env:RELEASE_ID)-windows-legacy-x64.exe"
+          ../customization/tests/windows/test-windows-native.ps1 -Package $outExe -BuildConfig geodomdesk-build-config.json

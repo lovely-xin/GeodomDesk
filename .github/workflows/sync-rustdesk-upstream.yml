@@ -50,14 +50,14 @@ jobs:
           if [[ "$RETRY_CODEX" == 'true' ]]; then
             args+=(--recheck)
           fi
-          python3 .github/scripts/rustdesk_sync.py resolve "${args[@]}"
+          python3 .github/scripts/sync_upstream.py resolve "${args[@]}"
       - name: Check for an existing conflict repair attempt
         id: attempt
         if: steps.release.outputs.check_required == 'true' && !inputs.retry_codex
         env:
           ATTEMPT_NAME: ${{ steps.release.outputs.attempt_name }}
           GITHUB_TOKEN: ${{ github.token }}
-        run: python3 .github/scripts/rustdesk_sync.py check-attempt --name "$ATTEMPT_NAME"
+        run: python3 .github/scripts/sync_upstream.py check-attempt --name "$ATTEMPT_NAME"
       - name: Install preparation dependencies
         if: steps.release.outputs.check_required == 'true' && steps.attempt.outputs.already_attempted != 'true'
         run: python3 -m pip install -r customization/requirements.txt
@@ -77,7 +77,7 @@ jobs:
           VERSION: ${{ steps.release.outputs.version }}
           UPSTREAM_COMMIT: ${{ steps.release.outputs.upstream_commit }}
         run: |
-          python3 .github/scripts/rustdesk_sync.py preflight --source client --version "$VERSION" --commit "$UPSTREAM_COMMIT" \
+          python3 .github/scripts/sync_upstream.py preflight --source client --version "$VERSION" --commit "$UPSTREAM_COMMIT" \
             2>&1 | tee "$RUNNER_TEMP/rustdesk-preflight.log"
       - name: Record the conflict repair attempt
         if: steps.preflight.outputs.use_codex == 'true'
@@ -100,10 +100,10 @@ jobs:
           safety-strategy: drop-sudo
           prompt: |
             Prepare GeodomDesk for official RustDesk ${{ steps.release.outputs.version }} at commit ${{ steps.release.outputs.upstream_commit }}.
-            Start with the final 30 lines of ${{ runner.temp }}/rustdesk-preflight.log. Use the pristine upstream checkout in client/ and inspect the affected files. If needed, run customization/prepare_client.py against a disposable copy of client/.
+            Start with the final 30 lines of ${{ runner.temp }}/rustdesk-preflight.log. Use the pristine upstream checkout in client/ and inspect the affected files. If needed, run customization/packaging/prepare_client.py against a disposable copy of client/.
             Refresh customization/reference and source-lock.json from the official source, including files removed upstream. Set only upstream_commit in customization/config/client-channel.json to the requested commit. Adapt the existing customization code and client overlays with the smallest changes needed.
             Keep installation signature, hash and path checks intact. Preserve Windows/Linux CLI, TCP tunnel ownership, closure and reconnect behavior. Preserve existing tests, validation code, GitHub workflows, dependencies, release credentials and publication settings.
-            Changes may only affect customization/reference, client overlays, customization adapters other than customizations/upstream.py, and the upstream commit pin. Leave client/ pristine. Apply the edits and summarize the affected files. Later jobs run the full regression suite.
+            Changes may only affect customization/reference, client overlays, customization adapters other than patches/upstream.py, and the upstream commit pin. Leave client/ pristine. Apply the edits and summarize the affected files. Later jobs run the full regression suite.
       - name: Create customization patch
         id: patch
         if: steps.preflight.outputs.repair_needed == 'true'
@@ -156,7 +156,7 @@ jobs:
           python3 -m pip install -r customization/requirements.txt
           patch="$RUNNER_TEMP/upstream-sync/rustdesk-customization.patch"
           printf '%s  %s\n' "$PATCH_SHA256" "$patch" | sha256sum --check
-          cp .github/scripts/rustdesk_sync.py "$RUNNER_TEMP/validate-upstream-sync.py"
+          cp .github/scripts/sync_upstream.py "$RUNNER_TEMP/validate-upstream-sync.py"
           git apply --index "$patch"
           git diff --cached --check
           python3 -I "$RUNNER_TEMP/validate-upstream-sync.py" validate --source client --version "$VERSION" --commit "$UPSTREAM_COMMIT"
@@ -192,7 +192,7 @@ jobs:
           fi
           patch="$RUNNER_TEMP/upstream-sync/rustdesk-customization.patch"
           printf '%s  %s\n' "$PATCH_SHA256" "$patch" | sha256sum --check
-          cp .github/scripts/rustdesk_sync.py "$RUNNER_TEMP/validate-upstream-sync.py"
+          cp .github/scripts/sync_upstream.py "$RUNNER_TEMP/validate-upstream-sync.py"
           git apply --index "$patch"
           python3 -I "$RUNNER_TEMP/validate-upstream-sync.py" scope
           branch="upstream/rustdesk-${VERSION}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
@@ -208,6 +208,8 @@ jobs:
     needs: stage_candidate
     runs-on: ubuntu-latest
     timeout-minutes: 265
+    outputs:
+      run_id: ${{ steps.verify.outputs.run_id }}
     permissions:
       actions: write
       checks: read
@@ -217,11 +219,12 @@ jobs:
         with:
           persist-credentials: false
       - name: Require a successful Windows and Ubuntu build for the candidate
+        id: verify
         env:
           GH_TOKEN: ${{ github.token }}
           BRANCH: ${{ needs.stage_candidate.outputs.branch }}
           COMMIT: ${{ needs.stage_candidate.outputs.commit }}
-        run: python3 .github/scripts/dispatch_geodomdesk_build.py "$BRANCH" "$COMMIT" --validation-only
+        run: python3 .github/scripts/dispatch_build.py "$BRANCH" "$COMMIT" --validation-only
 
   merge_update:
     name: Merge verified upstream update
@@ -269,7 +272,7 @@ jobs:
 
   publish_release:
     name: Publish GeodomDesk release
-    needs: merge_update
+    needs: [verify_native, merge_update]
     runs-on: ubuntu-latest
     timeout-minutes: 275
     permissions:
@@ -284,4 +287,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           COMMIT: ${{ needs.merge_update.outputs.commit }}
-        run: python3 .github/scripts/dispatch_geodomdesk_build.py main "$COMMIT"
+          VERIFY_RUN_ID: ${{ needs.verify_native.outputs.run_id }}
+        run: python3 .github/scripts/dispatch_build.py main "$COMMIT" --reuse-desktop-run "$VERIFY_RUN_ID"

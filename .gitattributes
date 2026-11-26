@@ -4,4 +4,4 @@
 *.gz binary
 *.exe binary
 *.deb binary
-customization/standalone/Cargo.lock.patch whitespace=-blank-at-eol
+customization/client/standalone/Cargo.lock.patch whitespace=-blank-at-eol

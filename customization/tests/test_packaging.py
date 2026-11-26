@@ -11,12 +11,12 @@ import zipfile
 from unittest import mock
 from pathlib import Path
 
-import repack_deb
+from packaging import repack_deb
 
 
 class PrinterBundleTests(unittest.TestCase):
     def test_required_components_are_verified_and_bad_archives_fail(self):
-        import prepare_printer
+        from packaging import prepare_printer
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "config").mkdir()
@@ -82,7 +82,7 @@ class PackagingTests(unittest.TestCase):
         return payload
 
     def test_deb_isolated_paths_and_service_scripts(self):
-        from publisher import check_deb
+        from release.publisher import check_deb
 
         payload = self.stub_deb()
         output = self.root / "geodomdesk.deb"
@@ -138,7 +138,7 @@ class PackagingTests(unittest.TestCase):
 
     def test_source_archive_includes_new_modules_and_baseline(self):
         import tarfile
-        import archive_source
+        from packaging import archive_source
 
         source = self.root / "source"
         source.mkdir()

@@ -20,7 +20,7 @@ class TerminalCliTests(unittest.TestCase):
         suffix = ".exe" if os.name == "nt" else ""
         cls.cli = cls.root / ("geodomdesk-cli" + suffix)
         cls.main = cls.root / ("GeodomDesk.exe" if os.name == "nt" else "geodomdesk")
-        source = Path(__file__).resolve().parents[1] / "client/bin/geodomdesk-cli.rs"
+        source = Path(__file__).resolve().parents[1] / "client/rust/bin/geodomdesk-cli.rs"
         subprocess.run(["rustc", "--edition=2021", str(source), "-o", str(cls.cli)], check=True)
         fixture = cls.root / "main.rs"
         fixture.write_text('''#![cfg_attr(windows, windows_subsystem = "windows")]
@@ -158,7 +158,7 @@ fn main() {
     def test_ssh_worker_allows_large_files_caps_streams_and_marks_timeouts(self):
         worker = (
             Path(__file__).resolve().parents[1]
-            / "client/terminal_exec/ssh_worker.sh"
+            / "client/rust/terminal_exec/ssh_worker.sh"
         ).read_text(encoding="utf-8").replace("__SESSION__", "sess1234", 1)
 
         def run_case(script_text: str, timeout_secs: int) -> str:
@@ -242,7 +242,7 @@ fn main() {
         self.assertIn("trap 'rm -rf -- \"$gd_dir\"; exit 143' HUP INT TERM", worker)
         self.assertIn("sh -c ", worker)
         legacy_ps1 = (
-            Path(__file__).resolve().parents[1] / "client/terminal_exec/legacy_bootstrap.ps1"
+            Path(__file__).resolve().parents[1] / "client/rust/terminal_exec/legacy_bootstrap.ps1"
         ).read_text(encoding="utf-8")
         self.assertIn("Flush-GdChunk", legacy_ps1)
         self.assertIn("if ($null -eq $LASTEXITCODE)", legacy_ps1)
@@ -252,12 +252,12 @@ class CustomizationContractTests(unittest.TestCase):
     def test_port_forward_mux_retains_kcp_close_reason_for_1_5_3(self):
         root = Path(__file__).resolve().parents[1]
         with mock.patch.object(sys, "path", [str(root), *sys.path]):
-            from customizations import performance
+            from patches import performance
 
         source_file = root / "reference/src/port_forward_mux.rs"
         lifetime_file = root / "reference/src/port_forward.rs"
-        tunnel_src = (root / "client/terminal_exec/tunnel.rs").read_text(encoding="utf-8")
-        perf_text = (root / "customizations/performance.py").read_text(encoding="utf-8")
+        tunnel_src = (root / "client/rust/terminal_exec/tunnel.rs").read_text(encoding="utf-8")
+        perf_text = (root / "patches/performance.py").read_text(encoding="utf-8")
         self.assertIn("send_kcp_close_reason(&mut stream).await;", perf_text)
         self.assertIn("kcp: Option<crate::kcp_stream::KcpStream>,", perf_text)
         self.assertIn("TunnelInterface::new(state.clone()),", tunnel_src)
@@ -279,11 +279,11 @@ class CustomizationContractTests(unittest.TestCase):
 
     def test_standalone_cli_patches_usage_fingerprint_and_cli_tests(self):
         root = Path(__file__).resolve().parents[1]
-        cli_mod = (root / "customizations/standalone_cli.py").read_text(encoding="utf-8")
-        ssh_rs = (root / "standalone/ssh.rs").read_text(encoding="utf-8")
-        input_rs = (root / "client/terminal_exec/input.rs").read_text(encoding="utf-8")
-        cli_rs = (root / "client/terminal_exec/cli.rs").read_text(encoding="utf-8")
-        tunnel_rs = (root / "client/terminal_exec/tunnel.rs").read_text(encoding="utf-8")
+        cli_mod = (root / "patches/standalone_cli.py").read_text(encoding="utf-8")
+        ssh_rs = (root / "client/standalone/ssh.rs").read_text(encoding="utf-8")
+        input_rs = (root / "client/rust/terminal_exec/input.rs").read_text(encoding="utf-8")
+        cli_rs = (root / "client/rust/terminal_exec/cli.rs").read_text(encoding="utf-8")
+        tunnel_rs = (root / "client/rust/terminal_exec/tunnel.rs").read_text(encoding="utf-8")
         self.assertIn("embedded SSH over TCP, then GeodomDesk terminal", cli_mod)
         self.assertIn("let has_ssh_opts =", cli_mod)
         self.assertIn("shell == Some(ExecShell::BASH) || (shell.is_some() && has_ssh_opts)", cli_mod)
