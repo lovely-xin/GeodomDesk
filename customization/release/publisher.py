@@ -546,7 +546,7 @@ def page(version, native_config=True, legacy_windows=None, changelog="", *, down
     changelog_section = ""
     if normalized_changelog := channel.normalize_changelog(changelog):
         changelog_section = (
-            '<details class="changelog"><summary>更新日志</summary>'
+            '<details class="changelog" open><summary>更新日志</summary>'
             f'<div class="changelog-body">{html.escape(normalized_changelog)}</div></details>'
         )
     return f"""<!doctype html>

@@ -1069,7 +1069,7 @@ class PublisherTests(unittest.TestCase):
         index_path = self.public / "index.html"
         landing = index_path.read_text(encoding="utf-8")
         for page_html in (landing, release_html):
-            self.assertIn('<details class="changelog"><summary>更新日志</summary>', page_html)
+            self.assertIn('<details class="changelog" open><summary>更新日志</summary>', page_html)
             self.assertIn("新增更新日志弹窗确认", page_html)
             self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", page_html)
             self.assertNotIn("<script>", page_html)
