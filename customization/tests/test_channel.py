@@ -547,8 +547,8 @@ class ChannelTests(unittest.TestCase):
             )
             self.assertIn("showGeodomUpdateDialogFromCurrent(updateUrl)", home_dart)
             self.assertIn("checkGeodomUpdateManually()", desktop_settings)
-            self.assertIn("infoRow(\n                translate('Version'),", desktop_settings)
-            self.assertNotIn("OutlinedButton.icon", desktop_settings)
+            self.assertIn("translate('Version')", desktop_settings)
+            self.assertIn("await bind.mainGetVersion()", desktop_settings)
             self.assertIn("recentSessionsSync()", desktop_settings)
             self.assertIn("Sync recent devices and credentials", desktop_settings)
             recent_sync_dart = (source / "flutter/lib/models/geodom_recent_sync.dart").read_text(
