@@ -531,7 +531,7 @@ def download_names(version, native_config):
     }
 
 
-def page(version, native_config=True, legacy_windows=None, *, download_home=False):
+def page(version, native_config=True, legacy_windows=None, changelog="", *, download_home=False):
     channel.release_parts(version)
     asset_prefix = f"releases/{version}/" if download_home else ""
     logo_path = "geodomdesk.png" if download_home else "../../geodomdesk.png"
@@ -542,6 +542,12 @@ def page(version, native_config=True, legacy_windows=None, *, download_home=Fals
         compatibility_link = (
             f'<a href="{legacy_url}" download aria-label="下载 Windows 旧系统兼容版" '
             'title="Windows 7 / 8 · Server 2008 R2–2012 R2">兼容版</a>'
+        )
+    changelog_section = ""
+    if normalized_changelog := channel.normalize_changelog(changelog):
+        changelog_section = (
+            '<details class="changelog"><summary>更新日志</summary>'
+            f'<div class="changelog-body">{html.escape(normalized_changelog)}</div></details>'
         )
     return f"""<!doctype html>
 <html lang="zh-CN">
@@ -569,7 +575,11 @@ header p {{ margin: 4px 0 0; color: #536770; font-size: 14px; }}
 .actions a:hover {{ background: #edf5f4; text-decoration: underline; }}
 footer {{ column-gap: 16px; color: #536770; font-size: 13px; }}
 footer a {{ color: inherit; }}
-a:focus-visible {{ outline: 2px solid #146469; outline-offset: 2px; }}
+.changelog {{ margin: 0 0 12px; border: 1px solid #d8dfdd; border-radius: 14px; background: #fff; }}
+.changelog summary {{ min-height: 44px; padding: 12px clamp(12px, 3vw, 20px); border-radius: 13px; cursor: pointer; color: #146469; font-size: 14px; font-weight: 600; }}
+.changelog summary:hover {{ background: #edf5f4; }}
+.changelog-body {{ padding: 0 clamp(12px, 3vw, 20px) 16px; color: #354750; font-size: 14px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }}
+a:focus-visible, summary:focus-visible {{ outline: 2px solid #146469; outline-offset: 2px; }}
 </style>
 </head>
 <body>
@@ -596,6 +606,7 @@ a:focus-visible {{ outline: 2px solid #146469; outline-offset: 2px; }}
       <div class="actions"><a href="{asset_prefix}{names["android"]}" download aria-label="下载 Android 版">下载</a></div>
     </div>
   </section>
+  {changelog_section}
   <footer>
     <a href="{asset_prefix}geodomdesk-{version}-source.tar.gz">源代码</a>
     <a href="https://geodom.cn">geodom.cn</a>
@@ -853,7 +864,9 @@ def _run_locked(config, state):
                 )
                 (stage / channel.METADATA_NAME).write_bytes(metadata)
                 (stage / (channel.METADATA_NAME + ".sig")).write_bytes(signature)
-                (stage / "index.html").write_bytes(page(release_id, True, legacy_windows))
+                (stage / "index.html").write_bytes(
+                    page(release_id, True, legacy_windows, changelog=changelog)
+                )
                 files = [
                     {
                         "name": p.name,
@@ -882,7 +895,10 @@ def _run_locked(config, state):
             atomic_bytes(public / "geodomdesk.png", (ROOT / "assets/geodomdesk.png").read_bytes())
             publish_pointer(public, manifest)
         native_config = manifest.get("native_config", False)
-        download_home = page(release_id, native_config, legacy_windows, download_home=True)
+        download_home = page(
+            release_id, native_config, legacy_windows,
+            changelog=manifest.get("changelog", ""), download_home=True,
+        )
         index_path = public / "index.html"
         if not index_path.is_file() or index_path.read_bytes() != download_home:
             atomic_bytes(index_path, download_home)

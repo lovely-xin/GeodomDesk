@@ -767,7 +767,7 @@ class PublisherTests(unittest.TestCase):
             self.p.run(self.config)
         latest = json.loads((self.public / "latest.json").read_text())
         self.assertEqual(latest["url"], channel.release_url("1.5.2"))
-        self.assertNotIn('href="#changelog-title"', (self.public / "index.html").read_text())
+        self.assertNotIn("<summary>更新日志</summary>", (self.public / "index.html").read_text(encoding="utf-8"))
         self.assertTrue(latest["android_url"].endswith("geodomdesk-1.5.2-android-arm64.apk"))
         self.assertTrue(latest["windows_url"].endswith("geodomdesk-1.5.2-windows-x64.exe"))
         self.assertTrue(latest["ubuntu_url"].endswith("geodomdesk-1.5.2-ubuntu-amd64.deb"))
@@ -1044,7 +1044,7 @@ class PublisherTests(unittest.TestCase):
         failed = json.loads((self.state / "status.json").read_text())
         self.assertEqual(failed["status"], "failed")
 
-    def test_publish_changelog_in_signed_metadata_and_pointer_only(self):
+    def test_publish_changelog_in_metadata_and_collapsible_download_sections(self):
         release, build, local = self.build_fixture("1.5.3", 12)
         build["changelog"] = "- 新增更新日志弹窗确认\n- 修复问题 <script>alert(1)</script>"
         local["geodomdesk-build.json"].write_bytes(channel.stable_json(build))
@@ -1069,9 +1069,10 @@ class PublisherTests(unittest.TestCase):
         index_path = self.public / "index.html"
         landing = index_path.read_text(encoding="utf-8")
         for page_html in (landing, release_html):
-            self.assertNotIn("更新日志", page_html)
-            self.assertNotIn("changelog-title", page_html)
-            self.assertNotIn("alert(1)", page_html)
+            self.assertIn('<details class="changelog"><summary>更新日志</summary>', page_html)
+            self.assertIn("新增更新日志弹窗确认", page_html)
+            self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", page_html)
+            self.assertNotIn("<script>", page_html)
         self.assertIn('href="releases/1.5.3-r12/geodomdesk-1.5.3-r12-windows-x64.exe"', landing)
         self.assertIn('src="geodomdesk.png"', landing)
         self.assertIn('src="../../geodomdesk.png"', release_html)
