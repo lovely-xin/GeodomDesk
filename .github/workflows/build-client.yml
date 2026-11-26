@@ -142,7 +142,8 @@ jobs:
           h = hashlib.sha256()
           h.update(os.environ['RUST_VERSION'].encode() + b'\0')
           h.update(b'cargo-expand=1.0.95\0flutter_rust_bridge_codegen=1.80.1\0')
-          for p in ['src/flutter_ffi.rs', 'src/ui_interface.rs', 'src/input.rs', 'Cargo.toml', 'Cargo.lock']:
+          h.update(os.environ['UPSTREAM_COMMIT'].encode() + b'\0')
+          for p in ['src/flutter_ffi.rs', 'src/ui_interface.rs', 'Cargo.toml', 'Cargo.lock']:
               h.update(p.encode() + b'\0')
               h.update(pathlib.Path(p).read_bytes())
           pubspec = pathlib.Path('flutter/pubspec.yaml').read_bytes()
