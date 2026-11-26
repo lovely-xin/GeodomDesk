@@ -865,8 +865,10 @@ class PublisherTests(unittest.TestCase):
         self.p.portal_update(self.portal, "1.5.3", legacy_windows=legacy)
         portal_text = self.portal.read_text()
         self.assertIn(legacy["url"], portal_text)
-        self.assertIn("Win7 / 8 / Server 2008 R2–2012 R2", portal_text)
-        self.assertIn("已停止更新", portal_text)
+        self.assertIn('aria-label="下载 Windows 标准版">标准版', portal_text)
+        self.assertIn('aria-label="下载 Windows 旧系统兼容版">兼容版', portal_text)
+        self.assertNotIn("Server 2008 R2–2012 R2", portal_text)
+        self.assertNotIn("已停止更新", portal_text)
 
         config_updated = dict(
             self.config,
@@ -1084,7 +1086,8 @@ class PublisherTests(unittest.TestCase):
         self.config["activate_portal"] = False
         portal_html = self.portal.read_text(encoding="utf-8")
         self.assertIn("GeodomDesk 1.5.3-r12", portal_html)
-        self.assertIn(f'href="{channel.release_url("1.5.3-r12")}#changelog-title"', portal_html)
+        self.assertNotIn("更新日志", portal_html)
+        self.assertNotIn("#changelog-title", portal_html)
         self.assertEqual(index_path.read_text(encoding="utf-8"), landing)
         self.assertEqual((self.public / "latest.json").read_bytes(), latest_bytes)
         self.assertEqual((target / channel.METADATA_NAME).read_bytes(), metadata_bytes)

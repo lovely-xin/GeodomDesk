@@ -612,37 +612,30 @@ def publish_pointer(public, manifest):
     save_json(public / "latest.json", latest)
 
 
-def portal_fragment(version, native_config=True, legacy_windows=None, *, changelog=""):
+def portal_fragment(version, native_config=True, legacy_windows=None):
     release_url = channel.release_url(version)
     names = download_names(version, native_config)
-    changelog_link = ""
-    if channel.normalize_changelog(changelog):
-        changelog_link = (
-            f'<br><a href="{release_url}#changelog-title" '
-            'style="text-decoration:underline;text-underline-offset:.2em;white-space:nowrap">更新日志</a>'
-        )
     compatibility_link = ""
     if legacy_windows is not None:
-        ver_suffix = f" {html.escape(legacy_windows['version'])}" if legacy_windows["version"] else ""
         compatibility_link = (
-            f'<a href="{html.escape(legacy_windows["url"], quote=True)}" download>'
-            f'下载旧系统兼容版{ver_suffix}（Win7 / 8 / Server 2008 R2–2012 R2 · 已停止更新）'
+            f'<a href="{html.escape(legacy_windows["url"], quote=True)}" download '
+            'aria-label="下载 Windows 旧系统兼容版">兼容版'
             '<svg aria-hidden="true"><use href="#download"/></svg></a>'
         )
     return (
         f'<section class="client-downloads" aria-labelledby="clients-title">'
-        f'<div class="section-heading"><h2 id="clients-title">远程工具</h2><p>GeodomDesk {html.escape(version)}{changelog_link}</p></div>'
+        f'<div class="section-heading"><h2 id="clients-title">远程工具</h2><p>GeodomDesk {html.escape(version)}</p></div>'
         f'<div class="client-list">'
-        f'<div class="client-row"><div class="client-name"><h3>网页版</h3><p>免安装 · 浏览器访问</p></div><div class="client-links"><a href="/geodomdesk/">打开网页版<svg aria-hidden="true"><use href="#arrow"/></svg></a></div></div>'
-        f'<div class="client-row"><div class="client-name"><h3>Windows</h3><p>x64 · Win10 / 11 / Server 2016+</p></div><div class="client-links"><a href="{release_url}{names["windows"]}" download>下载 Windows 标准版<svg aria-hidden="true"><use href="#download"/></svg></a>{compatibility_link}</div></div>'
-        f'<div class="client-row"><div class="client-name"><h3>Ubuntu</h3><p>amd64</p></div><div class="client-links"><a href="{release_url}{names["ubuntu"]}" download>下载 Ubuntu 版<svg aria-hidden="true"><use href="#download"/></svg></a></div></div>'
-        f'<div class="client-row"><div class="client-name"><h3>Android</h3><p>ARM64</p></div><div class="client-links"><a href="{release_url}{names["android"]}" download>下载 Android 版<svg aria-hidden="true"><use href="#download"/></svg></a></div></div>'
+        f'<div class="client-row"><div class="client-name"><h3>网页版</h3></div><div class="client-links"><a href="/geodomdesk/">打开网页版<svg aria-hidden="true"><use href="#arrow"/></svg></a></div></div>'
+        f'<div class="client-row"><div class="client-name"><h3>Windows</h3><p>x64</p></div><div class="client-links"><a href="{release_url}{names["windows"]}" download aria-label="下载 Windows 标准版">标准版<svg aria-hidden="true"><use href="#download"/></svg></a>{compatibility_link}</div></div>'
+        f'<div class="client-row"><div class="client-name"><h3>Ubuntu</h3><p>amd64</p></div><div class="client-links"><a href="{release_url}{names["ubuntu"]}" download aria-label="下载 Ubuntu 版">下载<svg aria-hidden="true"><use href="#download"/></svg></a></div></div>'
+        f'<div class="client-row"><div class="client-name"><h3>Android</h3><p>ARM64</p></div><div class="client-links"><a href="{release_url}{names["android"]}" download aria-label="下载 Android 版">下载<svg aria-hidden="true"><use href="#download"/></svg></a></div></div>'
         f'</div></section>'
     )
 
 
-def portal_update(portal, version, native_config=True, legacy_windows=None, *, changelog=""):
-    fragment = portal_fragment(version, native_config, legacy_windows, changelog=changelog)
+def portal_update(portal, version, native_config=True, legacy_windows=None):
+    fragment = portal_fragment(version, native_config, legacy_windows)
     before = portal.read_bytes()
     text = before.decode("utf-8")
     if text.count(START) != 1 or text.count(END) != 1:
@@ -854,9 +847,7 @@ def _run_locked(config, state):
             atomic_bytes(index_path, download_home)
         if config.get("activate_portal"):
             portal_text = portal.read_text(encoding="utf-8")
-            expected_fragment = portal_fragment(
-                release_id, native_config, legacy_windows, changelog=published_changelog
-            )
+            expected_fragment = portal_fragment(release_id, native_config, legacy_windows)
             if (
                 not already_live
                 or channel.release_url(release_id) not in portal_text
@@ -873,13 +864,7 @@ def _run_locked(config, state):
                         raise RuntimeError(
                             "Stop the former builder before activating this portal producer"
                         )
-                portal_update(
-                    portal,
-                    release_id,
-                    native_config,
-                    legacy_windows,
-                    changelog=published_changelog,
-                )
+                portal_update(portal, release_id, native_config, legacy_windows)
         save_json(
             state / "status.json", {"status": "published", "version": version, "checked_at": now()}
         )
