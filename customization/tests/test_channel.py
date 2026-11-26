@@ -820,7 +820,7 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual(set(packages), {"windows", "linux", "android"})
 
         release_index = (target / "index.html").read_text()
-        self.assertIn("Win10 / 11 / Server 2016+", release_index)
+        self.assertIn("Windows 10 / 11 · Server 2016+", release_index)
         self.assertNotIn("windows-legacy", release_index)
         self.assertNotIn("已停止更新", release_index)
 
@@ -856,11 +856,13 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual(set(packages), {"windows", "linux", "android"})
         self.assertNotIn(legacy["url"], metadata_text)
 
-        release_index = (target / "index.html").read_text()
-        self.assertIn(legacy["url"], release_index)
-        self.assertIn("Win7 / 8 / Server 2008 R2–2012 R2", release_index)
-        self.assertIn("已停止更新", release_index)
-        self.assertIn("1.5.1-r9", release_index)
+        for index_path in (target / "index.html", self.public / "index.html"):
+            page_html = index_path.read_text(encoding="utf-8")
+            self.assertEqual(page_html.count("<strong>Windows</strong>"), 1)
+            self.assertIn(f'href="{legacy["url"]}" download', page_html)
+            self.assertIn(">标准版</a>", page_html)
+            self.assertIn(">兼容版</a>", page_html)
+            self.assertNotIn("已停止更新", page_html)
 
         self.p.portal_update(self.portal, "1.5.3", legacy_windows=legacy)
         portal_text = self.portal.read_text()
@@ -1042,7 +1044,7 @@ class PublisherTests(unittest.TestCase):
         failed = json.loads((self.state / "status.json").read_text())
         self.assertEqual(failed["status"], "failed")
 
-    def test_publish_changelog_in_signed_metadata_pointer_and_release_page(self):
+    def test_publish_changelog_in_signed_metadata_and_pointer_only(self):
         release, build, local = self.build_fixture("1.5.3", 12)
         build["changelog"] = "- 新增更新日志弹窗确认\n- 修复问题 <script>alert(1)</script>"
         local["geodomdesk-build.json"].write_bytes(channel.stable_json(build))
@@ -1064,16 +1066,16 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual(json.loads(metadata_bytes)["changelog"], build["changelog"])
         release_html = (target / "index.html").read_text(encoding="utf-8")
         self.assertIn("1.5.3-r12", release_html)
-        self.assertIn("更新日志", release_html)
-        self.assertNotIn("<script>", release_html)
-        self.assertIn("&lt;script&gt;", release_html)
         index_path = self.public / "index.html"
         landing = index_path.read_text(encoding="utf-8")
-        self.assertIn('href="#changelog-title"', landing)
-        self.assertIn('id="changelog-title"', landing)
+        for page_html in (landing, release_html):
+            self.assertNotIn("更新日志", page_html)
+            self.assertNotIn("changelog-title", page_html)
+            self.assertNotIn("alert(1)", page_html)
         self.assertIn('href="releases/1.5.3-r12/geodomdesk-1.5.3-r12-windows-x64.exe"', landing)
         self.assertIn('src="geodomdesk.png"', landing)
-        self.assertNotIn("<script>", landing)
+        self.assertIn('src="../../geodomdesk.png"', release_html)
+        self.assertIn('href="geodomdesk-1.5.3-r12-windows-x64.exe"', release_html)
 
         # Repair landing links for an already published revision without replacing its pointer or files.
         self.config["activate_portal"] = True

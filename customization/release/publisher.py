@@ -531,33 +531,79 @@ def download_names(version, native_config):
     }
 
 
-def page(version, native_config=True, legacy_windows=None, changelog="", *, download_home=False):
+def page(version, native_config=True, legacy_windows=None, *, download_home=False):
     channel.release_parts(version)
     asset_prefix = f"releases/{version}/" if download_home else ""
     logo_path = "geodomdesk.png" if download_home else "../../geodomdesk.png"
     names = download_names(version, native_config)
     compatibility_link = ""
     if legacy_windows is not None:
-        ver_suffix = f" · {html.escape(legacy_windows['version'])}" if legacy_windows["version"] else ""
+        legacy_url = html.escape(legacy_windows["url"], quote=True)
         compatibility_link = (
-            f'<a class="card" href="{html.escape(legacy_windows["url"], quote=True)}" download>'
-            f'<strong>Windows 旧系统兼容版（Win7 / 8 / Server 2008 R2–2012 R2）</strong>'
-            f'<span>x64{ver_suffix} · 已停止更新 · 下载归档 ↗</span></a>'
+            f'<a href="{legacy_url}" download aria-label="下载 Windows 旧系统兼容版" '
+            'title="Windows 7 / 8 · Server 2008 R2–2012 R2">兼容版</a>'
         )
-    style = 'body{margin:0;background:#f4f5f4;color:#192a32;font:16px system-ui,"Microsoft YaHei",sans-serif}main{max-width:760px;margin:10vh auto;padding:32px}header{display:flex;align-items:center;gap:18px}header img{width:64px;height:64px}h1{font-size:32px;margin:0}header p{margin:8px 0;color:#687981}.links{display:grid;gap:16px;margin:40px 0}.changelog{margin:0 0 32px;border:1px solid #d8dfdd;border-radius:14px;padding:22px 24px;background:#fff}.changelog h2{margin:0 0 12px;font-size:18px}.changelog-body{margin:0;color:#2c3e46;font-size:14px;line-height:1.65;white-space:pre-wrap;word-break:break-word}a{color:inherit}a.card{display:flex;justify-content:space-between;align-items:center;text-decoration:none;border:1px solid #d8dfdd;border-radius:14px;padding:24px;background:#fff}.card span{color:#257678}.foot{color:#687981;font-size:13px;display:flex;gap:24px}a:focus-visible{outline:3px solid #169baf;outline-offset:4px}'
-    display_version = html.escape(version)
-    normalized_changelog = channel.normalize_changelog(changelog)
-    changelog_link = ""
-    changelog_section = ""
-    if normalized_changelog:
-        changelog_link = '<a href="#changelog-title">更新日志</a>'
-        changelog_section = (
-            '<section class="changelog" aria-labelledby="changelog-title">'
-            '<h2 id="changelog-title">更新日志</h2>'
-            f'<div class="changelog-body">{html.escape(normalized_changelog)}</div>'
-            "</section>"
-        )
-    return f"""<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>GeodomDesk · 远程工具</title><style>{style}</style><main><header><img src="{logo_path}" alt=""><div><h1>GeodomDesk</h1><p>远程工具 · {display_version}</p>{changelog_link}</div></header><div class="links"><a class="card" href="{asset_prefix}{names["windows"]}" download><strong>Windows（Win10 / 11 / Server 2016+）</strong><span>x64 · 下载安装包 ↗</span></a>{compatibility_link}<a class="card" href="{asset_prefix}{names["ubuntu"]}" download><strong>Ubuntu</strong><span>amd64 · 下载 DEB ↗</span></a><a class="card" href="{asset_prefix}{names["android"]}" download><strong>Android</strong><span>ARM64 · 下载 APK ↗</span></a></div>{changelog_section}<div class="foot"><a href="{asset_prefix}geodomdesk-{version}-source.tar.gz">源代码</a><a href="https://geodom.cn">geodom.cn</a></div></main></html>""".encode()
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>GeodomDesk · 下载</title>
+<style>
+* {{ box-sizing: border-box; }}
+body {{ margin: 0; background: #f4f5f4; color: #192a32; font: 16px/1.45 system-ui, "Microsoft YaHei", sans-serif; }}
+main {{ max-width: 720px; margin: 0 auto; padding: clamp(28px, 7vw, 84px) clamp(16px, 4vw, 32px) 24px; }}
+header {{ display: flex; align-items: center; gap: 14px; }}
+header img {{ width: 52px; height: 52px; }}
+h1 {{ margin: 0; font-size: clamp(24px, 4vw, 32px); line-height: 1.2; }}
+header p {{ margin: 4px 0 0; color: #536770; font-size: 14px; }}
+.downloads {{ margin: 24px 0 12px; border: 1px solid #d8dfdd; border-radius: 14px; background: #fff; }}
+.download-row {{ display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 4px 12px; padding: 10px clamp(12px, 3vw, 20px); }}
+.download-row + .download-row {{ border-top: 1px solid #e5eae8; }}
+.platform {{ display: flex; flex-direction: column; }}
+.platform span {{ color: #536770; font-size: 13px; }}
+.actions, footer {{ display: flex; flex-wrap: wrap; gap: 4px 8px; }}
+.actions a, footer a {{ display: inline-flex; align-items: center; min-height: 44px; }}
+.actions a {{ padding: 0 10px; border-radius: 8px; color: #146469; font-size: 14px; font-weight: 600; text-decoration: none; white-space: nowrap; }}
+.actions a:hover {{ background: #edf5f4; text-decoration: underline; }}
+footer {{ column-gap: 16px; color: #536770; font-size: 13px; }}
+footer a {{ color: inherit; }}
+a:focus-visible {{ outline: 2px solid #146469; outline-offset: 2px; }}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <img src="{logo_path}" alt="" width="52" height="52">
+    <div><h1>GeodomDesk</h1><p>{html.escape(version)}</p></div>
+  </header>
+  <section class="downloads" aria-label="安装包下载">
+    <div class="download-row">
+      <div class="platform"><strong>Windows</strong><span>x64</span></div>
+      <div class="actions">
+        <a href="{asset_prefix}{names["windows"]}" download aria-label="下载 Windows 标准版"
+           title="Windows 10 / 11 · Server 2016+">标准版</a>
+        {compatibility_link}
+      </div>
+    </div>
+    <div class="download-row">
+      <div class="platform"><strong>Ubuntu</strong><span>amd64</span></div>
+      <div class="actions"><a href="{asset_prefix}{names["ubuntu"]}" download aria-label="下载 Ubuntu 版">下载</a></div>
+    </div>
+    <div class="download-row">
+      <div class="platform"><strong>Android</strong><span>ARM64</span></div>
+      <div class="actions"><a href="{asset_prefix}{names["android"]}" download aria-label="下载 Android 版">下载</a></div>
+    </div>
+  </section>
+  <footer>
+    <a href="{asset_prefix}geodomdesk-{version}-source.tar.gz">源代码</a>
+    <a href="https://geodom.cn">geodom.cn</a>
+  </footer>
+</main>
+</body>
+</html>
+""".encode()
 
 
 def public_complete(directory, manifest):
@@ -807,9 +853,7 @@ def _run_locked(config, state):
                 )
                 (stage / channel.METADATA_NAME).write_bytes(metadata)
                 (stage / (channel.METADATA_NAME + ".sig")).write_bytes(signature)
-                (stage / "index.html").write_bytes(
-                    page(release_id, True, legacy_windows, changelog=changelog)
-                )
+                (stage / "index.html").write_bytes(page(release_id, True, legacy_windows))
                 files = [
                     {
                         "name": p.name,
@@ -838,10 +882,7 @@ def _run_locked(config, state):
             atomic_bytes(public / "geodomdesk.png", (ROOT / "assets/geodomdesk.png").read_bytes())
             publish_pointer(public, manifest)
         native_config = manifest.get("native_config", False)
-        published_changelog = manifest.get("changelog", "")
-        download_home = page(
-            release_id, native_config, legacy_windows, published_changelog, download_home=True
-        )
+        download_home = page(release_id, native_config, legacy_windows, download_home=True)
         index_path = public / "index.html"
         if not index_path.is_file() or index_path.read_bytes() != download_home:
             atomic_bytes(index_path, download_home)
