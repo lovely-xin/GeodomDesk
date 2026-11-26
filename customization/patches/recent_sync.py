@@ -232,6 +232,15 @@ def apply(changes, root):
          "          recentDevices.schedule();\n"
          "          if (desktopType != DesktopType.main || !current.initialized || !current.canWrite()) return;")
     edit(book, "    _pulledOnce = true;\n  }", "    _pulledOnce = true;\n    recentDevices.schedule();\n  }")
+    edit(
+        book,
+        """      if (!shouldSyncAb()) return;
+      final recents = await getRecentPeers();
+      if (recents.isEmpty) return;""",
+        """      if (recentDevices.supported.value || !shouldSyncAb()) return;
+      final recents = await getRecentPeers();
+      if (recentDevices.supported.value || recents.isEmpty) return;""",
+    )
     edit(book, "        if (!legacyMode.value && _maxPeerOneAb == 0) {\n          await _getAbSettings(quiet: quiet);\n        }",
          "        if (legacyMode.value) {\n          recentDevices.resetSupport();\n        } else {\n          await _getAbSettings(quiet: quiet);\n        }")
     edit(
@@ -381,9 +390,14 @@ def apply(changes, root):
         """        bool succ = await gFFI.abModel.changePersonalHashPassword(id, '');
         await bind.mainForgetPassword(id: id);""",
         """        final recent = gFFI.abModel.recentDevices;
-        final succ = await gFFI.abModel.changePersonalHashPassword(id, '');
+        final dedicated = recent.supported.value;
+        final useAddressBook = !dedicated || tab == PeerTabIndex.ab;
+        final succ = !useAddressBook ||
+            await gFFI.abModel.changePersonalHashPassword(id, '');
         await bind.mainForgetPassword(id: id);
-        if (recent.enabled) await recent.forgetCredential(id);""",
+        if (dedicated && !useAddressBook && recent.enabled) {
+          await recent.forgetCredential(id);
+        }""",
     )
     edit(
         "flutter/lib/utils/http_service.dart",

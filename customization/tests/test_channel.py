@@ -558,6 +558,13 @@ class ChannelTests(unittest.TestCase):
                 encoding="utf-8"
             )
             self.assertNotIn("Sync recent devices and credentials", ab_widget_dart)
+            ab_model = (source / "flutter/lib/models/ab_model.dart").read_text(encoding="utf-8")
+            self.assertIn("recentDevices.supported.value || !shouldSyncAb()", ab_model)
+            self.assertIn("recentDevices.supported.value || recents.isEmpty", ab_model)
+            peer_card = (source / "flutter/lib/common/widgets/peer_card.dart").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("!dedicated || tab == PeerTabIndex.ab", peer_card)
             self.assertIn('if _key == "geodom-recent-cache"', ffi)
             mobile_conn = (source / "flutter/lib/mobile/pages/connection_page.dart").read_text(
                 encoding="utf-8"
