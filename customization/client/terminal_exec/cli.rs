@@ -52,6 +52,7 @@ pub(super) const USAGE: &str =
   --timeout SECONDS       Command timeout (1-300, default 15)
   --connect-timeout SEC    Connection and device authentication timeout (1-300, default 60)
   --json                  Machine-readable exec results, including failures
+  --pretty                Pretty-print JSON output for probe, tunnel list, or exec --json
   --expect-platform NAME  Refuse to execute if the authenticated target platform differs
   --expect-hostname NAME  Refuse to execute if the authenticated target hostname differs
   --continue-on-error     Session only: keep queued commands after a completed command fails
@@ -68,7 +69,12 @@ pub(super) const USAGE: &str =
   --non-interactive       Read credentials from the environment or saved session, never prompt
 
 Environment: GEODOMDESK_ACCOUNT_PASSWORD, GEODOMDESK_DEVICE_PASSWORD,
-             GEODOMDESK_ADMIN_PASSWORD, GEODOMDESK_DEVICE_CODE, GEODOMDESK_SSH_PASSWORD";
+             GEODOMDESK_ADMIN_PASSWORD, GEODOMDESK_DEVICE_CODE, GEODOMDESK_SSH_PASSWORD
+
+Examples:
+  geodomdesk-cli probe --id 123456789 --pretty
+  geodomdesk-cli exec --id 123456789 --shell bash --command 'uname -a'
+  geodomdesk-cli tunnel open --id 123456789 --remote-port 22 --local-port 2222";
 
 pub(super) enum Backend {
     Terminal(Stream),
@@ -291,10 +297,12 @@ impl ConnectOptions {
     }
     pub(super) async fn open_with_keep_alive(&self, keep_alive: bool) -> ResultType<Connection> {
         let mut ssh_fallback_errors = Vec::new();
+        let overall_started = Instant::now();
+        let budget = Duration::from_secs(self.timeout.into());
         if let Some(ssh) = &self.ssh {
             let ssh_started = Instant::now();
             let attempt = tokio::time::timeout(
-                Duration::from_secs(self.timeout.into()),
+                budget,
                 super::ssh::open(self, ssh),
             )
             .await
@@ -320,10 +328,13 @@ impl ConnectOptions {
                 }
             }
         }
+        let remaining = budget
+            .checked_sub(overall_started.elapsed())
+            .context("Connection budget exhausted")?;
         let started = Instant::now();
         let token = self.current_token()?;
         let (mut connection, history) = super::stage::connect_with_recovery(
-            Duration::from_secs(self.timeout.into()),
+            remaining,
             self.credential_bound(),
             || {
                 connect_for(
@@ -520,6 +531,7 @@ async fn connect_for(
             && !is_admin
             && device_password.is_empty()
         {
+            eprintln!("Waiting for device authentication...");
             match tokio::time::timeout(Duration::from_secs(10), receive(&mut stream)).await {
                 Ok(res) => res.map_err(|err| {
                     super::stage::wrap(
@@ -707,6 +719,7 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
     let mut ssh_strict=false;
     let mut ask_ssh_password=false;
     let mut json = false;
+    let mut pretty = false;
     let mut connect_timeout = None;
     let mut expected_platform = None;
     let mut expected_hostname = None;
@@ -751,6 +764,10 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
             "--json" => {
                 reject_inline()?;
                 json = true;
+            }
+            "--pretty" => {
+                reject_inline()?;
+                pretty = true;
             }
             "--continue-on-error" => {
                 reject_inline()?;
@@ -938,6 +955,15 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
     if (session || probe || tunnel) && (script.is_some() || command.is_some()) {
         bail!("Only exec accepts --script or --command");
     }
+    if pretty && session {
+        bail!("--pretty is not supported for session");
+    }
+    if pretty && tunnel {
+        bail!("--pretty applies to tunnel list, not tunnel open");
+    }
+    if pretty && !probe && !json {
+        bail!("--pretty requires probe, tunnel, or --json");
+    }
     if probe && shell.is_some() {
         bail!("probe does not execute a shell");
     }
@@ -1044,7 +1070,11 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
     let info = connection_info(&connection, timeout, connecting.elapsed(), setup_elapsed);
     connection.setup_errors.clear();
     if probe {
-        output::write(info)?;
+        if pretty {
+            output::write_pretty(info)?;
+        } else {
+            output::write(info)?;
+        }
         return Ok(0);
     }
     if session {
@@ -1082,7 +1112,11 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
             connection.connect_elapsed,
             setup_elapsed,
         );
-        output::write(value)?;
+        if pretty {
+            output::write_pretty(value)?;
+        } else {
+            output::write(value)?;
+        }
         return Ok(if result.error.is_empty() {
             process_exit_code(result.exit_code)
         } else {

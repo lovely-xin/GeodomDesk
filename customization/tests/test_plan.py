@@ -159,6 +159,19 @@ class PlanTests(unittest.TestCase):
             dart.write_text("class Sync { int v = 1; }\n")
             self.assertNotEqual(before_dart, plan_upstream.customization_hash(root))
 
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            custom = repo / "customization"
+            custom.mkdir()
+            (custom / "README.md").write_text("docs v1\n")
+            changelog = repo / "CHANGELOG.md"
+            changelog.write_text("# 更新日志\n\n## 1.5.3\n\n- 初始版本\n")
+            before_changelog = plan_upstream.customization_hash(custom)
+            (custom / "README.md").write_text("docs v2\n")
+            self.assertEqual(before_changelog, plan_upstream.customization_hash(custom))
+            changelog.write_text("# 更新日志\n\n## 1.5.3\n\n- 新增修复\n")
+            self.assertNotEqual(before_changelog, plan_upstream.customization_hash(custom))
+
     def test_desktop_reuse_ignores_only_android_sources_and_checks_build_recipe(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -184,6 +197,13 @@ class PlanTests(unittest.TestCase):
         self.assertNotEqual(
             desktop_recipe(workflow), desktop_recipe(workflow.replace("'1.85.1'", "'1.86.0'"))
         )
+        with tempfile.TemporaryDirectory() as other:
+            other_root = Path(other)
+            helper = other_root / "repack_deb.py"
+            helper.write_text("# v1\n")
+            first = desktop_recipe(workflow, other_root)
+            helper.write_text("# v2\n")
+            self.assertNotEqual(first, desktop_recipe(workflow, other_root))
 
 
 if __name__ == "__main__":

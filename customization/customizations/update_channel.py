@@ -1,6 +1,7 @@
 """Own signed updates; retain upstream signature and artifact verification."""
 
 import base64
+import json
 import re
 
 
@@ -19,7 +20,24 @@ def apply(changes, cfg):
 """
         + changes[name][end:]
     )
+    change(
+        name,
+        """#[inline]
+pub fn get_version() -> String {
+    crate::VERSION.to_owned()
+}""",
+        """#[inline]
+pub fn get_version() -> String {
+    crate::geodomdesk_update::current_release_id(crate::VERSION)
+}""",
+    )
     name = "src/common.rs"
+    change(
+        name,
+        "    pub static ref SOFTWARE_UPDATE_URL: Arc<Mutex<String>> = Default::default();",
+        "    pub static ref SOFTWARE_UPDATE_URL: Arc<Mutex<String>> = Default::default();\n"
+        "    static ref SOFTWARE_UPDATE_INFO: Arc<Mutex<crate::geodomdesk_update::SoftwareUpdateInfo>> = Default::default();",
+    )
     change(
         name,
         """pub fn check_software_update() {
@@ -30,56 +48,92 @@ def apply(changes, cfg):
     )
     change(
         name,
-        "let response_url = resp.url;",
-        """let response_url = resp.url;
+        """fn clear_software_update_url() {
+    let mut update_url = SOFTWARE_UPDATE_URL.lock().unwrap();
+    *update_url = String::new();
+}
+
+fn process_software_update_check_response(bytes: Bytes) -> ResultType<()> {
+    let resp: hbb_common::VersionCheckResponse = serde_json::from_slice(&bytes)?;
+    let response_url = resp.url;
+    let release_id = release_id_from_update_url(&response_url)?;
+    let latest_release_version = display_version_from_release_id(&release_id)?;
+
+    if get_version_number(&latest_release_version) > get_version_number(crate::VERSION) {
+        #[cfg(feature = "flutter")]
+        {
+            let mut m = HashMap::new();
+            m.insert("name", "check_software_update_finish");
+            m.insert("url", &response_url);
+            if let Ok(data) = serde_json::to_string(&m) {
+                let _ = crate::flutter::push_global_event(crate::flutter::APP_TYPE_MAIN, data);
+            }
+        }
+        *SOFTWARE_UPDATE_URL.lock().unwrap() = response_url;
+    } else {
+        clear_software_update_url();
+    }
+    Ok(())
+}""",
+        """fn clear_software_update_url() {
+    *SOFTWARE_UPDATE_URL.lock().unwrap() = String::new();
+    *SOFTWARE_UPDATE_INFO.lock().unwrap() = Default::default();
+}
+
+pub fn get_software_update_info_json() -> String {
+    serde_json::to_string(&*SOFTWARE_UPDATE_INFO.lock().unwrap()).unwrap_or_default()
+}
+
+fn process_software_update_check_response(bytes: Bytes) -> ResultType<()> {
+    process_software_update_check_response_inner(bytes, true).map(|_| ())
+}
+
+fn process_software_update_check_response_inner(
+    bytes: Bytes,
+    emit_event: bool,
+) -> ResultType<Option<crate::geodomdesk_update::SoftwareUpdateInfo>> {
+    let resp: hbb_common::VersionCheckResponse = serde_json::from_slice(&bytes)?;
+    let response_url = resp.url;
     if response_url.is_empty() {
         clear_software_update_url();
-        return Ok(());
-    }""",
-    )
-    change(name, "let latest_release_version = display_version_from_release_id(&release_id)?;", "")
-    change(
-        name,
-        "let release_id = release_id_from_update_url(&response_url)?;",
-        """let release_id = release_id_from_update_url(&response_url)?;
+        return Ok(None);
+    }
+    let release_id = release_id_from_update_url(&response_url)?;
     #[cfg(windows)]
     if crate::updater::current_update_platform() == "windows-server-2008-r2" {
         let pointer: serde_json::Value = serde_json::from_slice(&bytes)?;
         if pointer["windows_server_2008_r2_url"].as_str().is_none() {
             clear_software_update_url();
-            return Ok(());
+            return Ok(None);
         }
-    }""",
-    )
-    change(
-        name,
-        "if get_version_number(&latest_release_version) > get_version_number(crate::VERSION) {",
-        "if crate::geodomdesk_update::is_newer_release(&release_id, crate::VERSION, crate::geodomdesk_update::BUILD_NUMBER)? {",
-    )
-    change(
-        name,
-        """    if crate::geodomdesk_update::is_newer_release(&release_id, crate::VERSION, crate::geodomdesk_update::BUILD_NUMBER)? {
-        #[cfg(feature = "flutter")]
-        {
-            let mut m = HashMap::new();
-            m.insert("name", "check_software_update_finish");
-            m.insert("url", &response_url);
-            if let Ok(data) = serde_json::to_string(&m) {
-                let _ = crate::flutter::push_global_event(crate::flutter::APP_TYPE_MAIN, data);
-            }
-        }
-        *SOFTWARE_UPDATE_URL.lock().unwrap() = response_url;""",
-        """    if crate::geodomdesk_update::is_newer_release(&release_id, crate::VERSION, crate::geodomdesk_update::BUILD_NUMBER)? {
+    }
+
+    if crate::geodomdesk_update::is_newer_release(&release_id, crate::VERSION, crate::geodomdesk_update::BUILD_NUMBER)? {
+        let info = crate::geodomdesk_update::parse_pointer_info(&bytes, &response_url, &release_id);
         *SOFTWARE_UPDATE_URL.lock().unwrap() = response_url.clone();
+        *SOFTWARE_UPDATE_INFO.lock().unwrap() = info.clone();
         #[cfg(feature = "flutter")]
-        {
-            let mut m = HashMap::new();
-            m.insert("name", "check_software_update_finish");
-            m.insert("url", &response_url);
-            if let Ok(data) = serde_json::to_string(&m) {
+        if emit_event {
+            let payload = serde_json::json!({
+                "name": "check_software_update_finish",
+                "url": info.url,
+                "release_id": info.release_id,
+                "version": info.version,
+                "changelog": info.changelog,
+                "published_at": info.published_at,
+            });
+            if let Ok(data) = serde_json::to_string(&payload) {
                 let _ = crate::flutter::push_global_event(crate::flutter::APP_TYPE_MAIN, data);
             }
-        }""",
+        }
+        #[cfg(not(feature = "flutter"))]
+        let _ = emit_event;
+        Ok(Some(info))
+    } else {
+        clear_software_update_url();
+        Ok(None)
+    }
+}""",
     )
     start = changes[name].index("pub(crate) fn release_id_from_update_url(")
     end = changes[name].index("pub(crate) fn url_has_explicit_port(", start)
@@ -96,46 +150,146 @@ def apply(changes, cfg):
     end = changes[name].index("\n#[inline]\npub fn get_app_name()", start)
     changes[name] = (
         changes[name][:start]
-        + """// The dedicated HTTPS channel returns the upstream VersionCheckResponse shape.
+        + """async fn fetch_software_update_pointer() -> hbb_common::ResultType<Bytes> {
+    let url = crate::geodomdesk_update::LATEST_URL;
+    let proxy_conf = Config::get_socks();
+    let tls_url = get_url_for_tls(url, &proxy_conf);
+    let cached = get_cached_tls_type(tls_url);
+    let tls_type = cached.unwrap_or(TlsType::Rustls);
+    let client = create_http_client_async(tls_type, false);
+    let request = tokio::time::timeout(
+        std::time::Duration::from_secs(8),
+        client
+            .get(crate::geodomdesk_update::LATEST_URL)
+            .header("Cache-Control", "no-cache")
+            .header("Pragma", "no-cache")
+            .timeout(std::time::Duration::from_secs(15))
+            .send(),
+    )
+    .await;
+    let (used_tls, response) = match request {
+        Ok(Ok(response)) => (tls_type, response),
+        Ok(Err(error)) if error.is_timeout() => bail!("GeodomDesk update check timed out"),
+        Ok(Err(error)) if cached.is_none() && error.is_request() => {
+            let client = create_http_client_async(TlsType::NativeTls, false);
+            let retry = tokio::time::timeout(
+                std::time::Duration::from_secs(8),
+                client
+                    .get(url)
+                    .header("Cache-Control", "no-cache")
+                    .header("Pragma", "no-cache")
+                    .timeout(std::time::Duration::from_secs(15))
+                    .send(),
+            )
+            .await
+            .map_err(|_| anyhow!("GeodomDesk update check timed out"))?
+            .map_err(|e| {
+                if e.is_timeout() {
+                    anyhow!("GeodomDesk update check timed out")
+                } else {
+                    e.into()
+                }
+            })?;
+            (TlsType::NativeTls, retry)
+        }
+        Ok(Err(error)) => return Err(error.into()),
+        Err(_) => bail!("GeodomDesk update check timed out"),
+    };
+    if response.url().scheme() != "https" {
+        bail!("GeodomDesk update redirect must use HTTPS");
+    }
+    upsert_tls_cache(tls_url, used_tls, false);
+    let mut response = response.error_for_status()?;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        response.chunk(),
+    )
+    .await
+    .map_err(|_| anyhow!("GeodomDesk update response timed out"))??
+    {
+        if bytes.len() + chunk.len() > crate::geodomdesk_update::MAX_POINTER_BYTES {
+            bail!("GeodomDesk update response exceeds size limit");
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(Bytes::from(bytes))
+}
+
+// The dedicated HTTPS channel returns the upstream VersionCheckResponse shape.
 #[tokio::main(flavor = "current_thread")]
 pub async fn do_check_software_update() -> hbb_common::ResultType<()> {
-    let result = async {
-        let url = crate::geodomdesk_update::LATEST_URL;
-        let proxy_conf = Config::get_socks();
-        let tls_url = get_url_for_tls(url, &proxy_conf);
-        let cached = get_cached_tls_type(tls_url);
-        let tls_type = cached.unwrap_or(TlsType::Rustls);
-        let client = create_http_client_async(tls_type, false);
-        let request = client.get(crate::geodomdesk_update::LATEST_URL)
-            .header("Cache-Control", "no-cache")
-            .timeout(std::time::Duration::from_secs(15)).send().await;
-        let (used_tls, response) = match request {
-            Ok(response) => (tls_type, response),
-            Err(error) if cached.is_none() && error.is_request() => {
-                let client = create_http_client_async(TlsType::NativeTls, false);
-                (TlsType::NativeTls, client.get(url).header("Cache-Control", "no-cache")
-                    .timeout(std::time::Duration::from_secs(15)).send().await?)
-            }
-            Err(error) => return Err(error.into()),
-        };
-        upsert_tls_cache(tls_url, used_tls, false);
-        let mut response = response.error_for_status()?;
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await? {
-            if bytes.len() + chunk.len() > 16384 {
-                bail!("GeodomDesk update response exceeds size limit");
-            }
-            bytes.extend_from_slice(&chunk);
+    let bytes = fetch_software_update_pointer().await?;
+    process_software_update_check_response_inner(bytes, true).map(|_| ())
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn run_manual_software_update_check() -> hbb_common::ResultType<Option<crate::geodomdesk_update::SoftwareUpdateInfo>> {
+    let bytes = fetch_software_update_pointer().await?;
+    process_software_update_check_response_inner(bytes, false)
+}
+
+pub fn check_software_update_manual() -> String {
+    let outcome = std::thread::Builder::new()
+        .name("geodom-update-check".to_owned())
+        .spawn(run_manual_software_update_check)
+        .map_err(|e| anyhow!("Failed to start update check: {e}"))
+        .and_then(|handle| {
+            handle
+                .join()
+                .map_err(|_| anyhow!("Update check worker panicked"))?
+        });
+    match outcome {
+        Ok(Some(info)) => serde_json::json!({
+            "status": "update_available",
+            "url": info.url,
+            "release_id": info.release_id,
+            "version": info.version,
+            "changelog": info.changelog,
+            "published_at": info.published_at,
+        })
+        .to_string(),
+        Ok(None) => serde_json::json!({ "status": "up_to_date" }).to_string(),
+        Err(err) => {
+            let timed_out = err.to_string().to_lowercase().contains("timed out");
+            serde_json::json!({
+                "status": "error",
+                "error": err.to_string(),
+                "timed_out": timed_out,
+            })
+            .to_string()
         }
-        process_software_update_check_response(Bytes::from(bytes))
-    }.await;
-    if result.is_err() {
-        clear_software_update_url();
     }
-    result
 }
 """
         + changes[name][end:]
+    )
+    ffi = "src/flutter_ffi.rs"
+    change(
+        ffi,
+        """    } else if key == "local-permanent-password-set" {
+        return ui_interface::is_local_permanent_password_set().to_string();
+    } else {""",
+        """    } else if key == "local-permanent-password-set" {
+        return ui_interface::is_local_permanent_password_set().to_string();
+    } else if key == "software-update-info" {
+        return crate::common::get_software_update_info_json();
+    } else if key == "check-software-update" {
+        return crate::common::check_software_update_manual();
+    } else {""",
+    )
+    change(
+        ffi,
+        """    // Metadata verification performs blocking network requests. Keep this key on
+    // the asynchronous FFI path to avoid blocking the calling Flutter isolate.
+    if key.starts_with("verified-download-url-") {
+        return SyncReturn("error:unsupported".to_owned());
+    }""",
+        """    // Metadata verification and manual update checks perform blocking network requests.
+    // Keep these keys on the asynchronous FFI path to avoid blocking the calling Flutter isolate.
+    if key.starts_with("verified-download-url-") || key == "check-software-update" {
+        return SyncReturn("error:unsupported".to_owned());
+    }""",
     )
 
     base_url = cfg["base_url"].rstrip("/")
@@ -194,6 +348,36 @@ pub async fn do_check_software_update() -> hbb_common::ResultType<()> {
         'const PUBLIC_UPDATE_PACKAGE_ID: &str = "geodomdesk";',
     )
     change(name, 'key_id: "2026-ed25519-main"', 'key_id: "' + cfg["key_id"] + '"')
+    change(
+        name,
+        """    signature_key_id: String,
+    artifacts: Vec<UpdateArtifact>,""",
+        """    signature_key_id: String,
+    #[serde(default)]
+    changelog: String,
+    artifacts: Vec<UpdateArtifact>,""",
+    )
+    change(
+        name,
+        """pub(crate) struct VerifiedUpdateArtifact {
+    pub version: String,
+    pub url: String,""",
+        """pub(crate) struct VerifiedUpdateArtifact {
+    pub version: String,
+    #[allow(dead_code)]
+    pub changelog: String,
+    pub url: String,""",
+    )
+    change(
+        name,
+        """    Ok(VerifiedUpdateArtifact {
+        version: metadata.version.clone(),
+        url: artifact.url.clone(),""",
+        """    Ok(VerifiedUpdateArtifact {
+        version: metadata.version.clone(),
+        changelog: metadata.changelog.trim().to_owned(),
+        url: artifact.url.clone(),""",
+    )
     key = base64.b64decode(cfg["public_key"], validate=True)
     if len(key) != 32:
         raise ValueError("Expected Ed25519 public key")
@@ -247,51 +431,203 @@ pub async fn do_check_software_update() -> hbb_common::ResultType<()> {
         base64.b64encode(test_signature).decode(),
     )
     # The upstream UI hides its public update channel for vendor-signed clients.
-    # This fork has its own verified update channel and must keep those controls.
+    # This fork has its own verified update channel and must keep those controls,
+    # popping up the changelog dialog before asking the user to confirm an update.
+    change(
+        "flutter/lib/common.dart",
+        "import 'common/widgets/overlay.dart';\n",
+        "import 'common/widgets/overlay.dart';\nimport 'common/widgets/geodom_update_dialog.dart';\n",
+    )
+    change(
+        "flutter/lib/common.dart",
+        "  void dismissAll() {\n",
+        "  bool get hasAny => _dialogs.isNotEmpty;\n\n  void dismissAll() {\n",
+    )
     change(
         "flutter/lib/common.dart",
         """void checkUpdate() {
   if (!isWeb) {
-    if (!bind.isCustomClient()) {""",
+    if (!bind.isCustomClient()) {
+      platformFFI.registerEventHandler(
+          kCheckSoftwareUpdateFinish, kCheckSoftwareUpdateFinish,
+          (Map<String, dynamic> evt) async {
+        if (evt['url'] is String) {
+          stateGlobal.updateUrl.value = evt['url'];
+        }
+      });""",
         """void checkUpdate() {
   if (!isWeb) {
-    if (appName == 'GeodomDesk') {""",
+    if (appName == 'GeodomDesk') {
+      platformFFI.registerEventHandler(
+          kCheckSoftwareUpdateFinish, kCheckSoftwareUpdateFinish,
+          (Map<String, dynamic> evt) async {
+        await handleGeodomUpdateCheckEvent(evt);
+      });""",
+    )
+    home = "flutter/lib/desktop/pages/desktop_home_page.dart"
+    change(
+        home,
+        "import 'package:flutter_hbb/desktop/widgets/update_progress.dart';\n",
+        "import 'package:flutter_hbb/common/widgets/geodom_update_dialog.dart';\n",
     )
     change(
-        "flutter/lib/desktop/pages/desktop_home_page.dart",
-        """if (!bind.isCustomClient() &&
+        home,
+        """    if (!bind.isCustomClient() &&
         updateUrl.isNotEmpty &&
         !isCardClosed &&
-        bind.mainUriPrefixSync().contains('rustdesk'))""",
-        """if (updateUrl.isNotEmpty && !isCardClosed)""",
+        bind.mainUriPrefixSync().contains('rustdesk')) {
+      final isToUpdate = (isWindows || isMacOS) && bind.mainIsInstalled();
+      String btnText = isToUpdate ? 'Update' : 'Download';
+      GestureTapCallback onPressed = () async {
+        final Uri url = Uri.parse('https://rustdesk.com/download');
+        await launchUrl(url);
+      };
+      if (isToUpdate) {
+        onPressed = () {
+          handleUpdate(updateUrl);
+        };
+      }
+      return buildInstallCard(
+          "Status",
+          "${translate("new-version-of-{${bind.mainGetAppNameSync()}}-tip")} (${bind.mainGetNewVersion()}).",
+          btnText,
+          onPressed,
+          closeButton: true,
+          help: isToUpdate ? 'Changelog' : null,
+          link: isToUpdate
+              ? 'https://github.com/rustdesk/rustdesk/releases/tag/${bind.mainGetNewVersion()}'
+              : null);
+    }""",
+        """    if (updateUrl.isNotEmpty && !isCardClosed) {
+      final isToUpdate = (isWindows || isMacOS) && bind.mainIsInstalled();
+      String btnText = isToUpdate ? 'Update' : 'Download';
+      GestureTapCallback onPressed = () {
+        showGeodomUpdateDialogFromCurrent(updateUrl);
+      };
+      return buildInstallCard(
+          "Status",
+          "${translate("new-version-of-{${bind.mainGetAppNameSync()}}-tip")} (${bind.mainGetNewVersion()}).",
+          btnText,
+          onPressed,
+          closeButton: true,
+          help: 'Changelog',
+          link: updateUrl,
+          onHelpTap: () => showGeodomUpdateDialogFromCurrent(updateUrl));
+    }""",
     )
     change(
-        "flutter/lib/desktop/pages/desktop_home_page.dart",
-        "Uri.parse('https://rustdesk.com/download')",
-        "Uri.parse(updateUrl)",
+        home,
+        """      String? help,
+      String? link,
+      bool? closeButton,
+      String? closeOption}) {""",
+        """      String? help,
+      String? link,
+      VoidCallback? onHelpTap,
+      bool? closeButton,
+      String? closeOption}) {""",
     )
     change(
-        "flutter/lib/desktop/pages/desktop_home_page.dart",
-        "'https://github.com/rustdesk/rustdesk/releases/tag/${bind.mainGetNewVersion()}'",
-        "updateUrl",
+        home,
+        """                                  child: InkWell(
+                                      onTap: () async =>
+                                          await launchUrl(Uri.parse(link!)),""",
+        """                                  child: InkWell(
+                                      onTap: onHelpTap ??
+                                          () async =>
+                                              await launchUrl(Uri.parse(link!)),""",
     )
+    desktop_settings = "flutter/lib/desktop/pages/desktop_setting_page.dart"
     change(
-        "flutter/lib/desktop/pages/desktop_home_page.dart",
-        "help: isToUpdate ? 'Changelog' : null,",
-        "help: isToUpdate ? 'Download' : null,",
+        desktop_settings,
+        "import 'package:flutter_hbb/common/widgets/setting_widgets.dart';\n",
+        "import 'package:flutter_hbb/common/widgets/setting_widgets.dart';\n"
+        "import 'package:flutter_hbb/common/widgets/geodom_update_dialog.dart';\n",
     )
+    change(desktop_settings, "if (!isWeb && !bind.isCustomClient())", "if (!isWeb)")
     change(
-        "flutter/lib/desktop/pages/desktop_setting_page.dart",
-        "if (!isWeb && !bind.isCustomClient())",
-        "if (!isWeb)",
+        desktop_settings,
+        """              SelectionArea(
+                  child: Text('${translate('Build Date')}: $buildDate')
+                      .marginSymmetric(vertical: 4.0)),""",
+        """              SelectionArea(
+                  child: Text('${translate('Build Date')}: $buildDate')
+                      .marginSymmetric(vertical: 4.0)),
+              if (!isWeb)
+                OutlinedButton.icon(
+                  icon: const Icon(Icons.system_update_alt, size: 16),
+                  label: Text(translate('Check for updates')),
+                  onPressed: () => checkGeodomUpdateManually(),
+                ).marginSymmetric(vertical: 6.0),""",
     )
+    conn_page = "flutter/lib/mobile/pages/connection_page.dart"
     change(
-        "flutter/lib/mobile/pages/connection_page.dart",
-        "if (!bind.isCustomClient() && !isIOS)",
-        "if (!isIOS)",
+        conn_page,
+        "import '../../common.dart';\n",
+        "import '../../common.dart';\nimport '../../common/widgets/geodom_update_dialog.dart';\n",
     )
+    change(conn_page, "import 'package:url_launcher/url_launcher.dart';\n", "")
+    change(conn_page, "if (!bind.isCustomClient() && !isIOS)", "if (!isIOS)")
+    if "final url = 'https://rustdesk.com/download';" in changes[conn_page]:
+        change(conn_page, "final url = 'https://rustdesk.com/download';", "final url = updateUrl;")
     change(
-        "flutter/lib/mobile/pages/settings_page.dart",
-        "if (!bind.isCustomClient()) {",
-        "if (appName == 'GeodomDesk') {",
+        conn_page,
+        "              await launchUrl(Uri.parse(url));",
+        "              await showGeodomUpdateDialogFromCurrent(url);",
     )
+    mobile_settings = "flutter/lib/mobile/pages/settings_page.dart"
+    change(
+        mobile_settings,
+        "import '../../common/widgets/dialog.dart';\n",
+        "import '../../common/widgets/dialog.dart';\nimport '../../common/widgets/geodom_update_dialog.dart';\n",
+    )
+    change(mobile_settings, "if (!bind.isCustomClient()) {", "if (appName == 'GeodomDesk') {")
+    change(
+        mobile_settings,
+        """            SettingsTile(
+                title: Text(translate("Build Date")),
+                value: Padding(
+                  padding: EdgeInsets.symmetric(vertical: 8),
+                  child: Text(_buildDate),
+                ),
+                leading: Icon(Icons.query_builder)),""",
+        """            SettingsTile(
+                title: Text(translate("Build Date")),
+                value: Padding(
+                  padding: EdgeInsets.symmetric(vertical: 8),
+                  child: Text(_buildDate),
+                ),
+                leading: Icon(Icons.query_builder)),
+            if (!isIOS && !isWeb)
+              SettingsTile(
+                onPressed: (context) => checkGeodomUpdateManually(),
+                title: Text(translate('Check for updates')),
+                leading: Icon(Icons.system_update_alt),
+              ),""",
+    )
+    translations = {
+        "New version available": "发现新版本",
+        "Current version": "当前版本",
+        "New version": "新版本",
+        "Later": "稍后再说",
+        "Install update": "立即更新",
+        "Skip this version": "跳过此版本",
+        "Check for updates": "检查更新",
+        "Checking for updates...": "正在检查更新...",
+        "Already up to date": "当前已是最新版本",
+        "Failed to check for updates": "检查更新失败，请稍后重试",
+        "Update check timed out, please try again later": "检查更新超时，请稍后重试",
+        "Unable to open download page": "无法打开下载页面，请稍后重试",
+        "Confirm to verify and install this update now?": "确认后将校验签名并开始下载安装此更新。",
+        "Confirm to open the download page for this version?": "确认后将打开新版本下载页面。",
+        "This update includes stability improvements, performance optimizations, and bug fixes.": "本次更新包含稳定性改进、性能优化及问题修复。",
+    }
+    entries = "".join(
+        "        ("
+        + json.dumps(key, ensure_ascii=False)
+        + ", "
+        + json.dumps(value, ensure_ascii=False)
+        + "),\n"
+        for key, value in translations.items()
+    )
+    change("src/lang/cn.rs", "    [\n", "    [\n" + entries)

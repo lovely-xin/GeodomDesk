@@ -563,8 +563,15 @@ pub fn main_get_peer_sync(id: String) -> SyncReturn<String> {''')
     Widget cell(String value) => Expanded(
         child: Tooltip(message: value, child: Text(value, style: const TextStyle(fontSize: 20), maxLines: 1, overflow: TextOverflow.ellipsis)).marginOnly(left: _kTextLeftMargin));
     final id = tunnel['tunnel_id'] as String;
+    final localPort = tunnel['local_port'] is int
+        ? tunnel['local_port'] as int
+        : int.tryParse('${tunnel['local_port']}') ?? 0;
+    final endpointLabel = localPort > 0 ? '$localPort' : 'SSH';
     final state = tunnel['state'] == 'active' ? translate('Active') : tunnel['state'] == 'listening' ? translate('Listening ...') : translate('Status unavailable');
-    final transport = (tunnel['transport'] ?? (tunnel['direct'] == true ? 'Direct' : 'Relay')).toString();
+    final transportRaw = (tunnel['transport'] ?? '').toString();
+    final transport = transportRaw.isNotEmpty
+        ? transportRaw
+        : translate(tunnel['direct'] == true ? 'Direct' : 'Relay');
     final routeTag = tunnel['multiplexed'] == true ? '$transport · mux' : transport;
     final activeCount = tunnel['active_connections'];
     final connSuffix = activeCount is int && activeCount > 0 ? ' · $activeCount' : '';
@@ -577,17 +584,31 @@ pub fn main_get_peer_sync(id: String) -> SyncReturn<String> {''')
       if (lastError.isNotEmpty) lastError,
     ];
     final subtitle = lastError.isNotEmpty
-        ? 'CLI · $state · $routeTag$connSuffix · $lastError'
+        ? '${translate('CLI tunnel')} · $state · $routeTag$connSuffix · $lastError'
         : purpose.isNotEmpty
-            ? 'CLI · $state · $routeTag$connSuffix · $purpose'
-            : 'CLI · $state · $routeTag$connSuffix';
+            ? '${translate('CLI tunnel')} · $state · $routeTag$connSuffix · $purpose'
+            : '${translate('CLI tunnel')} · $state · $routeTag$connSuffix';
     return Container(
       constraints: const BoxConstraints(minHeight: _kRowHeight),
       child: Row(children: [
         Expanded(child: Tooltip(
           message: tooltipParts.join(' · '),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text('${tunnel['local_port']}', style: const TextStyle(fontSize: 20)),
+            Row(mainAxisSize: MainAxisSize.min, children: [
+              Flexible(child: Text(endpointLabel, style: const TextStyle(fontSize: 20), maxLines: 1, overflow: TextOverflow.ellipsis)),
+              if (localPort > 0)
+                IconButton(
+                  tooltip: translate('Copy local address'),
+                  icon: const Icon(Icons.content_copy, size: 16),
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                  visualDensity: VisualDensity.compact,
+                  onPressed: () {
+                    Clipboard.setData(ClipboardData(text: '127.0.0.1:$localPort'));
+                    showToast(translate('Copied'));
+                  },
+                ),
+            ]),
             Text(subtitle, style: Theme.of(context).textTheme.bodySmall, maxLines: 1, overflow: TextOverflow.ellipsis),
           ]).marginOnly(left: _kTextLeftMargin),
         )),
@@ -627,7 +648,7 @@ pub fn main_get_peer_sync(id: String) -> SyncReturn<String> {''')
         "                constraints: const BoxConstraints(minHeight: 25),\n                color: Theme.of(context).scaffoldBackgroundColor,\n                child: Row(children: [\n                  text('Local Port'),")
     changes["flutter/lib/desktop/pages/port_forward_page.dart"] = page
 
-    entries = {'CLI tunnel': 'CLI 隧道', 'Close CLI tunnel': '关闭 CLI 隧道', 'CLI tunnel lifetime': '由 CLI 管理，关闭此窗口不会停止该隧道', 'Active': '使用中', 'CLI tunnel status unavailable': 'CLI 隧道状态暂不可用', 'Status unavailable': '状态暂不可用', 'Refresh tunnel status': '刷新隧道状态'}
+    entries = {'CLI tunnel': 'CLI 隧道', 'Close CLI tunnel': '关闭 CLI 隧道', 'CLI tunnel lifetime': '由 CLI 管理，关闭此窗口不会停止该隧道', 'Active': '使用中', 'CLI tunnel status unavailable': 'CLI 隧道状态暂不可用', 'Status unavailable': '状态暂不可用', 'Refresh tunnel status': '刷新隧道状态', 'Copy local address': '复制本地地址', 'Direct': '直连', 'Relay': '中继'}
     import json
     cn = changes["src/lang/cn.rs"]
     text = "".join("        (" + json.dumps(k, ensure_ascii=False) + ", " + json.dumps(v, ensure_ascii=False) + "),\n" for k,v in entries.items() if "(" + json.dumps(k) + "," not in cn)

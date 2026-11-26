@@ -111,7 +111,7 @@ def apply(changes):
     change(
         "flutter/lib/common/widgets/login.dart",
         "  if (res != null) {\n    await UserModel.updateOtherModels();\n  }",
-        """  if (res == true) {
+        """  if (res == true && (!isDesktop || desktopType == DesktopType.main)) {
     try {
       await UserModel.updateOtherModels();
     } catch (_) {
@@ -141,6 +141,7 @@ def apply(changes):
             }""",
         """            if (isMobile) {
               setState(() => isInProgress = false);
+              FocusManager.instance.primaryFocus?.unfocus();
               final res = await verificationCodeDialog(
                   resp.user, resp.secret, isEmailVerification);
               if (res == true) {
@@ -160,6 +161,11 @@ def apply(changes):
                 return;
               }
             }""",
+    )
+    change(
+        "flutter/lib/common/widgets/login.dart",
+        "  if (isMobile && res == true) {\n    await UserModel.updateOtherModels();\n  }\n\n  return res;",
+        "  return res;",
     )
 
     name = "src/port_forward.rs"
@@ -199,3 +205,9 @@ def apply(changes):
         "    key: &str,\n) {\n    if let Err(err) = crate::port_forward::listen(",
     )
     change(name, "        key,\n        token,\n        handler.lc.clone(),", "        key,\n        handler.lc.clone(),")
+    cn_translations = """        ("Please log in before starting a remote connection", "请先登录账号后再发起远程连接"),
+        ("Invalid account or password", "账号或密码错误"),
+        ("Too many tags", "标签数量已达上限"),
+        ("Address book is full", "通讯录设备数量已达上限"),
+    ].iter().cloned().collect();"""
+    change("src/lang/cn.rs", "    ].iter().cloned().collect();", cn_translations)

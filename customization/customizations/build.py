@@ -21,6 +21,7 @@ from . import (
     performance,
     printer,
     recent_sync,
+    relay_probe,
     server_config,
     settings_cleanup,
     standalone_cli,
@@ -56,9 +57,15 @@ def prepare(source, version, build_number=1, *, standalone=False):
     settings_cleanup.apply(changes)
     terminal_exec.apply(changes, ROOT)
     recent_sync.apply(changes, ROOT)
+    relay_probe.apply(changes)
+    for name in ["geodomdesk_relay_probe.rs", "geodomdesk_relay_probe/logic.rs"]:
+        changes["src/" + name] = (ROOT / "client" / name).read_text(encoding="utf-8")
     changes["src/geodomdesk_update.rs"] = (ROOT / "client/geodomdesk_update.rs").read_text(
         encoding="utf-8"
     )
+    changes["flutter/lib/common/widgets/geodom_update_dialog.dart"] = (
+        ROOT / "client/flutter/geodom_update_dialog.dart"
+    ).read_text(encoding="utf-8")
     changes["src/geodomdesk_auth.rs"] = (ROOT / "client/geodomdesk_auth.rs").read_text(
         encoding="utf-8"
     )

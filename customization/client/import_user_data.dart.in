@@ -8,6 +8,9 @@
         ),
       ).marginOnly(left: _kContentHMargin, right: _kContentHMargin, bottom: 10),
       _Button('Import', _importOfficialUserData, enabled: !_importingUserData),
+      if (_importingUserData)
+        const LinearProgressIndicator()
+            .marginOnly(left: _kContentHMargin, right: _kContentHMargin, top: 8),
       if (_importUserDataStatus.isNotEmpty)
         Align(
           alignment: Alignment.centerLeft,
@@ -48,7 +51,8 @@
             '${translate('Saved passwords')} +${result['passwords_added']}, '
             '${translate('Passwords not imported')} ${result['passwords_skipped']}';
       });
-    } catch (_) {
+    } catch (error) {
+      debugPrint('Failed to import official user data: $error');
       if (mounted) {
         setState(() {
           _importUserDataStatus = _translateImportText('Unable to import %upstream% device records. Check that %upstream% user data exists for this user.');

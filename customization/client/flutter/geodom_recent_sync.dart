@@ -6,16 +6,40 @@ const _recentSyncDisabled = 'geodom-recent-sync-disabled';
 const _recentSyncRemovals = 'geodom-recent-sync-removals';
 const _recentSyncForgotten = 'geodom-recent-sync-forgotten';
 
-class GeodomRecentSync {
+class GeodomRecentSync with WidgetsBindingObserver {
   GeodomRecentSync(this.model);
 
   final AbModel model;
   final supported = false.obs;
   bool _running = false;
+  bool _paused = false;
+  bool _observerRegistered = false;
+  int _consecutiveFailures = 0;
   String? _savedState;
   String? _savedToken;
   String? _supportToken;
   DateTime _next = DateTime.fromMillisecondsSinceEpoch(0);
+
+  void _ensureObserver() {
+    if (_observerRegistered) return;
+    try {
+      WidgetsBinding.instance.addObserver(this);
+      _observerRegistered = true;
+    } catch (_) {}
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final inactive = state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden ||
+        state == AppLifecycleState.detached;
+    final resumed = _paused && !inactive;
+    _paused = inactive;
+    if (resumed && enabled) {
+      _next = DateTime.fromMillisecondsSinceEpoch(0);
+      schedule();
+    }
+  }
 
   String get _account => gFFI.userModel.userName.value;
   String get _token => bind.mainGetLocalOption(key: 'access_token');
@@ -49,7 +73,9 @@ class GeodomRecentSync {
     bool current() => token.isNotEmpty && _token == token && _account == account;
     if (!current()) return;
     if (available && (account.isEmpty || !await _bindAccount(account, current))) return;
+    if (available) _ensureObserver();
     if (available && (!supported.value || _supportToken != token)) {
+      _consecutiveFailures = 0;
       _next = DateTime.fromMillisecondsSinceEpoch(0);
     }
     _supportToken = available ? token : null;
@@ -59,6 +85,10 @@ class GeodomRecentSync {
   void resetSupport() {
     _supportToken = null;
     supported.value = false;
+    _savedState = null;
+    _savedToken = null;
+    _consecutiveFailures = 0;
+    _next = DateTime.fromMillisecondsSinceEpoch(0);
   }
 
   Future<void> setEnabled(bool value) async {
@@ -108,9 +138,21 @@ class GeodomRecentSync {
     }
   }
 
-  Future<void> remove(String id) async {
+  Future<void> remove(String id) => removeMany([id]);
+
+  Future<void> removeMany(Iterable<String> ids) async {
     if (!_canQueue) return;
-    await _queue(_recentSyncRemovals, id);
+    final list = ids.where((id) => id.isNotEmpty).toList();
+    if (list.isEmpty) return;
+    final pending = _pending(_recentSyncRemovals);
+    final now = DateTime.now().millisecondsSinceEpoch;
+    for (final id in list) {
+      pending[id] = now;
+    }
+    await bind.mainSetLocalOption(
+        key: _recentSyncRemovals, value: jsonEncode(pending));
+    _next = DateTime.fromMillisecondsSinceEpoch(0);
+    schedule();
   }
 
   Future<void> forgetCredential(String id) => _queue(_recentSyncForgotten, id);
@@ -125,7 +167,11 @@ class GeodomRecentSync {
   }
 
   void schedule() {
-    if (_running || !enabled || DateTime.now().isBefore(_next)) return;
+    _ensureObserver();
+    if (isDesktop && desktopType != DesktopType.main) return;
+    if (_paused || _running || !enabled || DateTime.now().isBefore(_next)) {
+      return;
+    }
     final book = model.addressbooks[_personalAddressBookName];
     if (book is! Ab || !book.initialized || book.abLoading.value) return;
     _running = true;
@@ -153,6 +199,7 @@ class GeodomRecentSync {
     final account = _account;
     final token = _token;
     bool current() => enabled && _account == account && _token == token;
+    var synced = false;
     try {
       final base = Uri.parse(await bind.mainGetApiServer());
       if (token.isEmpty || !current() || base.scheme != 'https') return;
@@ -164,8 +211,11 @@ class GeodomRecentSync {
       final pending = _pending(_recentSyncRemovals);
       final forgotten = _pending(_recentSyncForgotten);
       final acknowledged = <String, int>{};
+      final verifyRemoved = <String>{};
       final cleared = <String, int>{};
+      final verifyCleared = <String>{};
       var wrote = false;
+      var failed = false;
       Future<bool> send(Map<String, dynamic> update,
           {required bool add}) async {
         if (!current()) return false;
@@ -174,19 +224,24 @@ class GeodomRecentSync {
         final uri = base.replace(
             path: '$prefix/api/ab/peer/$action/${book.profile.guid}');
         final request = add ? http.post : http.put;
-        final response = await request(uri, headers: headers, body: jsonEncode(update))
-            .timeout(const Duration(seconds: 15));
+        final response =
+            await request(uri, headers: headers, body: jsonEncode(update));
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          return false;
+        }
         return _jsonDecodeActionResp(response).isEmpty;
       }
 
       final raw = await bind.mainLoadRecentPeersForAb(filter: '[]');
       final records = raw.isEmpty ? const [] : jsonDecode(raw) as List;
       final localTimes = <String, int>{};
+      final localHasCred = <String, bool>{};
       for (final row in records) {
         if (row is! Map<String, dynamic>) continue;
         final peer = Peer.fromJson(row);
         final ts = _timestamp(peer.geodomRecent);
         if (ts > 0) localTimes[peer.id] = ts;
+        if (_savedCredential(peer.hash)) localHasCred[peer.id] = true;
       }
 
       for (final entry in pending.entries.take(32)) {
@@ -218,61 +273,96 @@ class GeodomRecentSync {
         }, add: false)) {
           wrote = true;
           acknowledged[entry.key] = entry.value;
+          verifyRemoved.add(entry.key);
+        } else {
+          failed = true;
+          break;
         }
       }
 
-      for (final entry in forgotten.entries.take(32)) {
-        final remote = saved[entry.key];
-        if (remote == null) {
-          cleared[entry.key] = entry.value;
-          continue;
-        }
-        final profile = <String, dynamic>{};
-        if (_timestamp(remote.geodomRecent) > 0) {
-          profile.addAll(jsonDecode(remote.geodomRecent) as Map<String, dynamic>);
-        }
-        final now = DateTime.now().millisecondsSinceEpoch;
-        final remoteRevision = _timestamp(remote.geodomRecent);
-        final removalRevision = pending[entry.key] ?? 0;
-        final latest = removalRevision > remoteRevision ? removalRevision : remoteRevision;
-        if (latest > now + 299000) continue;
-        profile['timestamp'] = latest >= now ? latest + 1 : now;
-        if (removalRevision > remoteRevision) {
-          profile['removed'] = true;
-        }
-        if (await send({
-          'id': entry.key,
-          'hash': '',
-          'geodom_recent': jsonEncode(profile),
-        }, add: false)) {
-          wrote = true;
-          cleared[entry.key] = entry.value;
+      if (!failed) {
+        for (final entry in forgotten.entries.take(32)) {
+          final localTime = localTimes[entry.key] ?? 0;
+          if (localTime > entry.value && (localHasCred[entry.key] ?? false)) {
+            cleared[entry.key] = entry.value;
+            continue;
+          }
+          if (verifyRemoved.contains(entry.key)) {
+            cleared[entry.key] = entry.value;
+            verifyCleared.add(entry.key);
+            continue;
+          }
+          if (pending.containsKey(entry.key) &&
+              !acknowledged.containsKey(entry.key)) {
+            continue;
+          }
+          final remote = saved[entry.key];
+          if (remote == null) {
+            cleared[entry.key] = entry.value;
+            continue;
+          }
+          final remoteRevision = _timestamp(remote.geodomRecent);
+          if (_isRemoved(remote.geodomRecent) &&
+              remoteRevision >= entry.value &&
+              remote.hash.isEmpty) {
+            cleared[entry.key] = entry.value;
+            continue;
+          }
+          final profile = <String, dynamic>{};
+          if (remoteRevision > 0) {
+            profile.addAll(jsonDecode(remote.geodomRecent) as Map<String, dynamic>);
+          }
+          final now = DateTime.now().millisecondsSinceEpoch;
+          if (remoteRevision > now + 299000) continue;
+          profile['timestamp'] =
+              remoteRevision >= now ? remoteRevision + 1 : now;
+          if (await send({
+            'id': entry.key,
+            'hash': '',
+            'geodom_recent': jsonEncode(profile),
+          }, add: false)) {
+            wrote = true;
+            cleared[entry.key] = entry.value;
+            verifyCleared.add(entry.key);
+          } else {
+            failed = true;
+            break;
+          }
         }
       }
 
       var changes = 0;
-      for (final row in records) {
-        if (!current() || changes >= 32) break;
-        if (row is! Map<String, dynamic>) continue;
-        final peer = Peer.fromJson(row);
-        final timestamp = _timestamp(peer.geodomRecent);
-        if (timestamp == 0 ||
-            pending.containsKey(peer.id) ||
-            forgotten.containsKey(peer.id)) continue;
-        final previous = saved[peer.id];
-        if (previous != null && timestamp <= _timestamp(previous.geodomRecent))
-          continue;
-        final update = <String, dynamic>{
-          'id': peer.id,
-          'username': peer.username,
-          'hostname': peer.hostname,
-          'platform': peer.platform,
-          'alias': peer.alias,
-          'geodom_recent': peer.geodomRecent,
-          if (_savedCredential(peer.hash)) 'hash': peer.hash,
-        };
-        changes++;
-        if (await send(update, add: previous == null)) wrote = true;
+      if (!failed) {
+        for (final row in records) {
+          if (!current() || changes >= 32) break;
+          if (row is! Map<String, dynamic>) continue;
+          final peer = Peer.fromJson(row);
+          final timestamp = _timestamp(peer.geodomRecent);
+          if (timestamp == 0 ||
+              (pending.containsKey(peer.id) && !acknowledged.containsKey(peer.id)) ||
+              (forgotten.containsKey(peer.id) && !cleared.containsKey(peer.id))) continue;
+          final previous = saved[peer.id];
+          if (previous != null && timestamp <= _timestamp(previous.geodomRecent))
+            continue;
+          final update = <String, dynamic>{
+            'id': peer.id,
+            'username': peer.username,
+            'hostname': peer.hostname,
+            'platform': peer.platform,
+            if (peer.alias.isNotEmpty ||
+                (previous != null && previous.geodomRecent.isNotEmpty))
+              'alias': peer.alias,
+            'geodom_recent': peer.geodomRecent,
+            if (_savedCredential(peer.hash)) 'hash': peer.hash,
+          };
+          changes++;
+          if (await send(update, add: previous == null)) {
+            wrote = true;
+          } else {
+            failed = true;
+            break;
+          }
+        }
       }
 
       if (!current()) return;
@@ -280,10 +370,12 @@ class GeodomRecentSync {
       if (!current()) return;
       final latest = {for (final peer in book.peers) peer.id: peer};
       acknowledged.removeWhere((id, _) {
+        if (!verifyRemoved.contains(id)) return false;
         final peer = latest[id];
         return peer != null && !_isRemoved(peer.geodomRecent);
       });
-      cleared.removeWhere((id, _) => latest[id]?.hash.isNotEmpty == true);
+      cleared.removeWhere(
+          (id, _) => verifyCleared.contains(id) && latest[id]?.hash.isNotEmpty == true);
       for (final completed in {
         _recentSyncRemovals: acknowledged,
         _recentSyncForgotten: cleared,
@@ -300,14 +392,38 @@ class GeodomRecentSync {
       if (!current()) return;
       final state = jsonEncode(model._serializeCache());
       if (_savedState != state || _savedToken != token) {
-        model._saveCache();
+        await model._saveCache();
+        if (!current()) return;
         _savedState = state;
         _savedToken = token;
         await bind.mainLoadRecentPeers();
       }
+      if (!failed) synced = true;
     } catch (_) {
       // Local recent records remain available while the account API is offline.
+    } finally {
+      if (enabled) {
+        if (synced) {
+          _consecutiveFailures = 0;
+          _next = DateTime.now().add(const Duration(seconds: 30));
+        } else {
+          _consecutiveFailures = (_consecutiveFailures + 1).clamp(1, 4);
+          const delays = [30, 60, 120, 300];
+          _next = DateTime.now()
+              .add(Duration(seconds: delays[_consecutiveFailures - 1]));
+        }
+      }
     }
+  }
+
+  bool _samePeers(List<Peer> current, List<Peer> next) {
+    if (current.length != next.length) return false;
+    for (var i = 0; i < current.length; i++) {
+      if (!current[i].equal(next[i]) || current[i].online != next[i].online) {
+        return false;
+      }
+    }
+    return true;
   }
 
   Future<bool> _refreshPeers(Ab book, bool Function() current) async {
@@ -318,7 +434,9 @@ class GeodomRecentSync {
     for (final peer in fetched) {
       peer.online = online[peer.id] ?? false;
     }
-    book.peers.value = fetched;
+    if (!_samePeers(book.peers, fetched)) {
+      book.peers.value = fetched;
+    }
     return true;
   }
 

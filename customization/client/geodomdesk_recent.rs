@@ -259,6 +259,53 @@ pub(crate) fn apply_settings(id: &str, local: &mut PeerConfig) {
     apply_peer(peer, millis(PeerConfig::last_modified(id)), forgotten_at, local);
 }
 
+pub(crate) fn hydrate_for_edit(id: &str, local: &mut PeerConfig) {
+    if !device_id(id) {
+        return;
+    }
+    let Some(peer) = account_peers().into_iter().find(|peer| peer.id == id) else {
+        return;
+    };
+    let forgotten: HashMap<String, u64> =
+        serde_json::from_str(&LocalConfig::get_option(FORGOTTEN_OPTION)).unwrap_or_default();
+    let forgotten_at = forgotten.get(id).copied().unwrap_or(0);
+    let owner = signed_in_account();
+    hydrate_peer(
+        peer,
+        millis(PeerConfig::last_modified(id)),
+        forgotten_at,
+        owner.as_deref(),
+        local,
+    );
+}
+
+fn hydrate_peer(
+    peer: AbPeer,
+    local_timestamp: u64,
+    forgotten_at: u64,
+    owner: Option<&str>,
+    local: &mut PeerConfig,
+) {
+    let Some(profile) = parse(&peer.geodom_recent) else {
+        return;
+    };
+    if local.info.platform.is_empty() && !profile.removed && !peer.platform.is_empty() {
+        if local.password.is_empty() {
+            if let Some(account) = owner {
+                local.options.insert(PEER_OWNER.to_owned(), account.to_owned());
+            }
+        }
+        if local.info.username.is_empty() {
+            local.info.username = peer.username.clone();
+        }
+        if local.info.hostname.is_empty() {
+            local.info.hostname = peer.hostname.clone();
+        }
+        local.info.platform = peer.platform.clone();
+    }
+    apply_peer(peer, local_timestamp, forgotten_at, local);
+}
+
 fn apply_peer(peer: AbPeer, local_timestamp: u64, forgotten_at: u64, local: &mut PeerConfig) {
     let Some(profile) = parse(&peer.geodom_recent) else {
         return;
@@ -279,8 +326,10 @@ fn apply_peer(peer: AbPeer, local_timestamp: u64, forgotten_at: u64, local: &mut
             local.password.clear();
         }
     } else if !allow_hash {
-        local.password.clear();
-    } else if profile.timestamp > local_timestamp {
+        if local_timestamp <= forgotten_at {
+            local.password.clear();
+        }
+    } else if hash_ts > local_timestamp {
         if let Ok(password) = decode(&peer.hash, Variant::Original) {
             if password.len() == 32 {
                 local.password = password;
@@ -437,8 +486,13 @@ mod tests {
             hash: hbb_common::sodiumoxide::base64::encode([7; 32], Variant::Original),
             ..AbPeer::default()
         };
-        apply_peer(stale_cached, 100, 180, &mut local);
+        apply_peer(stale_cached.clone(), 100, 180, &mut local);
         assert!(local.password.is_empty());
+
+        // A newer local credential saved at 200 (> forgotten_at=180) survives stale Ab cache hash.
+        local.password = vec![5; 32];
+        apply_peer(stale_cached, 200, 180, &mut local);
+        assert_eq!(local.password, vec![5; 32]);
 
         // Blank local placeholder (empty platform) touched at 300 still displays cloud metadata from 200.
         let local_blank = HashMap::from([
@@ -467,5 +521,29 @@ mod tests {
         assert_eq!(merged[0]["platform"], "Linux");
         assert_eq!(merged[0]["alias"], "Prod");
         assert_eq!(merged[0]["hostname"], "prod-1");
+    }
+
+    #[test]
+    fn hydrates_cloud_only_peer_before_local_edit() {
+        let mut local = PeerConfig::default();
+        let remote = AbPeer {
+            id: "834502176".to_owned(),
+            platform: "Linux".to_owned(),
+            username: "ops".to_owned(),
+            hostname: "prod-1".to_owned(),
+            alias: "Prod".to_owned(),
+            hash: hbb_common::sodiumoxide::base64::encode([4; 32], Variant::Original),
+            geodom_recent: r#"{"timestamp":200,"force_relay":true,"view_style":"shrink"}"#.to_owned(),
+            ..AbPeer::default()
+        };
+        hydrate_peer(remote, 0, 0, Some("alice"), &mut local);
+        assert_eq!(local.info.platform, "Linux");
+        assert_eq!(local.info.username, "ops");
+        assert_eq!(local.info.hostname, "prod-1");
+        assert_eq!(local.password, vec![4; 32]);
+        assert_eq!(local.view_style, "shrink");
+        assert_eq!(local.options.get("alias").map(String::as_str), Some("Prod"));
+        assert_eq!(local.options.get("force-always-relay").map(String::as_str), Some("Y"));
+        assert_eq!(local.options.get(PEER_OWNER).map(String::as_str), Some("alice"));
     }
 }

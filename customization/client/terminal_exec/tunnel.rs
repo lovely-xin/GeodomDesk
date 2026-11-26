@@ -27,7 +27,7 @@ use std::{
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
-    sync::{mpsc, Mutex as AsyncMutex, Notify, watch},
+    sync::{mpsc, watch, Mutex as AsyncMutex},
     task::JoinSet,
 };
 
@@ -55,16 +55,31 @@ struct Record {
     multiplexed: bool,
 }
 
-#[derive(Default)]
 struct State {
     active: AtomicUsize,
     closed: AtomicBool,
-    closed_notify: Notify,
+    closed_tx: watch::Sender<bool>,
     last_error: Mutex<String>,
     mux_handle: Mutex<Option<Arc<TunnelHandle>>>,
     direct: AtomicBool,
     transport: Mutex<Option<&'static str>>,
     multiplexed: AtomicBool,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        let (closed_tx, _) = watch::channel(false);
+        Self {
+            active: AtomicUsize::default(),
+            closed: AtomicBool::default(),
+            closed_tx,
+            last_error: Mutex::default(),
+            mux_handle: Mutex::default(),
+            direct: AtomicBool::default(),
+            transport: Mutex::default(),
+            multiplexed: AtomicBool::default(),
+        }
+    }
 }
 
 impl State {
@@ -80,7 +95,7 @@ impl State {
 
     fn mark_closed(&self) {
         self.closed.store(true, Ordering::Relaxed);
-        self.closed_notify.notify_waiters();
+        self.closed_tx.send_replace(true);
     }
 
     fn set_error(&self, message: String) {
@@ -429,7 +444,7 @@ pub(crate) async fn list(device: &str) -> ResultType<Value> {
     let records = records()?;
     let requests = records
         .into_iter()
-        .filter(|(_, r)| r.local_port != 0 && (device.is_empty() || r.device_id == device))
+        .filter(|(_, r)| device.is_empty() || r.device_id == device)
         .map(|(path, r)| async move {
             match rpc(&r, "status").await {
                 Ok(value) => Some(value),
@@ -568,12 +583,39 @@ impl Managed {
         remote_port: u16,
         purpose: &str,
     ) -> ResultType<Self> {
+        Self::start_with_mux(options, port, host, remote_port, purpose, true).await
+    }
+
+    pub(super) async fn start_unmuxed(
+        options: &cli::ConnectOptions,
+        port: u16,
+        host: String,
+        remote_port: u16,
+        purpose: &str,
+    ) -> ResultType<Self> {
+        Self::start_with_mux(options, port, host, remote_port, purpose, false).await
+    }
+
+    async fn start_with_mux(
+        options: &cli::ConnectOptions,
+        port: u16,
+        host: String,
+        remote_port: u16,
+        purpose: &str,
+        allow_mux: bool,
+    ) -> ResultType<Self> {
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))
             .await
-            .context(
-                "Local tunnel port is unavailable; use --local-port 0 to allocate a free port",
-            )?;
-        Self::start_inner(options, Some(listener), None, host, remote_port, purpose).await
+            .with_context(|| {
+                if port == 0 {
+                    "Local tunnel port is unavailable (127.0.0.1:0)".to_owned()
+                } else {
+                    format!(
+                        "Local tunnel port is unavailable (127.0.0.1:{port}; omit --local-port or pass --local-port 0 to auto-pick a free port)"
+                    )
+                }
+            })?;
+        Self::start_inner(options, Some(listener), None, host, remote_port, purpose, allow_mux).await
     }
 
     #[cfg(feature = "embedded-ssh")]
@@ -583,7 +625,7 @@ impl Managed {
         remote_port: u16,
     ) -> ResultType<(Self, tokio::io::DuplexStream)> {
         let (client, relay) = tokio::io::duplex(128 * 1024);
-        let owner = Self::start_inner(options, None, Some(relay), host, remote_port, "Embedded SSH").await?;
+        let owner = Self::start_inner(options, None, Some(relay), host, remote_port, "Embedded SSH", false).await?;
         Ok((owner, client))
     }
 
@@ -594,6 +636,7 @@ impl Managed {
         host: String,
         remote_port: u16,
         purpose: &str,
+        allow_mux: bool,
     ) -> ResultType<Self> {
         if remote_port == 0
             || host.trim().is_empty()
@@ -606,7 +649,7 @@ impl Managed {
         let mut options = options.clone();
         options.ssh = None;
         options.admin = None;
-        let allow_mux = private_stream.is_none();
+        let allow_mux = allow_mux && private_stream.is_none();
         let first = options.open_forward(&host, remote_port, allow_mux).await?;
         let peer = first.peer.clone();
         let setup_errors = first.setup_errors.clone();
@@ -1080,15 +1123,9 @@ impl Managed {
                 }
             }
         });
-        let state = self.state.clone();
+        let mut closed_rx = self.state.closed_tx.subscribe();
         let closed_wait = async move {
-            loop {
-                let notified = state.closed_notify.notified();
-                if state.closed.load(Ordering::Relaxed) {
-                    break;
-                }
-                notified.await;
-            }
+            let _ = closed_rx.wait_for(|closed| *closed).await;
         };
         tokio::pin!(closed_wait);
         #[cfg(unix)]
@@ -1190,8 +1227,15 @@ async fn forward(
     let _writer_guard = AbortWriter(writer.abort_handle());
     let mut bytes = vec![0u8; 64 * 1024];
     let mut writer_done = false;
+    let mut write_permit: Option<mpsc::OwnedPermit<hbb_common::bytes::Bytes>> = None;
     let res = loop {
         tokio::select! {
+            permit = write_tx.clone().reserve_owned(), if write_permit.is_none() => {
+                match permit {
+                    Ok(permit) => write_permit = Some(permit),
+                    Err(_) => break Err(hbb_common::anyhow::anyhow!("Local TCP reader stopped")),
+                }
+            }
             result = local_read.read(&mut bytes) => {
                 let n = match result {
                     Ok(n) => n,
@@ -1209,11 +1253,11 @@ async fn forward(
                     Err(_) => break Err(hbb_common::anyhow::anyhow!("TCP peer write stalled")),
                 }
             }
-            result = connection.terminal_stream()?.next() => {
+            result = connection.terminal_stream()?.next(), if write_permit.is_some() => {
                 match result {
                     Some(Ok(chunk)) => {
-                        if write_tx.send(chunk.freeze()).await.is_err() {
-                            break Err(hbb_common::anyhow::anyhow!("Local TCP reader stopped"));
+                        if let Some(permit) = write_permit.take() {
+                            permit.send(chunk.freeze());
                         }
                     }
                     Some(Err(error)) => break Err(error.into()),
@@ -1230,6 +1274,7 @@ async fn forward(
             }
         }
     };
+    drop(write_permit);
     drop(write_tx);
     if !writer_done {
         if res.is_ok() {
@@ -1246,6 +1291,7 @@ async fn forward(
 pub(super) async fn manage(op: &str, mut args: impl Iterator<Item = String>) -> ResultType<i32> {
     let mut device = String::new();
     let mut tunnel = None;
+    let mut pretty = false;
     while let Some(arg) = args.next() {
         let (flag, inline) = match arg.split_once('=') {
             Some((name, val)) => (name, Some(val.to_owned())),
@@ -1255,9 +1301,12 @@ pub(super) async fn manage(op: &str, mut args: impl Iterator<Item = String>) -> 
             println!("{}", super::cli::USAGE);
             return Ok(0);
         }
-        if matches!(flag, "--json" | "--non-interactive") {
+        if matches!(flag, "--json" | "--pretty" | "--non-interactive") {
             if inline.is_some() {
                 bail!("Option {flag} does not take a value");
+            }
+            if flag == "--pretty" {
+                pretty = true;
             }
             continue;
         }
@@ -1287,7 +1336,11 @@ pub(super) async fn manage(op: &str, mut args: impl Iterator<Item = String>) -> 
         }
         _ => bail!("Use tunnel open, list or close"),
     };
-    output::write(value)?;
+    if pretty {
+        output::write_pretty(value)?;
+    } else {
+        output::write(value)?;
+    }
     Ok(0)
 }
 
@@ -1460,18 +1513,10 @@ mod tests {
     #[tokio::test]
     async fn state_mark_closed_wakes_waiter_without_polling() {
         let state = Arc::new(State::default());
-        let waiter = {
-            let state = state.clone();
-            tokio::spawn(async move {
-                loop {
-                    let notified = state.closed_notify.notified();
-                    if state.closed.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    notified.await;
-                }
-            })
-        };
+        let mut rx = state.closed_tx.subscribe();
+        let waiter = tokio::spawn(async move {
+            let _ = rx.wait_for(|closed| *closed).await;
+        });
         tokio::task::yield_now().await;
         state.mark_closed();
         tokio::time::timeout(Duration::from_secs(1), waiter)

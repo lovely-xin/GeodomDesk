@@ -1,3 +1,7 @@
+static SSH_ACCOUNT_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<Option<([u8; 32], std::time::Instant)>>,
+> = std::sync::OnceLock::new();
+
 pub(super) async fn verify_ssh_account(token: &str) -> ResultType<()> {
     if token.is_empty() || token.bytes().any(|byte| !byte.is_ascii_graphic()) {
         return Err(super::stage::wrap(
@@ -5,6 +9,16 @@ pub(super) async fn verify_ssh_account(token: &str) -> ResultType<()> {
             "account_auth",
             "not_started",
         ));
+    }
+    let digest = hbb_common::sodiumoxide::crypto::hash::sha256::hash(token.as_bytes()).0;
+    let cache = SSH_ACCOUNT_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    {
+        let guard = cache.lock().unwrap_or_else(|poison| poison.into_inner());
+        if let Some((cached_digest, verified_at)) = *guard {
+            if cached_digest == digest && verified_at.elapsed() < Duration::from_secs(60) {
+                return Ok(());
+            }
+        }
     }
     let checked = async {
         let (status, body) = tokio::time::timeout(
@@ -16,12 +30,31 @@ pub(super) async fn verify_ssh_account(token: &str) -> ResultType<()> {
         verified_profile(status, &body)
     }
     .await;
+    if checked.is_ok() {
+        let mut guard = cache.lock().unwrap_or_else(|poison| poison.into_inner());
+        *guard = Some((digest, std::time::Instant::now()));
+    } else {
+        let mut guard = cache.lock().unwrap_or_else(|poison| poison.into_inner());
+        if guard
+            .as_ref()
+            .is_some_and(|(cached_digest, _)| *cached_digest == digest)
+        {
+            *guard = None;
+        }
+    }
     checked.map_err(|error| super::stage::wrap(error, "account_auth", "not_started"))
 }
 
 fn verified_profile(status: u16, body: &str) -> ResultType<()> {
+    fetch_profile(status, body).map(|_| ())
+}
+
+fn fetch_profile(status: u16, body: &str) -> ResultType<serde_json::Value> {
+    if status == 401 || status == 403 {
+        bail!("GeodomDesk session expired or rejected (HTTP {status}). Run account login again");
+    }
     if status != 200 {
-        bail!("GeodomDesk account could not be verified (HTTP {status}). Run account login again");
+        bail!("GeodomDesk account service returned HTTP {status}; retry later or check server connectivity");
     }
     let value: serde_json::Value =
         serde_json::from_str(body).context("Invalid GeodomDesk account verification response")?;
@@ -32,30 +65,155 @@ fn verified_profile(status: u16, body: &str) -> ResultType<()> {
     {
         bail!("GeodomDesk account was rejected. Run account login again");
     }
-    Ok(())
+    Ok(value)
 }
+
+const ACCOUNT_USAGE: &str = "\
+Usage: geodomdesk-cli account login [--user USER] [--non-interactive]
+       geodomdesk-cli account status [--json] [--pretty]
+       geodomdesk-cli account whoami [--json] [--pretty]
+       geodomdesk-cli account logout
+
+Subcommands:
+  login    Sign in and save an encrypted CLI token for this account server
+  status   Verify the active saved CLI or desktop token and print account details
+  logout   Revoke and remove the saved standalone CLI token";
+
+const ACCOUNT_LOGIN_USAGE: &str = "\
+Usage: geodomdesk-cli account login [--user USER] [--non-interactive]
+
+Options:
+  --user USER         GeodomDesk account username (prompted interactively if omitted)
+  --non-interactive   Read password from GEODOMDESK_ACCOUNT_PASSWORD; require --user
+  -h, --help          Show this help message";
 
 pub(super) async fn manage_account(mut args: impl Iterator<Item = String>) -> ResultType<i32> {
     match args.next().as_deref() {
+        None | Some("--help" | "-h" | "help") => {
+            println!("{ACCOUNT_USAGE}");
+        }
         Some("login") => {
             let mut username = None;
             let mut non_interactive = false;
-            while let Some(flag) = args.next() {
-                match flag.as_str() {
-                    "--user" if username.is_none() => {
-                        username = Some(args.next().context("Missing --user value")?);
+            while let Some(arg) = args.next() {
+                let (flag, inline) = match arg.split_once('=') {
+                    Some((name, val)) => (name, Some(val.to_owned())),
+                    None => (arg.as_str(), None),
+                };
+                match flag {
+                    "--help" | "-h" => {
+                        if inline.is_some() {
+                            bail!("Option {flag} does not take a value");
+                        }
+                        println!("{ACCOUNT_LOGIN_USAGE}");
+                        return Ok(0);
                     }
-                    "--non-interactive" => non_interactive = true,
+                    "--user" if username.is_none() => {
+                        let val = match inline {
+                            Some(v) => v,
+                            None => args.next().context("Missing --user value")?,
+                        };
+                        if val.trim().is_empty() {
+                            bail!("--user must not be empty");
+                        }
+                        username = Some(val);
+                    }
+                    "--user" => bail!("Specify --user only once"),
+                    "--non-interactive" => {
+                        if inline.is_some() {
+                            bail!("Option {flag} does not take a value");
+                        }
+                        non_interactive = true;
+                    }
                     _ => bail!("Unknown account login option: {flag}"),
                 }
             }
-            let username = username.context("Use account login --user USER")?;
+            let username = match username {
+                Some(name) => name,
+                None => {
+                    use std::io::{IsTerminal, Write};
+                    if non_interactive || !std::io::stdin().is_terminal() {
+                        bail!("Use account login --user USER");
+                    }
+                    eprint!("GeodomDesk account username: ");
+                    std::io::stderr().flush()?;
+                    let mut input = String::new();
+                    std::io::stdin().read_line(&mut input)?;
+                    let trimmed = input.trim().to_owned();
+                    if trimmed.is_empty() {
+                        bail!("Use account login --user USER");
+                    }
+                    trimmed
+                }
+            };
             let token = request_account_token(username, non_interactive, true).await?;
             verify_ssh_account(&token).await?;
             save_cli_account(&token).await?;
             println!("GeodomDesk CLI signed in.");
         }
-        Some("logout") if args.next().is_none() => {
+        Some("status" | "whoami") => {
+            let mut json = false;
+            let mut pretty = false;
+            while let Some(flag) = args.next() {
+                match flag.as_str() {
+                    "--help" | "-h" => {
+                        println!("{ACCOUNT_USAGE}");
+                        return Ok(0);
+                    }
+                    "--json" => json = true,
+                    "--pretty" => {
+                        json = true;
+                        pretty = true;
+                    }
+                    _ => bail!("Unknown account status option: {flag}"),
+                }
+            }
+            let (source, token) = if let Some((_, token)) = saved_cli_account()? {
+                ("cli", token)
+            } else {
+                let desktop = LocalConfig::get_option("access_token");
+                if desktop.is_empty() {
+                    bail!("Not signed in. Run geodomdesk-cli account login --user USER");
+                }
+                ("desktop", desktop)
+            };
+            let (status, body) = tokio::time::timeout(
+                Duration::from_secs(10),
+                crate::common::post_terminal_account("currentUser", "{}".into(), Some(&token)),
+            )
+            .await
+            .context("GeodomDesk account verification timed out")??;
+            let profile = fetch_profile(status, &body)?;
+            let name = profile["name"].as_str().unwrap_or_default().trim();
+            let display_name = profile["display_name"].as_str().unwrap_or_default().trim();
+            if json {
+                let payload = serde_json::json!({
+                    "ok": true,
+                    "source": source,
+                    "name": name,
+                    "display_name": display_name,
+                });
+                if pretty {
+                    super::output::write_pretty(payload)?;
+                } else {
+                    super::output::write(payload)?;
+                }
+            } else if !display_name.is_empty() && display_name != name {
+                println!("Signed in as {name} ({display_name}) via {source} session.");
+            } else {
+                println!("Signed in as {name} via {source} session.");
+            }
+        }
+        Some("logout") => {
+            while let Some(flag) = args.next() {
+                match flag.as_str() {
+                    "--help" | "-h" => {
+                        println!("{ACCOUNT_USAGE}");
+                        return Ok(0);
+                    }
+                    _ => bail!("Unknown account logout option: {flag}"),
+                }
+            }
             if let Some((saved, token)) = saved_cli_account()? {
                 {
                     let path = account_path()?;
@@ -70,7 +228,7 @@ pub(super) async fn manage_account(mut args: impl Iterator<Item = String>) -> Re
             }
             println!("GeodomDesk CLI signed out.");
         }
-        _ => bail!("Use account login --user USER or account logout"),
+        _ => bail!("Use account login, account status, or account logout"),
     }
     Ok(0)
 }

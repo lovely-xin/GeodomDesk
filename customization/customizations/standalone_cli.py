@@ -152,17 +152,19 @@ pub fn run_standalone_cli() -> ResultType<i32> {
     cli_text = cli_text[:select] + '''    if ssh_host_set && (shell.is_none() || ssh_user.is_none()) {
         bail!("--ssh-host requires an explicit --ssh-user and --shell");
     }
+    let has_ssh_opts = ssh_user.is_some() || ssh_host_set || ssh_identity.is_some()
+        || ssh_known_hosts.is_some() || ssh_fingerprint.is_some() || ssh_strict
+        || ask_ssh_password || ssh_port_set;
     let use_ssh = !tunnel && (command_transport == "ssh"
-        || (command_transport == "auto" && shell.is_some() && admin_user.is_none()));
+        || (command_transport == "auto"
+            && admin_user.is_none()
+            && (shell == Some(ExecShell::BASH) || (shell.is_some() && has_ssh_opts))));
     if use_ssh && (ssh_port == 0 || admin_user.is_some()
         || (ssh_host_set && (ssh_host.trim().is_empty() || ssh_host.len() > 253 || ssh_host.chars().any(char::is_control))))
     {
         bail!("SSH requires a valid port and host, and uses --ssh-user for operating system authentication");
     }
-    if !use_ssh && (ssh_user.is_some() || ssh_host_set || ssh_identity.is_some()
-        || ssh_known_hosts.is_some() || ssh_fingerprint.is_some() || ssh_strict
-        || ask_ssh_password || ssh_port_set)
-    {
+    if !use_ssh && has_ssh_opts {
         bail!("SSH options require a shell and SSH transport");
     }
     if use_ssh && shell.is_none() {
@@ -192,7 +194,6 @@ pub fn run_standalone_cli() -> ResultType<i32> {
 ''' + cli_text[boundary:]
     connect = cli_text.index("        let token = self.current_token()?;", beginning)
     body = cli_text[connect:]
-    body = body.replace("            Duration::from_secs(self.timeout.into()),", "            remaining,", 1)
     body = body.replace("        ssh_fallback_errors.extend(history);\n        connection.setup_errors = ssh_fallback_errors;",
                         "        prior_errors.extend(history);\n        connection.setup_errors = prior_errors;", 1)
     files[cli_path] = (cli_text[:connect] + body).encode()
@@ -206,7 +207,8 @@ pub fn run_standalone_cli() -> ResultType<i32> {
     edit(files, cli_path, [
         ("       geodomdesk-cli probe --id ID [authentication options]\n",
          "       geodomdesk-cli probe --id ID [authentication options]\n"
-         "       geodomdesk-cli account login --user USER [--non-interactive]\n"
+         "       geodomdesk-cli account login [--user USER] [--non-interactive]\n"
+         "       geodomdesk-cli account status [--json] [--pretty]\n"
          "       geodomdesk-cli account logout\n"),
         ("""  --transport MODE        auto (default): Bash uses SSH over a managed TCP relay
                           terminal: use GeodomDesk terminal; ssh: require SSH Bash
@@ -230,9 +232,15 @@ pub fn run_standalone_cli() -> ResultType<i32> {
          '    if first.as_deref() == Some("account") { return auth::manage_account(args).await; }\n'
          '    let tunnel=first.as_deref()==Some("tunnel");'),
         ("    fn current_token(&self)", "    pub(super) fn current_token(&self)"),
-        ('        let token = hbb_common::config::LocalConfig::get_option_from_file("access_token");',
+        ('        let token = hbb_common::config::LocalConfig::get_option_from_file("access_token");\n'
+         '        if token.is_empty() {\n'
+         '            bail!("Sign in to GeodomDesk first or supply --account-user");\n'
+         '        }',
          '        if let Some((_, token)) = auth::saved_cli_account()? { return Ok(token); }\n'
-         '        let token = hbb_common::config::LocalConfig::get_option_from_file("access_token");'),
+         '        let token = hbb_common::config::LocalConfig::get_option_from_file("access_token");\n'
+         '        if token.is_empty() {\n'
+         '            bail!("Run geodomdesk-cli account login --user USER or supply --account-user");\n'
+         '        }'),
         ('    let mut ssh_host = None;', '    let mut ssh_host = None;\n    let mut ssh_fingerprint = None;'),
         ('                    "--ssh-port" => {',
          '''                    "--ssh-host-fingerprint" => {

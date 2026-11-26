@@ -120,6 +120,21 @@ def apply(changes, root):
         "        crate::geodomdesk_recent::mark_new_peer(&mut config);\n"
         "        config.info = serde;\n        let password = self.password.clone();",
     )
+    edit(
+        "src/ui_interface.rs",
+        "pub fn peer_has_password(id: String) -> bool {\n    !PeerConfig::load(&id).password.is_empty()\n}",
+        "pub fn peer_has_password(id: String) -> bool {\n"
+        "    let mut c = PeerConfig::load(&id);\n"
+        "    crate::geodomdesk_recent::apply_settings(&id, &mut c);\n"
+        "    !c.password.is_empty()\n}",
+    )
+    edit(
+        "src/ui_interface.rs",
+        "pub fn set_peer_option(id: String, name: String, value: String) {\n    let mut c = PeerConfig::load(&id);",
+        "pub fn set_peer_option(id: String, name: String, value: String) {\n"
+        "    let mut c = PeerConfig::load(&id);\n"
+        "    crate::geodomdesk_recent::hydrate_for_edit(&id, &mut c);",
+    )
     ffi = "src/flutter_ffi.rs"
     edit(
         ffi,
@@ -197,7 +212,35 @@ def apply(changes, root):
         "          if (id != null && hash != null) {\n            gFFI.abModel",
         "          if (id != null && hash != null && !gFFI.abModel.recentDevices.enabled) {\n            gFFI.abModel",
     )
-    edit(book, "    _pulledOnce = false;\n    await bind.mainClearAb();", "    _pulledOnce = false;\n    _maxPeerOneAb = 0;\n    recentDevices.resetSupport();\n    await bind.mainClearAb();")
+    edit(
+        book,
+        "    _pulledOnce = false;\n    await bind.mainClearAb();",
+        "    _pulledOnce = false;\n    _maxPeerOneAb = 0;\n    recentDevices.resetSupport();\n    await bind.mainClearAb();\n    await bind.mainLoadRecentPeers();",
+    )
+    edit(
+        book,
+        "    currentAbPeers.refresh();\n    _refreshTab();\n    _saveCache();",
+        "    currentAbPeers.refresh();\n    _refreshTab();\n    await _saveCache();\n    await bind.mainLoadRecentPeers();",
+    )
+    edit(
+        book,
+        """  _saveCache() {
+    try {
+      var ab_entries = _serializeCache();
+      Map<String, dynamic> m = <String, dynamic>{
+        "access_token": bind.mainGetLocalOption(key: 'access_token'),
+        "ab_entries": ab_entries,
+      };
+      bind.mainSaveAb(json: jsonEncode(m));""",
+        """  Future<void> _saveCache() async {
+    try {
+      var ab_entries = _serializeCache();
+      Map<String, dynamic> m = <String, dynamic>{
+        "access_token": bind.mainGetLocalOption(key: 'access_token'),
+        "ab_entries": ab_entries,
+      };
+      await bind.mainSaveAb(json: jsonEncode(m));""",
+    )
     edit(book, "  Future<bool> _getAbSettings({required bool quiet}) async {\n    int? statusCode;",
          "  Future<bool> _getAbSettings({required bool quiet}) async {\n"
          "    final token = bind.mainGetLocalOption(key: 'access_token');\n    int? statusCode;")
@@ -224,7 +267,8 @@ def apply(changes, root):
     edit(
         widget,
         "      if (canWrite) syncMenuItem(),",
-        """      if (canWrite) syncMenuItem(),
+        """      if (canWrite && !isMobile && !gFFI.abModel.recentDevices.supported.value)
+        syncMenuItem(),
       if (gFFI.abModel.recentDevices.supported.value)
         MenuEntrySwitch<String>(
           switchType: SwitchType.scheckbox,
@@ -234,6 +278,23 @@ def apply(changes, root):
           dismissOnClicked: true,
           enabled: gFFI.abModel.recentDevices.supported,
         ),""",
+    )
+    edit(
+        "flutter/lib/common/widgets/peer_tab_page.dart",
+        """              case 0:
+                for (var p in peers) {
+                  await bind.mainRemovePeer(id: p.id);
+                }
+                bind.mainLoadRecentPeers();
+                break;""",
+        """              case 0:
+                for (var p in peers) {
+                  await bind.mainRemovePeer(id: p.id);
+                }
+                await gFFI.abModel.recentDevices
+                    .removeMany(peers.map((p) => p.id));
+                await bind.mainLoadRecentPeers();
+                break;""",
     )
     edit(
         "flutter/lib/common/widgets/peer_card.dart",

@@ -17,7 +17,7 @@ fn read_binding(root: &Path) -> Vec<String> {
     };
     let mut addresses = Vec::new();
     for entry in entries {
-        let Ok(entry) = entry else { return Vec::new() };
+        let Ok(entry) = entry else { continue };
         let path = entry.path();
         // Bridges, VPNs and containers are not hardware identity anchors.
         if !path.join("device").exists() {
@@ -25,18 +25,19 @@ fn read_binding(root: &Path) -> Vec<String> {
         }
         if fs::read_to_string(path.join("type"))
             .ok()
-            .is_some_and(|arp_type| arp_type.trim() != "1")
+            .map(|arp_type| arp_type.trim() == "1")
+            != Some(true)
         {
             continue;
         }
         let Ok(kind) = fs::read_to_string(path.join("addr_assign_type")) else {
-            return Vec::new();
+            continue;
         };
         if kind.trim() != "0" {
             continue;
         }
         let Ok(address) = fs::read_to_string(path.join("address")) else {
-            return Vec::new();
+            continue;
         };
         let address = address.trim().to_ascii_lowercase();
         let bytes: Option<Vec<u8>> = address
@@ -206,6 +207,7 @@ mod tests {
             if physical {
                 fs::create_dir(path.join("device")).unwrap();
             }
+            fs::write(path.join("type"), "1\n").unwrap();
             fs::write(path.join("address"), address).unwrap();
             fs::write(path.join("addr_assign_type"), kind).unwrap();
         }
@@ -220,10 +222,17 @@ mod tests {
         fs::write(can.join("type"), "280\n").unwrap();
         fs::write(can.join("addr_assign_type"), "0\n").unwrap();
         fs::write(can.join("address"), "00:00:00:00:00:00\n").unwrap();
+        let untyped = root.join("eth2");
+        fs::create_dir_all(untyped.join("device")).unwrap();
+        fs::write(untyped.join("addr_assign_type"), "0\n").unwrap();
+        fs::write(untyped.join("address"), "02:00:00:00:00:09\n").unwrap();
         assert_eq!(read_binding(&root), ids(&["02:00:00:00:00:01"]));
         fs::remove_dir_all(&wwan).unwrap();
         fs::remove_dir_all(&can).unwrap();
+        fs::remove_dir_all(&untyped).unwrap();
         fs::remove_file(root.join("eth1/address")).unwrap();
+        assert_eq!(read_binding(&root), ids(&["02:00:00:00:00:01"]));
+        fs::remove_file(root.join("eth0/address")).unwrap();
         assert!(read_binding(&root).is_empty());
         fs::remove_dir_all(root).unwrap();
     }

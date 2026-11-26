@@ -65,6 +65,35 @@ def apply(changes):
         change(desktop, unused, "")
     change(
         mobile,
+        "  var _buildDate = \"\";",
+        "  var _version = version;\n  var _buildDate = \"\";",
+    )
+    change(
+        mobile,
+        "      final buildDate = await bind.mainGetBuildDate();",
+        "      final currentVersion = await bind.mainGetVersion();\n"
+        "      if (currentVersion.isNotEmpty && _version != currentVersion) {\n"
+        "        update = true;\n"
+        "        _version = currentVersion;\n"
+        "      }\n"
+        "      final buildDate = await bind.mainGetBuildDate();",
+    )
+    change(
+        mobile,
+        'title: Text(translate("Version: ") + version),',
+        'title: Text(\'${translate("Version")}: $_version\'),',
+    )
+    change(
+        mobile,
+        """void showAbout(OverlayDialogManager dialogManager) {
+  dialogManager.show((setState, close, context) {""",
+        """void showAbout(OverlayDialogManager dialogManager) async {
+  final currentVersion = await bind.mainGetVersion();
+  final displayVersion = currentVersion.isNotEmpty ? currentVersion : version;
+  dialogManager.show((setState, close, context) {""",
+    )
+    change(
+        mobile,
         "      content: Wrap(direction: Axis.vertical, spacing: 12, children: [\n        Text('Version: $version'),",
         """      content: Column(
           mainAxisSize: MainAxisSize.min,
@@ -75,7 +104,7 @@ def apply(changes):
             color: Theme.of(context).brightness == Brightness.dark
                 ? Colors.white : null),
         const SizedBox(height: 12),
-        Text('${translate('Version')}: $version'),
+        Text('${translate('Version')}: $displayVersion'),
         const SizedBox(height: 12),
         Text(translate('"""
         + attribution

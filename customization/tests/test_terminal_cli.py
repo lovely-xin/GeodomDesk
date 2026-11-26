@@ -280,10 +280,14 @@ class CustomizationContractTests(unittest.TestCase):
     def test_standalone_cli_patches_usage_fingerprint_and_cli_tests(self):
         root = Path(__file__).resolve().parents[1]
         cli_mod = (root / "customizations/standalone_cli.py").read_text(encoding="utf-8")
+        ssh_rs = (root / "standalone/ssh.rs").read_text(encoding="utf-8")
         input_rs = (root / "client/terminal_exec/input.rs").read_text(encoding="utf-8")
         cli_rs = (root / "client/terminal_exec/cli.rs").read_text(encoding="utf-8")
         tunnel_rs = (root / "client/terminal_exec/tunnel.rs").read_text(encoding="utf-8")
         self.assertIn("embedded SSH over TCP, then GeodomDesk terminal", cli_mod)
+        self.assertIn("let has_ssh_opts =", cli_mod)
+        self.assertIn("shell == Some(ExecShell::BASH) || (shell.is_some() && has_ssh_opts)", cli_mod)
+        self.assertIn("ssh.authentication.preflight()?", ssh_rs)
         self.assertIn('"--ssh-host-fingerprint"', cli_mod)
         self.assertIn('"--ssh-host requires an explicit --ssh-user and --shell"', cli_mod)
         self.assertIn('"--ssh-known-hosts",\n', input_rs)

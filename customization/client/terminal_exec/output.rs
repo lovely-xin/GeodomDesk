@@ -12,6 +12,15 @@ pub(super) fn write(value: Value) -> ResultType<()> {
     Ok(())
 }
 
+pub(super) fn write_pretty(value: Value) -> ResultType<()> {
+    let mut data = serde_json::to_vec_pretty(&value)?;
+    data.push(b'\n');
+    let mut output = std::io::stdout().lock();
+    output.write_all(&data)?;
+    output.flush()?;
+    Ok(())
+}
+
 pub(super) fn result(id: Option<Value>, result: &TerminalExecResult, elapsed: Duration) -> Value {
     let mut value = json!({"event": "result", "encoding": "base64",
         "stdout": crate::encode64(&result.stdout), "stderr": crate::encode64(&result.stderr),

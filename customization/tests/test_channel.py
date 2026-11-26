@@ -207,6 +207,136 @@ class ChannelTests(unittest.TestCase):
             with self.subTest(changed=changed), self.assertRaises(ValueError):
                 channel.signed_metadata("1.5.2", "2026-11-04T00:00:00Z", changed, bytes(32))
 
+    def test_changelog_normalization_and_signed_metadata(self):
+        import release_bundle
+
+        dirty = "\r\n\x00- 修复连接\r\n\r\n\r\n- 提升速度\x1b[0m   \n"
+        self.assertEqual(channel.normalize_changelog(dirty), "- 修复连接\n\n- 提升速度[0m")
+
+        cn_long = "更新说明测试" * 1000
+        bounded = channel.normalize_changelog(cn_long)
+        self.assertLessEqual(len(bounded.encode("utf-8")), channel.CHANGELOG_MAX_BYTES)
+        self.assertTrue(bounded.endswith("..."))
+
+        md = """# 更新日志
+
+## 1.5.4
+- 下一版本内容
+
+## v1.5.3 (2026-11-26)
+- 新增更新日志弹窗确认
+- 优化端到端性能
+
+## 1.5.2
+- 历史版本
+"""
+        self.assertEqual(
+            channel.extract_changelog_section(md, "1.5.3"),
+            "- 新增更新日志弹窗确认\n- 优化端到端性能",
+        )
+        self.assertEqual(channel.extract_changelog_section(md), "- 下一版本内容")
+        self.assertEqual(channel.extract_changelog_section(md, "1.6.0", "1.6.0-r1"), "")
+
+        md_rev = """## 1.5.3-r99
+- 仅 r99 内容
+
+## 1.5.3-r12
+- 构建 12 修复
+
+## 1.5.3
+- 通用 1.5.3 说明
+"""
+        self.assertEqual(
+            channel.extract_changelog_section(md_rev, "1.5.3", release_id="1.5.3-r12"),
+            "- 构建 12 修复",
+        )
+        self.assertEqual(
+            channel.extract_changelog_section(md_rev, "1.5.3", release_id="1.5.3-r1"),
+            "- 通用 1.5.3 说明",
+        )
+
+        seed = bytes(range(32))
+        metadata_plain, _ = channel.signed_metadata(
+            "1.5.3-r2", "2026-11-26T00:00:00Z", self.metadata_for("1.5.3-r2"), seed
+        )
+        self.assertNotIn("changelog", json.loads(metadata_plain))
+
+        metadata_notes, signature_notes = channel.signed_metadata(
+            "1.5.3-r2",
+            "2026-11-26T00:00:00Z",
+            self.metadata_for("1.5.3-r2"),
+            seed,
+            changelog="  - 新增更新日志\r\n- 优化速度  ",
+        )
+        parsed = json.loads(metadata_notes)
+        self.assertEqual(parsed["changelog"], "- 新增更新日志\n- 优化速度")
+        Ed25519PublicKey.from_public_bytes(channel.public_key(seed)).verify(
+            base64.b64decode(json.loads(signature_notes)["signature"]),
+            channel.SIGNATURE_CONTEXT + metadata_notes,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            artifacts = []
+            for platform, arch, fmt in channel.TARGETS:
+                p = root / f"{platform}.{fmt}"
+                p.write_bytes(b"X" * 1_100_000)
+                artifacts.append(p)
+            src = root / "src.tar.gz"
+            src.write_bytes(b"source-tarball")
+            cfg_path = root / "build-config.json"
+            cfg_path.write_text(
+                json.dumps(
+                    {
+                        "app": "GeodomDesk",
+                        "package_id": "geodomdesk",
+                        "version": "1.5.3",
+                        "build_number": 5,
+                        "release_id": "1.5.3-r5",
+                        "base_url": channel.BASE_URL,
+                        "key_id": channel.KEY_ID,
+                        "public_key": base64.b64encode(channel.public_key(seed)).decode(),
+                        "upstream_commit": "a" * 40,
+                        "native_config": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            cl = root / "CHANGELOG.md"
+            cl.write_text(md, encoding="utf-8")
+            out = root / "out"
+            with contextlib.redirect_stdout(io.StringIO()):
+                release_bundle.bundle(
+                    "1.5.3",
+                    "owner/GeodomDesk",
+                    artifacts[0],
+                    artifacts[1],
+                    artifacts[2],
+                    src,
+                    out,
+                    cfg_path,
+                    changelog_file=cl,
+                )
+            built = json.loads((out / "geodomdesk-build.json").read_text(encoding="utf-8"))
+            self.assertEqual(built["changelog"], "- 新增更新日志弹窗确认\n- 优化端到端性能")
+
+    def metadata_for(self, release_id):
+        items = []
+        for platform, arch, fmt in channel.TARGETS:
+            name = channel.file_name(release_id, platform, fmt)
+            items.append(
+                {
+                    "platform": platform,
+                    "arch": arch,
+                    "format": fmt,
+                    "file_name": name,
+                    "url": channel.release_url(release_id) + name,
+                    "size": 1234,
+                    "sha256": "a" * 64,
+                }
+            )
+        return items
+
     @unittest.skipUnless(
         (ROOT / "reference").is_dir(), "upstream reference is a local review fixture"
     )
@@ -298,10 +428,10 @@ class ChannelTests(unittest.TestCase):
                 "RuntimeBroker_rustdesk.exe",
                 (source / "src/privacy_mode/win_topmost_window.rs").read_text(),
             )
-            self.assertIn(
-                "client.get(crate::geodomdesk_update::LATEST_URL)", bad.read_text(encoding="utf-8")
-            )
-            self.assertNotIn("client.post(&url).json(&request)", bad.read_text(encoding="utf-8"))
+            bad_text = bad.read_text(encoding="utf-8")
+            self.assertIn(".get(crate::geodomdesk_update::LATEST_URL)", bad_text)
+            self.assertIn('if response.url().scheme() != "https"', bad_text)
+            self.assertNotIn("client.post(&url).json(&request)", bad_text)
             self.assertIn(
                 "GeodomDesk update metadata v1", (source / "src/update_metadata.rs").read_text()
             )
@@ -389,6 +519,41 @@ class ChannelTests(unittest.TestCase):
 
             self.assertEqual(auto_id(baseline_config), auto_id(prepared_config))
             self.assertIn("geodomdesk_clone_guard::refresh(", prepared_config)
+            self.assertIn("SOFTWARE_UPDATE_INFO", common_rs)
+            self.assertIn("check_software_update_manual", common_rs)
+            self.assertIn("MAX_POINTER_BYTES", common_rs)
+            self.assertIn(
+                "crate::geodomdesk_update::current_release_id(crate::VERSION)",
+                (source / "src/ui_interface.rs").read_text(encoding="utf-8"),
+            )
+            self.assertIn('"software-update-info"', ffi)
+            self.assertIn('"check-software-update"', ffi)
+            self.assertIn('|| key == "check-software-update"', ffi)
+            dialog_widget = (source / "flutter/lib/common/widgets/geodom_update_dialog.dart").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("showGeodomUpdateDialog", dialog_widget)
+            self.assertIn("checkGeodomUpdateManually", dialog_widget)
+            self.assertIn("desktopType != DesktopType.main", dialog_widget)
+            self.assertNotIn("kWindowType", dialog_widget)
+            self.assertNotIn("multi_window_manager.dart", dialog_widget)
+            common_dart = (source / "flutter/lib/common.dart").read_text(encoding="utf-8")
+            self.assertIn("handleGeodomUpdateCheckEvent(evt)", common_dart)
+            home_dart = (source / "flutter/lib/desktop/pages/desktop_home_page.dart").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("showGeodomUpdateDialogFromCurrent(updateUrl)", home_dart)
+            self.assertIn("checkGeodomUpdateManually()", desktop_settings)
+            mobile_conn = (source / "flutter/lib/mobile/pages/connection_page.dart").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("showGeodomUpdateDialogFromCurrent(url)", mobile_conn)
+            self.assertIn("checkGeodomUpdateManually()", mobile_settings)
+            self.assertIn("await bind.mainGetVersion()", mobile_settings)
+            cn_rs = (source / "src/lang/cn.rs").read_text(encoding="utf-8")
+            self.assertIn('("New version available", "发现新版本")', cn_rs)
+            self.assertIn('("Check for updates", "检查更新")', cn_rs)
+            self.assertIn('("New version available", "")', german.read_text(encoding="utf-8"))
             baseline_uuid = (ROOT / "reference/libs/hbb_common/src/lib.rs").read_text(
                 encoding="utf-8"
             )
@@ -396,6 +561,25 @@ class ChannelTests(unittest.TestCase):
             start = baseline_uuid.index("pub fn get_uuid() -> Vec<u8> {")
             uuid_body = baseline_uuid[start : baseline_uuid.index("\n#[inline]", start)]
             self.assertIn(uuid_body, prepared_uuid)
+            self.assertIn(
+                "pub(crate) mod geodomdesk_relay_probe;",
+                (source / "src/lib.rs").read_text(encoding="utf-8"),
+            )
+            self.assertTrue((source / "src/geodomdesk_relay_probe.rs").is_file())
+            self.assertTrue((source / "src/geodomdesk_relay_probe/logic.rs").is_file())
+            mediator = (source / "src/rendezvous_mediator.rs").read_text(encoding="utf-8")
+            self.assertLess(
+                mediator.index("crate::geodomdesk_relay_probe::start();"),
+                mediator.index("if config::is_outgoing_only()"),
+            )
+            self.assertGreaterEqual(
+                mediator.count("crate::geodomdesk_relay_probe::notify_network_change();"),
+                2,
+            )
+            self.assertIn('/api/relay/probe")', common_rs)
+            relay_rs = (source / "src/client/relay.rs").read_text(encoding="utf-8")
+            self.assertIn("connect_relay_socket(&relay_server, ipv4, false)", relay_rs)
+            self.assertIn("connect_relay_socket(&relay_server, ipv4, true)", relay_rs)
 
     def test_customizations_do_not_change_wire_protocol(self):
         from customizations import upstream, identity, update_channel, account_login
@@ -773,6 +957,64 @@ class PublisherTests(unittest.TestCase):
                 self.p.run(self.config)
         failed = json.loads((self.state / "status.json").read_text())
         self.assertEqual(failed["status"], "failed")
+
+    def test_publish_changelog_in_signed_metadata_pointer_and_release_page(self):
+        release, build, local = self.build_fixture("1.5.3", 12)
+        build["changelog"] = "- 新增更新日志弹窗确认\n- 修复问题 <script>alert(1)</script>"
+        local["geodomdesk-build.json"].write_bytes(channel.stable_json(build))
+        for asset in release["assets"]:
+            if asset["name"] == "geodomdesk-build.json":
+                asset["size"] = local["geodomdesk-build.json"].stat().st_size
+                asset["digest"] = "sha256:" + channel.sha256(local["geodomdesk-build.json"])
+        with self.mocks(release, local):
+            self.p.run(self.config)
+        latest = json.loads((self.public / "latest.json").read_text(encoding="utf-8"))
+        self.assertEqual(latest["changelog"], build["changelog"])
+        self.assertIn("published_at", latest)
+        target = self.public / "releases/1.5.3-r12"
+        metadata_bytes = (target / channel.METADATA_NAME).read_bytes()
+        signature = json.loads((target / (channel.METADATA_NAME + ".sig")).read_bytes())
+        Ed25519PublicKey.from_public_bytes(channel.public_key(self.seed.read_bytes())).verify(
+            base64.b64decode(signature["signature"]), channel.SIGNATURE_CONTEXT + metadata_bytes
+        )
+        self.assertEqual(json.loads(metadata_bytes)["changelog"], build["changelog"])
+        release_html = (target / "index.html").read_text(encoding="utf-8")
+        self.assertIn("1.5.3-r12", release_html)
+        self.assertIn("更新日志", release_html)
+        self.assertNotIn("<script>", release_html)
+        self.assertIn("&lt;script&gt;", release_html)
+        self.p.portal_update(self.portal, "1.5.3-r12")
+        self.assertIn("GeodomDesk 1.5.3-r12", self.portal.read_text(encoding="utf-8"))
+
+        # Pointer changelog or published_at drift forces pointer refresh on subsequent run.
+        latest_path = self.public / "latest.json"
+        drifted = json.loads(latest_path.read_text(encoding="utf-8"))
+        drifted.pop("changelog", None)
+        drifted["published_at"] = "2020-01-01T00:00:00Z"
+        latest_path.write_text(json.dumps(drifted), encoding="utf-8")
+        with self.mocks(release, local):
+            self.p.run(self.config)
+        refreshed = json.loads(latest_path.read_text(encoding="utf-8"))
+        self.assertEqual(refreshed["changelog"], build["changelog"])
+        self.assertEqual(refreshed["published_at"], release["published_at"])
+        self.assertEqual(
+            json.loads(metadata_bytes)["published_at"],
+            refreshed["published_at"],
+        )
+
+    def test_publisher_ignores_default_release_boilerplate(self):
+        release, _, local = self.build_fixture("1.5.4", 1)
+        release["body"] = (
+            "Follows the official RustDesk version with GeodomDesk customization. "
+            "Immutable custom build assets are listed in geodomdesk-build.json."
+        )
+        with self.mocks(release, local):
+            self.p.run(self.config)
+        latest = json.loads((self.public / "latest.json").read_text(encoding="utf-8"))
+        self.assertNotIn("changelog", latest)
+        target = self.public / "releases/1.5.4-r1"
+        metadata = json.loads((target / channel.METADATA_NAME).read_text(encoding="utf-8"))
+        self.assertNotIn("changelog", metadata)
 
 
 if __name__ == "__main__":

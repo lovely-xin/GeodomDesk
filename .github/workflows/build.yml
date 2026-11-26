@@ -17,10 +17,10 @@ on:
         default: ''
   push:
     branches: [main]
-    paths: ['customization/**', '.github/workflows/build.yml', '!customization/**/*.md', '!customization/assets/DESIGN.txt']
+    paths: ['customization/**', '.github/workflows/build.yml', 'CHANGELOG.md', '!customization/**/*.md', '!customization/assets/DESIGN.txt']
   pull_request:
     branches: [main]
-    paths: ['customization/**', '.github/workflows/build.yml', '!customization/**/*.md', '!customization/assets/DESIGN.txt']
+    paths: ['customization/**', '.github/workflows/build.yml', 'CHANGELOG.md', '!customization/**/*.md', '!customization/assets/DESIGN.txt']
   schedule:
     - cron: '15 */6 * * *'
 
@@ -164,7 +164,7 @@ jobs:
           cd flutter
           flutter pub get
           dart format lib/common.dart lib/desktop/pages/connection_page.dart lib/desktop/pages/install_page.dart lib/desktop/pages/desktop_home_page.dart lib/desktop/pages/port_forward_page.dart lib/models/model.dart lib/common/widgets/dialog.dart lib/common/widgets/login.dart lib/desktop/pages/desktop_setting_page.dart lib/mobile/pages/connection_page.dart lib/mobile/pages/settings_page.dart lib/mobile/widgets/dialog.dart lib/web/bridge.dart
-          flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings lib/common.dart lib/desktop/pages/connection_page.dart lib/desktop/pages/install_page.dart lib/desktop/pages/desktop_home_page.dart lib/desktop/pages/port_forward_page.dart lib/models/model.dart lib/common/widgets/dialog.dart lib/common/widgets/login.dart lib/desktop/pages/desktop_setting_page.dart lib/mobile/pages/connection_page.dart lib/mobile/pages/settings_page.dart lib/mobile/widgets/dialog.dart lib/web/bridge.dart
+          flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings lib/common.dart lib/desktop/pages/connection_page.dart lib/desktop/pages/install_page.dart lib/desktop/pages/desktop_home_page.dart lib/desktop/pages/port_forward_page.dart lib/models/model.dart lib/common/widgets/dialog.dart lib/common/widgets/login.dart lib/common/widgets/geodom_update_dialog.dart lib/common/widgets/peer_tab_page.dart lib/desktop/pages/desktop_setting_page.dart lib/mobile/pages/connection_page.dart lib/mobile/pages/settings_page.dart lib/mobile/widgets/dialog.dart lib/web/bridge.dart
           flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings lib/models/ab_model.dart lib/models/geodom_recent_sync.dart lib/models/peer_model.dart lib/common/widgets/address_book.dart lib/common/widgets/peer_card.dart lib/utils/http_service.dart
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
@@ -635,7 +635,7 @@ jobs:
         run: |
           python3 -c 'import json,pathlib; configs=[json.loads(pathlib.Path(p,"geodomdesk-build-config.json").read_text()) for p in ["windows","windows-server-2008-r2","ubuntu","android"]]; assert all(config == configs[0] for config in configs)'
           python3 -m pip install -r customization/requirements.txt
-          python3 customization/release_bundle.py --version "$VERSION" --repository "$GITHUB_REPOSITORY" --windows windows/GeodomDesk.exe --windows-server-2008-r2 windows-server-2008-r2/GeodomDesk.exe --ubuntu ubuntu/geodomdesk.deb --android android/geodomdesk.apk --source-archive android/geodomdesk-source.tar.gz --build-config windows/geodomdesk-build-config.json --output release
+          python3 customization/release_bundle.py --version "$VERSION" --repository "$GITHUB_REPOSITORY" --windows windows/GeodomDesk.exe --windows-server-2008-r2 windows-server-2008-r2/GeodomDesk.exe --ubuntu ubuntu/geodomdesk.deb --android android/geodomdesk.apk --source-archive android/geodomdesk-source.tar.gz --build-config windows/geodomdesk-build-config.json --changelog-file CHANGELOG.md --output release
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: geodomdesk-release
@@ -648,6 +648,7 @@ jobs:
           PYTHONPATH: customization
         run: |
           python3 -c 'import os; from plan_upstream import require_publishable_version; require_publishable_version(os.environ["GITHUB_REPOSITORY"], os.environ["VERSION"])'
+          python3 -c 'import json, pathlib; data = json.loads(pathlib.Path("release/geodomdesk-build.json").read_text(encoding="utf-8")); notes = (data.get("changelog") or "").strip() or "Follows the official RustDesk version with GeodomDesk customization. Immutable custom build assets are listed in geodomdesk-build.json."; pathlib.Path("release-notes.md").write_text(notes + "\n", encoding="utf-8")'
           payloads=()
           for file in release/*; do
             if [ "$(basename "$file")" != geodomdesk-build.json ]; then payloads+=("$file"); fi
@@ -655,8 +656,10 @@ jobs:
           if gh release view "$VERSION" >/dev/null 2>&1; then
             gh release upload "$VERSION" "${payloads[@]}"
             gh release upload "$VERSION" release/geodomdesk-build.json --clobber
+            gh release edit "$VERSION" --notes-file release-notes.md --draft=false --latest
           else
-            gh release create "$VERSION" "${payloads[@]}" --target "$GITHUB_SHA" --draft --title "GeodomDesk $VERSION" --notes 'Follows the official RustDesk version with GeodomDesk customization. Immutable custom build assets are listed in geodomdesk-build.json.'
+            gh release create "$VERSION" "${payloads[@]}" --target "$GITHUB_SHA" --draft --title "GeodomDesk $VERSION" --notes-file release-notes.md
             gh release upload "$VERSION" release/geodomdesk-build.json
+            gh release edit "$VERSION" --draft=false --latest
           fi
-          gh release edit "$VERSION" --draft=false --latest
+          rm -f release-notes.md

@@ -54,6 +54,10 @@ def customization_hash(root=None):
         workflow = root / "ci/build.yml"
     if workflow.is_file():
         digest.update(hashlib.sha256(workflow.read_bytes()).digest())
+    changelog = root.parent / "CHANGELOG.md"
+    if changelog.is_file():
+        digest.update(b"CHANGELOG.md\0")
+        digest.update(hashlib.sha256(changelog.read_bytes()).digest())
     return digest.hexdigest()
 
 

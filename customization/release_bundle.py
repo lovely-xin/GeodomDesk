@@ -7,12 +7,21 @@ import re
 import shutil
 from pathlib import Path
 
-from channel import TARGETS, WINDOWS_SERVER_2008_R2, file_name, make_release_id, sha256, stable_json, version_tuple
+from channel import (
+    TARGETS,
+    WINDOWS_SERVER_2008_R2,
+    extract_changelog_section,
+    file_name,
+    make_release_id,
+    sha256,
+    stable_json,
+    version_tuple,
+)
 from plan_upstream import customization_hash
 
 
 def bundle(version, repository, windows, ubuntu, android, source_archive, output, build_config,
-           windows_server_2008_r2=None):
+           windows_server_2008_r2=None, changelog_file=None):
     version_tuple(version)
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
         raise ValueError("Expected the GitHub owner/repository")
@@ -61,6 +70,12 @@ def bundle(version, repository, windows, ubuntu, android, source_archive, output
             "sha256": sha256(destination),
         },
     }
+    if changelog_file is not None and changelog_file.is_file():
+        changelog = extract_changelog_section(
+            changelog_file.read_text(encoding="utf-8"), version, release_id=release_id
+        )
+        if changelog:
+            descriptor["changelog"] = changelog
     (output / "geodomdesk-build.json").write_bytes(stable_json(descriptor))
     print("Release assets ready in " + str(output))
 
@@ -72,6 +87,7 @@ if __name__ == "__main__":
     for arg in ["windows", "ubuntu", "android", "source-archive", "output", "build-config"]:
         parser.add_argument("--" + arg, required=True, type=Path)
     parser.add_argument("--windows-server-2008-r2", type=Path)
+    parser.add_argument("--changelog-file", type=Path)
     args = parser.parse_args()
     bundle(
         args.version,
@@ -83,4 +99,5 @@ if __name__ == "__main__":
         args.output,
         args.build_config,
         args.windows_server_2008_r2,
+        args.changelog_file,
     )

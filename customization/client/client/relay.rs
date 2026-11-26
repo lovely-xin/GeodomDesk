@@ -102,7 +102,7 @@ impl Client {
                 }
                 Ok(Some(()))
             };
-            let prepare = Self::connect_relay_socket(&relay_server, ipv4);
+            let prepare = Self::connect_relay_socket(&relay_server, ipv4, false);
             let Some(((), prepared)) =
                 transport_race::prepare_while_authorizing(approval, prepare, RELAY_PRECONNECT_IDLE)
                     .await?
@@ -112,7 +112,7 @@ impl Client {
             // A failed or expired preconnection leaves the original dial path available.
             let conn = match prepared {
                 Some(conn) => conn,
-                None => Self::connect_relay_socket(&relay_server, ipv4).await?,
+                None => Self::connect_relay_socket(&relay_server, ipv4, true).await?,
             };
             return Self::join_relay_socket(conn, peer, uuid, key, conn_type).await;
         }
@@ -126,11 +126,9 @@ impl Client {
         needs_secure: bool,
         expected_wait: Duration,
     ) -> (T, Option<Stream>) {
-        let delay = if expected_wait > BROKER_PRECONNECT_IDLE {
-            expected_wait.saturating_sub(Duration::from_secs(2))
-        } else {
-            RELAY_PRECONNECT_DELAY
-        };
+        let delay = expected_wait
+            .saturating_sub(Duration::from_millis(800))
+            .max(RELAY_PRECONNECT_DELAY);
         let prepare = async move {
             tokio::time::sleep(delay).await;
             Self::connect_relay_broker(server, key, needs_secure).await
@@ -161,17 +159,33 @@ impl Client {
         ipv4: bool,
     ) -> ResultType<Stream> {
         crate::common::check_relay_uuid(&uuid)?;
-        let conn = Self::connect_relay_socket(&relay_server, ipv4).await?;
+        let conn = Self::connect_relay_socket(&relay_server, ipv4, true).await?;
         Self::join_relay_socket(conn, peer, uuid, key, conn_type).await
     }
 
-    async fn connect_relay_socket(server: &str, ipv4: bool) -> ResultType<Stream> {
+    async fn connect_relay_socket(
+        server: &str,
+        ipv4: bool,
+        report_failure: bool,
+    ) -> ResultType<Stream> {
+        let raw_server = server;
         let server = check_port(server, RELAY_PORT);
         // The proxy's address family does not constrain the relay target.
         let use_ws_proxy = Config::is_proxy() && is_ws_endpoint(&check_ws(&server));
-        connect_tcp(ipv4_to_ipv6(server, ipv4 || use_ws_proxy), CONNECT_TIMEOUT)
-            .await
-            .context("Failed to connect to relay server")
+        match connect_tcp(ipv4_to_ipv6(server, ipv4 || use_ws_proxy), CONNECT_TIMEOUT).await {
+            Ok(stream) => Ok(stream),
+            Err(err) => {
+                #[cfg(not(target_os = "ios"))]
+                if report_failure
+                    && !Config::is_proxy()
+                    && !use_ws()
+                    && !raw_server.contains(".nip.io")
+                {
+                    crate::geodomdesk_relay_probe::report_relay_failure(raw_server);
+                }
+                Err(err).context("Failed to connect to relay server")
+            }
+        }
     }
 
     async fn join_relay_socket(

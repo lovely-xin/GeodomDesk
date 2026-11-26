@@ -235,7 +235,11 @@ fn absolute_ssh_path(path: &Path) -> ResultType<PathBuf> {
 
 #[cfg(not(windows))]
 fn absolute_ssh_path(path: &Path) -> ResultType<PathBuf> {
-    Ok(std::path::absolute(path)?)
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()?.join(path))
+    }
 }
 
 fn is_peer_loopback(host: &str) -> bool {
@@ -314,7 +318,7 @@ pub(super) async fn open(
     let started = Instant::now();
     let local = validate_local(ssh)?;
     let tunnel =
-        tunnel::Managed::start(options, 0, ssh.host.clone(), ssh.port, "Bash over SSH").await?;
+        tunnel::Managed::start_unmuxed(options, 0, ssh.host.clone(), ssh.port, "Bash over SSH").await?;
     let setup_errors = tunnel.setup_errors.clone();
     open_with_tunnel(options, ssh, &local, tunnel, started)
         .await

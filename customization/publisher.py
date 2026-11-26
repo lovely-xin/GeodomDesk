@@ -386,15 +386,25 @@ def download_names(version, native_config):
     }
 
 
-def page(version, native_config=True, windows_server_2008_r2=False):
+def page(version, native_config=True, windows_server_2008_r2=False, changelog=""):
     names = download_names(version, native_config)
     compatibility_link = ""
     if windows_server_2008_r2:
         name = channel.file_name(version, "windows-server-2008-r2", "exe")
         compatibility_link = f'<a class="card" href="{name}" download><strong>Windows Server 2008 R2 SP1</strong><span>x64 · 下载兼容版 ↗</span></a>'
-    style = 'body{margin:0;background:#f4f5f4;color:#192a32;font:16px system-ui,"Microsoft YaHei",sans-serif}main{max-width:760px;margin:10vh auto;padding:32px}header{display:flex;align-items:center;gap:18px}header img{width:64px;height:64px}h1{font-size:32px;margin:0}header p{margin:8px 0;color:#687981}.links{display:grid;gap:16px;margin:40px 0}a{color:inherit}a.card{display:flex;justify-content:space-between;align-items:center;text-decoration:none;border:1px solid #d8dfdd;border-radius:14px;padding:24px;background:#fff}.card span{color:#257678}.foot{color:#687981;font-size:13px;display:flex;gap:24px}a:focus-visible{outline:3px solid #169baf;outline-offset:4px}'
-    display_version = html.escape(channel.release_parts(version)[0])
-    return f"""<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>GeodomDesk · 远程工具</title><style>{style}</style><main><header><img src="../../geodomdesk.png" alt=""><div><h1>GeodomDesk</h1><p>远程工具 · {display_version}</p></div></header><div class="links"><a class="card" href="{names["windows"]}" download><strong>Windows</strong><span>x64 · 下载安装包 ↗</span></a>{compatibility_link}<a class="card" href="{names["ubuntu"]}" download><strong>Ubuntu</strong><span>amd64 · 下载 DEB ↗</span></a><a class="card" href="{names["android"]}" download><strong>Android</strong><span>ARM64 · 下载 APK ↗</span></a></div><div class="foot"><a href="geodomdesk-{version}-source.tar.gz">源代码</a><a href="https://geodom.cn">geodom.cn</a></div></main></html>""".encode()
+    style = 'body{margin:0;background:#f4f5f4;color:#192a32;font:16px system-ui,"Microsoft YaHei",sans-serif}main{max-width:760px;margin:10vh auto;padding:32px}header{display:flex;align-items:center;gap:18px}header img{width:64px;height:64px}h1{font-size:32px;margin:0}header p{margin:8px 0;color:#687981}.links{display:grid;gap:16px;margin:40px 0}.changelog{margin:0 0 32px;border:1px solid #d8dfdd;border-radius:14px;padding:22px 24px;background:#fff}.changelog h2{margin:0 0 12px;font-size:18px}.changelog-body{margin:0;color:#2c3e46;font-size:14px;line-height:1.65;white-space:pre-wrap;word-break:break-word}a{color:inherit}a.card{display:flex;justify-content:space-between;align-items:center;text-decoration:none;border:1px solid #d8dfdd;border-radius:14px;padding:24px;background:#fff}.card span{color:#257678}.foot{color:#687981;font-size:13px;display:flex;gap:24px}a:focus-visible{outline:3px solid #169baf;outline-offset:4px}'
+    channel.release_parts(version)
+    display_version = html.escape(version)
+    normalized_changelog = channel.normalize_changelog(changelog)
+    changelog_section = ""
+    if normalized_changelog:
+        changelog_section = (
+            '<section class="changelog" aria-labelledby="changelog-title">'
+            '<h2 id="changelog-title">更新日志</h2>'
+            f'<div class="changelog-body">{html.escape(normalized_changelog)}</div>'
+            "</section>"
+        )
+    return f"""<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>GeodomDesk · 远程工具</title><style>{style}</style><main><header><img src="../../geodomdesk.png" alt=""><div><h1>GeodomDesk</h1><p>远程工具 · {display_version}</p></div></header><div class="links"><a class="card" href="{names["windows"]}" download><strong>Windows</strong><span>x64 · 下载安装包 ↗</span></a>{compatibility_link}<a class="card" href="{names["ubuntu"]}" download><strong>Ubuntu</strong><span>amd64 · 下载 DEB ↗</span></a><a class="card" href="{names["android"]}" download><strong>Android</strong><span>ARM64 · 下载 APK ↗</span></a></div>{changelog_section}<div class="foot"><a href="geodomdesk-{version}-source.tar.gz">源代码</a><a href="https://geodom.cn">geodom.cn</a></div></main></html>""".encode()
 
 
 def public_complete(directory, manifest):
@@ -442,17 +452,24 @@ def publish_pointer(public, manifest):
     if manifest.get("windows_server_2008_r2"):
         name = channel.file_name(release_id, "windows-server-2008-r2", "exe")
         latest["windows_server_2008_r2_url"] = channel.release_url(release_id) + name
+    published_at = manifest.get("published_at")
+    if isinstance(published_at, str) and published_at.strip():
+        latest["published_at"] = published_at.strip()
+    changelog = channel.normalize_changelog(manifest.get("changelog", ""))
+    if changelog:
+        latest["changelog"] = changelog
     # All targets are in immutable, verified directories before exposing the pointer.
     save_json(public / "latest.json", latest)
     atomic_bytes(
         public / "index.html",
         (
-            f'<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="robots" content="noindex,nofollow"><meta http-equiv="refresh" content="0;url=releases/{release_id}/"><title>GeodomDesk</title><a href="releases/{release_id}/">GeodomDesk {version}</a></html>'
+            f'<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="robots" content="noindex,nofollow"><meta http-equiv="refresh" content="0;url=releases/{release_id}/"><title>GeodomDesk</title><a href="releases/{release_id}/">GeodomDesk {html.escape(release_id)}</a></html>'
         ).encode(),
     )
 
 
 def portal_update(portal, version, native_config=True, windows_server_2008_r2=False):
+    channel.release_parts(version)
     names = download_names(version, native_config)
     compatibility_link = ""
     if windows_server_2008_r2:
@@ -462,7 +479,7 @@ def portal_update(portal, version, native_config=True, windows_server_2008_r2=Fa
     text = before.decode("utf-8")
     if text.count(START) != 1 or text.count(END) != 1:
         raise ValueError("Download section markers are missing or ambiguous")
-    fragment = f"""<section class="client-downloads" aria-labelledby="clients-title"><div class="section-heading"><h2 id="clients-title">远程工具</h2><p>GeodomDesk {channel.release_parts(version)[0]}</p></div><div class="client-list"><div class="client-row"><div class="client-name"><h3>网页版</h3><p>免安装 · 浏览器访问</p></div><div class="client-links"><a href="/geodomdesk/">打开网页版<svg aria-hidden="true"><use href="#arrow"/></svg></a></div></div><div class="client-row"><div class="client-name"><h3>Windows</h3><p>x64</p></div><div class="client-links"><a href="{channel.release_url(version)}{names["windows"]}" download>下载 Windows 版<svg aria-hidden="true"><use href="#download"/></svg></a>{compatibility_link}</div></div><div class="client-row"><div class="client-name"><h3>Ubuntu</h3><p>amd64</p></div><div class="client-links"><a href="{channel.release_url(version)}{names["ubuntu"]}" download>下载 Ubuntu 版<svg aria-hidden="true"><use href="#download"/></svg></a></div></div><div class="client-row"><div class="client-name"><h3>Android</h3><p>ARM64</p></div><div class="client-links"><a href="{channel.release_url(version)}{names["android"]}" download>下载 Android 版<svg aria-hidden="true"><use href="#download"/></svg></a></div></div></div></section>"""
+    fragment = f"""<section class="client-downloads" aria-labelledby="clients-title"><div class="section-heading"><h2 id="clients-title">远程工具</h2><p>GeodomDesk {html.escape(version)}</p></div><div class="client-list"><div class="client-row"><div class="client-name"><h3>网页版</h3><p>免安装 · 浏览器访问</p></div><div class="client-links"><a href="/geodomdesk/">打开网页版<svg aria-hidden="true"><use href="#arrow"/></svg></a></div></div><div class="client-row"><div class="client-name"><h3>Windows</h3><p>x64</p></div><div class="client-links"><a href="{channel.release_url(version)}{names["windows"]}" download>下载 Windows 版<svg aria-hidden="true"><use href="#download"/></svg></a>{compatibility_link}</div></div><div class="client-row"><div class="client-name"><h3>Ubuntu</h3><p>amd64</p></div><div class="client-links"><a href="{channel.release_url(version)}{names["ubuntu"]}" download>下载 Ubuntu 版<svg aria-hidden="true"><use href="#download"/></svg></a></div></div><div class="client-row"><div class="client-name"><h3>Android</h3><p>ARM64</p></div><div class="client-links"><a href="{channel.release_url(version)}{names["android"]}" download>下载 Android 版<svg aria-hidden="true"><use href="#download"/></svg></a></div></div></div></section>"""
     changed = text.split(START)[0] + START + "\n" + fragment + "\n" + END + text.split(END)[1]
     if portal.read_bytes() != before:
         raise RuntimeError("Portal changed during publication")
@@ -538,6 +555,13 @@ def _run_locked(config, state):
             < (channel.version_tuple(current["version"]), current.get("build_number") or 0)
         ):
             raise ValueError("Refusing to roll back the GeodomDesk build revision")
+        changelog_body = channel.normalize_changelog(release.get("body") or "")
+        if changelog_body == (
+            "Follows the official RustDesk version with GeodomDesk customization. "
+            "Immutable custom build assets are listed in geodomdesk-build.json."
+        ):
+            changelog_body = ""
+        changelog = channel.normalize_changelog(build.get("changelog") or "") or changelog_body
         destination = public / "releases" / release_id
         already_live = False
         if destination.exists():
@@ -551,6 +575,10 @@ def _run_locked(config, state):
                 and current.get("url") == channel.release_url(release_id)
                 and (current.get("build_number") or 0) == build_number
                 and bool(current.get("native_config", False)) == bool(manifest.get("native_config", False))
+                and bool(current.get("windows_server_2008_r2_url")) == bool(manifest.get("windows_server_2008_r2", False))
+                and (current.get("published_at") or "") == (manifest.get("published_at") or "")
+                and channel.normalize_changelog(current.get("changelog", ""))
+                == channel.normalize_changelog(manifest.get("changelog", ""))
                 and (public / "latest.json").is_file()
                 and (public / "index.html").is_file()
                 and (public / "geodomdesk.png").is_file()
@@ -609,13 +637,16 @@ def _run_locked(config, state):
                         check_deb(payload, version, build_number)
                     else:
                         check_apk(payload)
+                published_at = (release.get("published_at") or "").strip() or now()
                 metadata, signature = channel.signed_metadata(
-                    release_id, release["published_at"], updates, seed
+                    release_id, published_at, updates, seed, changelog=changelog
                 )
                 (stage / channel.METADATA_NAME).write_bytes(metadata)
                 (stage / (channel.METADATA_NAME + ".sig")).write_bytes(signature)
                 windows_server_2008_r2 = channel.WINDOWS_SERVER_2008_R2 in targets
-                (stage / "index.html").write_bytes(page(release_id, True, windows_server_2008_r2))
+                (stage / "index.html").write_bytes(
+                    page(release_id, True, windows_server_2008_r2, changelog=changelog)
+                )
                 files = [
                     {
                         "name": p.name,
@@ -631,10 +662,12 @@ def _run_locked(config, state):
                     "build_number": build_number,
                     "native_config": True,
                     "windows_server_2008_r2": windows_server_2008_r2,
-                    "published_at": now(),
+                    "published_at": published_at,
                     "build_sha256": channel.sha256(descriptor),
                     "files": files,
                 }
+                if changelog:
+                    manifest["changelog"] = changelog
                 (stage / "publication.json").write_bytes(channel.stable_json(manifest))
                 if not public_complete(stage, manifest):
                     raise ValueError("Final publication verification failed")

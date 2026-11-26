@@ -47,6 +47,9 @@ def verify(source=None, update_lock=False):
         (crate / "src/geodomdesk_import_data.rs").write_bytes(
             (source / "src/geodomdesk_import/data.rs").read_bytes()
         )
+        (crate / "src/geodomdesk_relay_probe_logic.rs").write_bytes(
+            (source / "src/geodomdesk_relay_probe/logic.rs").read_bytes()
+        )
         (crate / "src/geodomdesk_id_policy.rs").write_bytes(
             (source / "libs/hbb_common/src/geodomdesk_id_policy.rs").read_bytes()
         )
@@ -151,6 +154,8 @@ mod common {
 mod geodomdesk_update;
 mod geodomdesk_auth;
 mod geodomdesk_import_data;
+#[path = "geodomdesk_relay_probe_logic.rs"]
+mod geodomdesk_relay_probe_logic;
 mod geodomdesk_id_policy;
 mod geodomdesk_clone_guard;
 mod server_config_verification;
@@ -198,7 +203,17 @@ mod account_retry_tests {
         metadata, signature = channel.signed_metadata(
             release_id, "2026-11-04T00:00:00Z", artifacts, seed
         )
-        fixtures = {"valid": json.loads(metadata)}
+        metadata_changelog, _ = channel.signed_metadata(
+            release_id,
+            "2026-11-04T00:00:00Z",
+            artifacts,
+            seed,
+            changelog="- 修复问题\n- 优化性能",
+        )
+        fixtures = {
+            "valid": json.loads(metadata),
+            "valid-changelog": json.loads(metadata_changelog),
+        }
         for name, field, value in [
             ("wrong-app", "app", "rustdesk"),
             ("wrong-package", "package_id", "rustdesk"),
@@ -234,7 +249,16 @@ mod geodomdesk_contract_tests {
         })
     }
     const TEST_KEY: [u8;32] = KEY_BYTES;
-    #[test] fn verifies_python_windows_metadata() { assert_eq!(verify("valid","windows","exe",TEST_KEY).unwrap().size, 1234); }
+    #[test] fn verifies_python_windows_metadata() {
+        let verified = verify("valid","windows","exe",TEST_KEY).unwrap();
+        assert_eq!(verified.size, 1234);
+        assert_eq!(verified.changelog, "");
+    }
+    #[test] fn verifies_python_metadata_with_changelog() {
+        let verified = verify("valid-changelog","windows","exe",TEST_KEY).unwrap();
+        assert_eq!(verified.size, 1234);
+        assert_eq!(verified.changelog, "- 修复问题\n- 优化性能");
+    }
     #[test] fn verifies_python_ubuntu_metadata() { assert!(verify("valid","linux","deb",TEST_KEY).is_ok()); }
     #[test] fn verifies_python_android_metadata() { assert!(verify("valid","android","apk",TEST_KEY).is_ok()); }
     #[test] fn rejects_rustdesk_app() { assert!(verify("wrong-app","windows","exe",TEST_KEY).is_err()); }

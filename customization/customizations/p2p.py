@@ -29,11 +29,12 @@ def apply_udp_probe(changes):
     end = text.index("        // Under force-relay a direct IPv6 path", start)
     changes.replace(
         path, text[start:end],
-        """        let udp = if crate::get_udp_punch_enabled() && !interface.is_force_relay() {
+        """        let (udp_sock, udp_rx, _udp_sent_at) = if crate::get_udp_punch_enabled() && !interface.is_force_relay() {
             start_udp_probe(&rendezvous_server).await
         } else {
-            (None, None)
+            (None, None, None)
         };
+        let udp = (udp_sock, udp_rx);
         let has_udp_probe = udp.0.is_some();
 """,
     )
@@ -71,30 +72,44 @@ def apply_udp_probe(changes):
          "                    // A mapping probed against the failed server may not reach the peer.\n"
          "                    if udp.0.is_some() {\n"
          "                        drop(udp.1.take());\n"
-         "                        udp = start_udp_probe(&server).await;\n"
+         "                        let (sock, rx, sent_at) = start_udp_probe(&server).await;\n"
+         "                        udp = (sock, rx);\n"
+         "                        if let Some(sent_at) = sent_at {\n"
+         "                            probe_started_at = sent_at;\n"
+         "                        }\n"
          "                    }\n"
          "                    rendezvous_server = server;"),
         ("        let udp_nat_port = udp.1.map(|x| *x.lock().unwrap()).unwrap_or(0);\n", ""),
         (
             "async fn test_udp_uat(\n    udp_socket: Arc<UdpSocket>,\n    server_addr: SocketAddr,\n"
             "    udp_port: Arc<Mutex<u16>>,\n    mut stop_udp_rx: oneshot::Receiver<()>,",
-            """async fn start_udp_probe(server: &str) -> (Option<Arc<UdpSocket>>, Option<oneshot::Receiver<u16>>) {
+            """async fn start_udp_probe(
+    server: &str,
+) -> (
+    Option<Arc<UdpSocket>>,
+    Option<oneshot::Receiver<u16>>,
+    Option<tokio::time::Instant>,
+) {
     let Ok((socket, addr)) = new_direct_udp_for_unverified(server).await else {
-        return (None, None);
+        return (None, None, None);
     };
     let (port_tx, port_rx) = oneshot::channel();
+    let sent_at = tokio::time::Instant::now();
     let probe_socket = socket.clone();
     tokio::spawn(async move {
         allow_err!(test_udp_uat(probe_socket, addr, port_tx).await);
     });
-    (Some(socket), Some(port_rx))
+    (Some(socket), Some(port_rx), Some(sent_at))
 }
 
 async fn collect_udp_probe(
     probe: Option<oneshot::Receiver<u16>>,
     deadline: tokio::time::Instant,
 ) -> u16 {
-    let Some(probe) = probe else { return 0 };
+    let Some(mut probe) = probe else { return 0 };
+    if let Ok(port) = probe.try_recv() {
+        return port;
+    }
     tokio::time::timeout_at(deadline, probe)
         .await
         .ok()
@@ -802,12 +817,13 @@ def apply_network_optimizations(changes):
         let allow_udp_probe = crate::get_udp_punch_enabled() && !interface.is_force_relay();
         let allow_webrtc = Self::should_create_webrtc_offerer(&interface);
         let probe_started_at = tokio::time::Instant::now();
-        let (udp, ipv6, webrtc_res, primary_socket, my_nat_type) = tokio::join!(
+        let ((udp, udp_sent_at), ipv6, webrtc_res, primary_socket, my_nat_type) = tokio::join!(
             async {
                 if allow_udp_probe {
-                    start_udp_probe(&rendezvous_server).await
+                    let (sock, rx, sent_at) = start_udp_probe(&rendezvous_server).await;
+                    ((sock, rx), sent_at)
                 } else {
-                    (None, None)
+                    ((None, None), None)
                 }
             },
             async {
@@ -820,7 +836,7 @@ def apply_network_optimizations(changes):
             },
             async {
                 if allow_webrtc {
-                    Some(WebRTCStream::new("", interface.is_policy_relay(), CONNECT_TIMEOUT).await)
+                    Some(WebRTCStream::new("", interface.is_policy_relay(), CONNECT_TIMEOUT.min(3000)).await)
                 } else {
                     None
                 }
@@ -828,6 +844,7 @@ def apply_network_optimizations(changes):
             connect_tcp(&*rendezvous_server, CONNECT_TIMEOUT),
             crate::get_nat_type(100),
         );
+        let probe_started_at = udp_sent_at.unwrap_or(probe_started_at);
         let has_udp_probe = udp.0.is_some();
         let webrtc_offerer = match webrtc_res {
             Some(Ok(stream)) => Some(stream),
@@ -887,11 +904,6 @@ def apply_network_optimizations(changes):
         "            Some(res) => res,\n"
         "            None => connect_tcp(&*rendezvous_server, CONNECT_TIMEOUT).await,\n"
         "        };",
-    )
-    changes.replace(
-        client_rs,
-        "                    if udp.0.is_some() {\n                        drop(udp.1.take());",
-        "                    if udp.0.is_some() {\n                        drop(udp.1.take());\n                        probe_started_at = tokio::time::Instant::now();",
     )
     changes.replace(client_rs, "        let my_nat_type = crate::get_nat_type(100).await;\n", "")
     changes.replace(

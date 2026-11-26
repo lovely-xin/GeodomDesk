@@ -27,8 +27,8 @@ def source_hash(source):
     return digest.hexdigest()
 
 
-def desktop_recipe(workflow):
-    root = Path(__file__).resolve().parent
+def desktop_recipe(workflow, root=None):
+    root = Path(root) if root is not None else Path(__file__).resolve().parent
     sections = []
     for key in ["RUST_VERSION", "FLUTTER_VERSION", "VCPKG_COMMIT"]:
         sections.append(re.search(r"(?m)^  " + key + r": (.+)$", workflow).group(0))
@@ -118,7 +118,7 @@ def validate(run_id, config_file, version, upstream, get):
                 target.write_bytes(tar.extractfile(member).read())
         previous_recipe = (previous / ".github/workflows/build.yml").read_text()
         current_recipe = (root.parent / ".github/workflows/build.yml").read_text()
-        if desktop_recipe(previous_recipe) != desktop_recipe(current_recipe):
+        if desktop_recipe(previous_recipe, previous / "customization") != desktop_recipe(current_recipe, root):
             raise ValueError("The desktop build recipe or toolchain changed; rebuild all platforms")
         before, previous_config = prepare_hash(
             previous / "customization", version, config["build_number"], temporary / "before"

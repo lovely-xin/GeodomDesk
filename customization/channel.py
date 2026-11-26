@@ -14,8 +14,76 @@ KEY_ID = _CHANNEL_CONFIG["key_id"]
 SIGNATURE_CONTEXT = b"GeodomDesk update metadata v1\n"
 METADATA_NAME = "geodomdesk-update.json"
 APP = "geodomdesk"
+CHANGELOG_MAX_BYTES = 8192
+CHANGELOG_MAX_LINES = 120
 TARGETS = (("windows", "x86_64", "exe"), ("linux", "x86_64", "deb"), ("android", "aarch64", "apk"))
 WINDOWS_SERVER_2008_R2 = ("windows-server-2008-r2", "x86_64", "exe")
+
+
+def normalize_changelog(text):
+    """Normalize release notes to clean, size-bounded UTF-8 text."""
+    if not isinstance(text, str):
+        return ""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    cleaned = "".join(ch for ch in text if ch in ("\n", "\t") or ord(ch) >= 0x20 and ord(ch) != 0x7F)
+    lines = [line.rstrip(" \t") for line in cleaned.split("\n")]
+    normalized = re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+    if not normalized:
+        return ""
+    bounded_lines = normalized.splitlines()[:CHANGELOG_MAX_LINES]
+    result = "\n".join(bounded_lines).strip()
+    raw = result.encode("utf-8")
+    if len(raw) <= CHANGELOG_MAX_BYTES:
+        return result
+    suffix = "..."
+    limit = CHANGELOG_MAX_BYTES - len(suffix)
+    out = []
+    used = 0
+    for ch in result:
+        ch_len = len(ch.encode("utf-8"))
+        if used + ch_len > limit:
+            break
+        out.append(ch)
+        used += ch_len
+    return "".join(out).rstrip() + suffix
+
+
+def extract_changelog_section(markdown_text, version="", release_id=""):
+    """Extract release notes for `release_id`/`version` (or the latest ## section) from CHANGELOG markdown."""
+    if not isinstance(markdown_text, str) or not markdown_text.strip():
+        return ""
+    text = markdown_text.replace("\r\n", "\n").replace("\r", "\n")
+    sections = []
+    current_heading = None
+    current_lines = []
+    for line in text.splitlines():
+        if line.startswith("## "):
+            if current_heading is not None:
+                sections.append((current_heading, "\n".join(current_lines)))
+            current_heading = line[3:].strip()
+            current_lines = []
+        elif current_heading is not None:
+            current_lines.append(line)
+    if current_heading is not None:
+        sections.append((current_heading, "\n".join(current_lines)))
+
+    for candidate in (release_id, version):
+        token = (candidate or "").strip().removeprefix("v")
+        if not token:
+            continue
+        pattern = re.compile(r"(?:^|[\s\[v(])" + re.escape(token) + r"(?:$|[\s\]):])")
+        for heading, body in sections:
+            if pattern.search(heading):
+                normalized = normalize_changelog(body)
+                if normalized:
+                    return normalized
+    if release_id or version:
+        return ""
+    for _, body in sections:
+        normalized = normalize_changelog(body)
+        if normalized:
+            return normalized
+    return ""
 
 
 def release_targets(artifacts):
@@ -94,7 +162,7 @@ def public_key(seed):
     )
 
 
-def signed_metadata(version, published_at, artifacts, seed):
+def signed_metadata(version, published_at, artifacts, seed, changelog=""):
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
     official_version, build_number = release_parts(version)
@@ -108,18 +176,20 @@ def signed_metadata(version, published_at, artifacts, seed):
             or not 0 < item["size"] <= 512 * 1024 * 1024
         ):
             raise ValueError("Invalid update artifact")
-    metadata = stable_json(
-        {
-            "schema_version": 1,
-            "app": APP,
-            "package_id": APP,
-            "version": official_version,
-            "release_id": version,
-            "published_at": published_at,
-            "signature_key_id": KEY_ID,
-            "artifacts": artifacts,
-        }
-    )
+    payload = {
+        "schema_version": 1,
+        "app": APP,
+        "package_id": APP,
+        "version": official_version,
+        "release_id": version,
+        "published_at": published_at,
+        "signature_key_id": KEY_ID,
+        "artifacts": artifacts,
+    }
+    normalized_changelog = normalize_changelog(changelog)
+    if normalized_changelog:
+        payload["changelog"] = normalized_changelog
+    metadata = stable_json(payload)
     signature = Ed25519PrivateKey.from_private_bytes(seed).sign(SIGNATURE_CONTEXT + metadata)
     sidecar = stable_json(
         {

@@ -44,16 +44,21 @@ pub(super) struct Options {
 pub(super) enum Unavailable {
     Service,
     Credentials,
+    EncryptedDefaultKeys(String),
 }
 
 impl std::fmt::Display for Unavailable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Service => "No SSH service responded through the authenticated TCP relay",
-            Self::Credentials => {
-                "No SSH credentials are available. Use --ssh-identity or --ask-ssh-password"
-            }
-        })
+        match self {
+            Self::Service => f.write_str("No SSH service responded through the authenticated TCP relay"),
+            Self::Credentials => f.write_str(
+                "No SSH credentials are available. Use --ssh-identity or --ask-ssh-password",
+            ),
+            Self::EncryptedDefaultKeys(keys) => write!(
+                f,
+                "Skipped encrypted default SSH key(s) ({keys}); pass --ssh-identity PATH with GEODOMDESK_SSH_KEY_PASSPHRASE, or use --ask-ssh-password"
+            ),
+        }
     }
 }
 impl std::error::Error for Unavailable {}
@@ -92,8 +97,11 @@ fn check_host_key(
     expected_fingerprint: Option<&str>,
 ) -> ResultType<bool> {
     let fingerprint = received.fingerprint(keys::HashAlg::Sha256).to_string();
-    if expected_fingerprint.is_some_and(|expected| expected != fingerprint) {
-        bail!("SSH host key fingerprint mismatch for {alias} ({fingerprint})");
+    if let Some(expected) = expected_fingerprint.filter(|expected| *expected != fingerprint) {
+        bail!(
+            "SSH host key fingerprint mismatch for {alias} ({fingerprint}; expected {expected}, known_hosts: {})",
+            file.display()
+        );
     }
     let matches_record = || -> ResultType<Option<bool>> {
         let recorded = known_hosts::known_host_keys_path(alias, 22, file)?;
@@ -103,13 +111,19 @@ fn check_host_key(
         if recorded.iter().any(|(_, key)| key == received) {
             return Ok(Some(true));
         }
-        bail!("SSH host key changed for {alias} ({fingerprint})");
+        bail!(
+            "SSH host key changed for {alias} ({fingerprint}); inspect {} or pin with --ssh-known-hosts / --ssh-host-fingerprint {fingerprint}",
+            file.display()
+        );
     };
     if let Some(trusted) = matches_record()? {
         return Ok(trusted);
     }
     if strict && expected_fingerprint.is_none() {
-        bail!("SSH host key is not trusted for {alias} ({fingerprint})");
+        bail!(
+            "SSH host key is not trusted for {alias} ({fingerprint}); pin with --ssh-host-fingerprint {fingerprint} or supply --ssh-known-hosts (current: {})",
+            file.display()
+        );
     }
     if let Some(parent) = file.parent() {
         fs::create_dir_all(parent)?;
@@ -312,6 +326,14 @@ bash --noprofile --norc "$script" </dev/null"#;
     }
 }
 
+fn absolutize_path(path: &Path) -> std::io::Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()?.join(path))
+    }
+}
+
 fn host_alias(id: &str, host: Option<&str>, port: u16) -> String {
     let mut hash = Sha256::new();
     hash.update(id.as_bytes());
@@ -371,6 +393,7 @@ pub(super) async fn open(
     ssh: &Options,
 ) -> ResultType<cli::Connection> {
     let started = Instant::now();
+    ssh.authentication.preflight()?;
     let token = options.current_token()?;
     auth::verify_ssh_account(&token).await?;
     let host = ssh.host.as_deref().unwrap_or("127.0.0.1");
@@ -406,7 +429,7 @@ pub(super) async fn open(
     let alias = host_alias(&options.id, ssh.host.as_deref(), ssh.port);
     let trust = HostTrust {
         alias: alias.clone(),
-        file: std::path::absolute(&ssh.known_hosts)?,
+        file: absolutize_path(&ssh.known_hosts)?,
         strict: ssh.strict_host_key,
         fingerprint: ssh.fingerprint.clone(),
     };
@@ -492,9 +515,19 @@ fn is_early_disconnect(error: &hbb_common::anyhow::Error) -> bool {
 #[derive(Clone)]
 pub(super) struct Authentication {
     identities: Vec<Arc<keys::PrivateKey>>,
+    skipped_encrypted: Vec<PathBuf>,
     explicit_identity: bool,
     password: Option<Arc<str>>,
 }
+
+#[derive(Debug)]
+struct EncryptedDefaultKey;
+impl std::fmt::Display for EncryptedDefaultKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Encrypted default SSH key requires a passphrase")
+    }
+}
+impl std::error::Error for EncryptedDefaultKey {}
 
 impl Authentication {
     pub(super) fn prepare(
@@ -513,28 +546,56 @@ impl Authentication {
             None => None,
         };
         let explicit_identity = identity.is_some();
+        let mut skipped_encrypted = Vec::new();
         let identities = if let Some(path) = identity {
             vec![Arc::new(load_identity(path, true, non_interactive)?)]
         } else if password.is_none() {
-            std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
-                .map(|home| {
-                    ["id_ed25519", "id_ecdsa", "id_rsa"]
-                        .into_iter()
-                        .filter_map(|name| {
-                            let path = PathBuf::from(&home).join(".ssh").join(name);
-                            load_identity(&path, false, true).ok().map(Arc::new)
-                        })
-                        .collect()
-                })
-                .unwrap_or_default()
+            let mut found = Vec::new();
+            if let Some(home) = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }) {
+                for name in ["id_ed25519", "id_ecdsa", "id_rsa"] {
+                    let path = PathBuf::from(&home).join(".ssh").join(name);
+                    match load_identity(&path, false, true) {
+                        Ok(key) => found.push(Arc::new(key)),
+                        Err(error) if error.is::<EncryptedDefaultKey>() => {
+                            skipped_encrypted.push(path);
+                        }
+                        Err(_) => {}
+                    }
+                }
+            }
+            found
         } else {
             Vec::new()
         };
         Ok(Self {
             identities,
+            skipped_encrypted,
             explicit_identity,
             password: password.map(Arc::from),
         })
+    }
+
+    pub(super) fn preflight(&self) -> ResultType<()> {
+        if !self.identities.is_empty() || self.password.is_some() {
+            return Ok(());
+        }
+        Err(self.missing_credentials_error())
+    }
+
+    fn missing_credentials_error(&self) -> hbb_common::anyhow::Error {
+        if self.explicit_identity {
+            return anyhow!("SSH destination rejected the private key");
+        }
+        if !self.skipped_encrypted.is_empty() {
+            let names = self
+                .skipped_encrypted
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Unavailable::EncryptedDefaultKeys(names).into();
+        }
+        Unavailable::Credentials.into()
     }
 
     async fn authenticate(
@@ -565,10 +626,7 @@ impl Authentication {
             }
             bail!("SSH destination rejected the account credentials");
         }
-        if self.explicit_identity {
-            bail!("SSH destination rejected the private key");
-        }
-        Err(Unavailable::Credentials.into())
+        Err(self.missing_credentials_error())
     }
 }
 
@@ -590,7 +648,7 @@ fn load_identity(
                     "SSH private-key passphrase: ",
                     non_interactive,
                 )?,
-                None => bail!("Encrypted default SSH key requires a passphrase"),
+                None => return Err(EncryptedDefaultKey.into()),
             };
             Ok(keys::load_secret_key(path, Some(&passphrase))?)
         }

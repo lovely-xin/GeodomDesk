@@ -6,20 +6,35 @@
       if (!mounted) return;
       var inProgress = false;
       var error = '';
+      var dialogClosed = false;
       await gFFI.dialogManager.show((refresh, close, context) {
+        void closeDialog() {
+          if (dialogClosed) return;
+          dialogClosed = true;
+          close();
+        }
+
         Future<void> submit() async {
-          if (inProgress) return;
+          if (inProgress || dialogClosed) return;
           refresh(() { inProgress = true; error = ''; });
           try {
             final status = await bind.mainRestoreDefaultId();
-            if (!mounted) return;
+            if (dialogClosed) return;
+            if (!mounted) {
+              closeDialog();
+              return;
+            }
             if (status.isEmpty) {
-              close();
+              closeDialog();
             } else {
               refresh(() { inProgress = false; error = translate(status); });
             }
           } catch (_) {
-            if (!mounted) return;
+            if (dialogClosed) return;
+            if (!mounted) {
+              closeDialog();
+              return;
+            }
             refresh(() {
               inProgress = false;
               error = translate('Failed to restore default ID');
@@ -38,11 +53,11 @@
             ],
           ),
           actions: [
-            dialogButton('Cancel', onPressed: inProgress ? null : close, isOutline: true),
+            dialogButton('Cancel', onPressed: inProgress ? null : closeDialog, isOutline: true),
             dialogButton('Restore', onPressed: inProgress ? null : submit),
           ],
           onSubmit: submit,
-          onCancel: () { if (!inProgress) close(); },
+          onCancel: () { if (!inProgress) closeDialog(); },
         );
       });
     } catch (_) {

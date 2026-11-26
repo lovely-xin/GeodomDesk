@@ -16,6 +16,8 @@ on:
       - 'customization/customizations/**'
       - 'customization/client/terminal_exec*'
       - 'customization/client/terminal_exec/**'
+      - 'customization/client/geodomdesk_relay_probe*'
+      - 'customization/client/client/**'
       - 'customization/config/client-channel.json'
       - 'docs/standalone-cli.md'
       - 'skills/INSTALL.md'

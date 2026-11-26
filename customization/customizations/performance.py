@@ -793,6 +793,12 @@ def apply_transport_hotpath(changes):
     _replace_once(
         changes,
         tcp_rs,
+        "            msg = key.enc(&msg);",
+        "            msg = key.enc_in_place(msg);",
+    )
+    _replace_once(
+        changes,
+        tcp_rs,
         """    pub async fn new<T: ToSocketAddrs + std::fmt::Display>(
         remote_addr: T,
         local_addr: Option<SocketAddr>,
@@ -1026,6 +1032,17 @@ pub(crate) fn new_socket(""",
         self.1 += 1;
         let nonce = FramedStream::get_nonce(self.1);
         secretbox::seal(&data, &nonce, &self.0)
+    }
+
+    pub fn enc_in_place(&mut self, mut data: Vec<u8>) -> Vec<u8> {
+        self.1 += 1;
+        let nonce = FramedStream::get_nonce(self.1);
+        let len = data.len();
+        data.resize(len + secretbox::MACBYTES, 0);
+        data.copy_within(..len, secretbox::MACBYTES);
+        let tag = secretbox::seal_detached(&mut data[secretbox::MACBYTES..], &nonce, &self.0);
+        data[..secretbox::MACBYTES].copy_from_slice(tag.as_ref());
+        data
     }""",
     )
 
@@ -1066,6 +1083,20 @@ pub async fn new_direct_udp_for_unverified(
     )
 
     ws_rs = "libs/hbb_common/src/websocket.rs"
+    _replace_once(
+        changes,
+        ws_rs,
+        "            msg = key.enc(&msg);",
+        "            msg = key.enc_in_place(msg);",
+    )
+    _replace_once(
+        changes,
+        ws_rs,
+        "                    let mut bytes = BytesMut::from(&data[..]);",
+        """                    let mut bytes = data
+                        .try_into_mut()
+                        .unwrap_or_else(|data| BytesMut::from(&data[..]));""",
+    )
     _replace_once(
         changes,
         ws_rs,
@@ -1172,12 +1203,15 @@ const DEFAULT_MAX_MESSAGE_SIZE: usize = 64 << 20;""",
         stop_receiver: oneshot::Receiver<()>,
     ) {
         let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let stop_tx = Arc::new(stop_tx);
+        let stop_rx_tx = stop_tx.clone();
         tokio::spawn(async move {
             let _ = stop_receiver.await;
-            let _ = stop_tx.send(true);
+            let _ = stop_rx_tx.send(true);
         });
         let send_udp = udp_socket.clone();
         let mut send_stop = stop_rx.clone();
+        let send_stop_tx = stop_tx.clone();
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -1188,6 +1222,7 @@ const DEFAULT_MAX_MESSAGE_SIZE: usize = 64 << 20;""",
                     }
                     data = output.recv() => {
                         let Some(data) = data else {
+                            let _ = send_stop_tx.send(true);
                             break;
                         };
                         if let Err(e) = send_udp.send(&data.inner()).await {
@@ -1202,6 +1237,7 @@ const DEFAULT_MAX_MESSAGE_SIZE: usize = 64 << 20;""",
         });
         let recv_udp = udp_socket;
         let mut recv_stop = stop_rx;
+        let recv_stop_tx = stop_tx;
         tokio::spawn(async move {
             let mut buf = vec![0; 1500];
             loop {
@@ -1219,6 +1255,7 @@ const DEFAULT_MAX_MESSAGE_SIZE: usize = 64 << 20;""",
                                     continue;
                                 }
                                 if input.send(BytesMut::from(&buf[..size]).into()).await.is_err() {
+                                    let _ = recv_stop_tx.send(true);
                                     break;
                                 }
                             }
@@ -1328,13 +1365,15 @@ def apply_network_discovery_and_lifecycle(changes):
                 if bare.is_empty() || bare.chars().any(char::is_whitespace) {
                     return None;
                 }
-                let with_port = if bare
+                let with_port = if bare.starts_with('[') && bare.ends_with(']') {
+                    format!("{bare}:3478")
+                } else if bare.parse::<std::net::Ipv6Addr>().is_ok() {
+                    format!("[{bare}]:3478")
+                } else if bare
                     .rsplit_once(':')
                     .is_some_and(|(_, port)| port.parse::<u16>().is_ok())
                 {
                     bare.to_owned()
-                } else if bare.starts_with('[') && bare.ends_with(']') {
-                    format!("{bare}:3478")
                 } else if bare.contains(':') {
                     format!("[{bare}]:3478")
                 } else {

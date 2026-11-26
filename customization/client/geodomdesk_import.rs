@@ -94,7 +94,7 @@ pub(crate) fn import() -> ResultType<ImportReport> {
         }
     }
     LocalConfig::set_fav(favorites);
-    if LocalConfig::get_option(INITIAL_IMPORT) == "pending" {
+    if matches!(LocalConfig::get_option(INITIAL_IMPORT).as_str(), "pending" | "failed") {
         LocalConfig::set_option(INITIAL_IMPORT.to_owned(), "Y".to_owned());
     }
     Ok(report)
@@ -148,7 +148,8 @@ pub(crate) fn import_on_first_run() {
             // Persist before the first device write so a stopped migration can resume.
             LocalConfig::set_option(INITIAL_IMPORT.to_owned(), "pending".to_owned());
             if let Err(error) = import() {
-                hbb_common::log::debug!("Initial device import deferred: {error}");
+                hbb_common::log::warn!("Initial device import failed: {error}");
+                LocalConfig::set_option(INITIAL_IMPORT.to_owned(), "failed".to_owned());
                 return;
             }
         } else if state == "pending" {
