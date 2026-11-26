@@ -5,13 +5,16 @@ const _recentSyncLocalOwner = 'geodom-recent-sync-local-owner';
 const _recentSyncDisabled = 'geodom-recent-sync-disabled';
 const _recentSyncRemovals = 'geodom-recent-sync-removals';
 const _recentSyncForgotten = 'geodom-recent-sync-forgotten';
+const _recentCacheKey = 'geodom-recent-cache';
 
 class GeodomRecentSync with WidgetsBindingObserver {
   GeodomRecentSync(this.model);
 
   final AbModel model;
   final supported = false.obs;
+  final syncing = false.obs;
   bool _running = false;
+  bool _probing = false;
   bool _paused = false;
   bool _observerRegistered = false;
   int _consecutiveFailures = 0;
@@ -19,6 +22,7 @@ class GeodomRecentSync with WidgetsBindingObserver {
   String? _savedToken;
   String? _supportToken;
   DateTime _next = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _nextProbe = DateTime.fromMillisecondsSinceEpoch(0);
 
   void _ensureObserver() {
     if (_observerRegistered) return;
@@ -89,6 +93,7 @@ class GeodomRecentSync with WidgetsBindingObserver {
     _savedToken = null;
     _consecutiveFailures = 0;
     _next = DateTime.fromMillisecondsSinceEpoch(0);
+    _nextProbe = DateTime.fromMillisecondsSinceEpoch(0);
   }
 
   Future<void> setEnabled(bool value) async {
@@ -107,6 +112,9 @@ class GeodomRecentSync with WidgetsBindingObserver {
     _savedState = null;
     _savedToken = null;
     _next = DateTime.fromMillisecondsSinceEpoch(0);
+    if (!value) {
+      await bind.mainSetCommon(key: _recentCacheKey, value: '');
+    }
     await bind.mainLoadRecentPeers();
     schedule();
   }
@@ -123,6 +131,8 @@ class GeodomRecentSync with WidgetsBindingObserver {
       await bind.mainSetLocalOption(key: _recentSyncRemovals, value: '');
       if (!current()) return false;
       await bind.mainSetLocalOption(key: _recentSyncForgotten, value: '');
+      if (!current()) return false;
+      await bind.mainSetCommon(key: _recentCacheKey, value: '');
       if (!current()) return false;
       await bind.mainSetLocalOption(key: _recentSyncAccount, value: account);
     }
@@ -166,17 +176,58 @@ class GeodomRecentSync with WidgetsBindingObserver {
     schedule();
   }
 
-  void schedule() {
+  Future<void> _probeSupport() async {
+    if (_probing || _paused || kIsWeb || !gFFI.userModel.isLogin) return;
+    final token = _token;
+    if (token.isEmpty || _account.isEmpty || _supportToken == token) return;
+    _probing = true;
+    _nextProbe = DateTime.now().add(const Duration(minutes: 5));
+    try {
+      final api = await bind.mainGetApiServer();
+      final base = Uri.parse(api);
+      if (base.scheme != 'https' || token != _token) return;
+      final prefix = base.path.replaceFirst(RegExp(r'/$'), '');
+      final uri = base.replace(path: '$prefix/api/ab/settings');
+      final response = await http.post(uri, headers: getHttpHeaders());
+      if (token != _token) return;
+      if (response.statusCode >= 200 && response.statusCode < 300) {
+        final decoded = jsonDecode(response.body);
+        if (decoded is Map<String, dynamic>) {
+          final available = decoded['geodom_recent_store'] == 1 ||
+              decoded['geodom_recent_sync'] == 2;
+          await setSupport(available, token);
+          if (enabled) schedule(force: true);
+        }
+      }
+    } catch (_) {
+      // Retry on the next probe interval.
+    } finally {
+      _probing = false;
+    }
+  }
+
+  void schedule({bool force = false}) {
     _ensureObserver();
     if (isDesktop && desktopType != DesktopType.main) return;
-    if (_paused || _running || !enabled || DateTime.now().isBefore(_next)) {
+    if (_paused || _running) return;
+    if (!enabled) {
+      if (_canQueue &&
+          _supportToken != _token &&
+          (force || !DateTime.now().isBefore(_nextProbe))) {
+        unawaited(_probeSupport());
+      }
       return;
     }
-    final book = model.addressbooks[_personalAddressBookName];
-    if (book is! Ab || !book.initialized || book.abLoading.value) return;
+    if (!force && DateTime.now().isBefore(_next)) {
+      return;
+    }
     _running = true;
+    syncing.value = true;
     _next = DateTime.now().add(const Duration(seconds: 30));
-    unawaited(_sync(book).whenComplete(() => _running = false));
+    unawaited(_sync().whenComplete(() {
+      _running = false;
+      syncing.value = false;
+    }));
   }
 
   int _timestamp(String profile) {
@@ -195,7 +246,40 @@ class GeodomRecentSync with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _sync(Ab book) async {
+  Future<List<Peer>?> _fetchRecentPeers(
+      Uri base, Map<String, String> headers, bool Function() current) async {
+    final prefix = base.path.replaceFirst(RegExp(r'/$'), '');
+    final fetched = <Peer>[];
+    for (var page = 1; page <= 100; page++) {
+      if (!current()) return null;
+      final uri = base.replace(
+        path: '$prefix/api/recent/peers',
+        queryParameters: {'current': '$page', 'pageSize': '100'},
+      );
+      final response = await http.post(uri, headers: headers, body: '{}');
+      if (!current()) return null;
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        return null;
+      }
+      final decoded = jsonDecode(response.body);
+      if (decoded is! Map<String, dynamic> || decoded['data'] is! List) {
+        return null;
+      }
+      final rows = decoded['data'] as List;
+      for (final item in rows) {
+        if (item is Map<String, dynamic>) {
+          fetched.add(Peer.fromJson(item));
+        }
+      }
+      final total = decoded['total'];
+      if (rows.length < 100 || (total is int && page * 100 >= total)) {
+        return fetched;
+      }
+    }
+    return fetched;
+  }
+
+  Future<void> _sync() async {
     final account = _account;
     final token = _token;
     bool current() => enabled && _account == account && _token == token;
@@ -205,9 +289,10 @@ class GeodomRecentSync with WidgetsBindingObserver {
       if (token.isEmpty || !current() || base.scheme != 'https') return;
       final headers = getHttpHeaders();
       headers['Content-Type'] = 'application/json';
-      if (!await _refreshPeers(book, current)) return;
+      final initialList = await _fetchRecentPeers(base, headers, current);
+      if (initialList == null || !current()) return;
 
-      final saved = {for (final peer in book.peers) peer.id: peer};
+      final saved = {for (final peer in initialList) peer.id: peer};
       final pending = _pending(_recentSyncRemovals);
       final forgotten = _pending(_recentSyncForgotten);
       final acknowledged = <String, int>{};
@@ -216,16 +301,12 @@ class GeodomRecentSync with WidgetsBindingObserver {
       final verifyCleared = <String>{};
       var wrote = false;
       var failed = false;
-      Future<bool> send(Map<String, dynamic> update,
-          {required bool add}) async {
+      Future<bool> send(Map<String, dynamic> update) async {
         if (!current()) return false;
-        final action = add ? 'add' : 'update';
         final prefix = base.path.replaceFirst(RegExp(r'/$'), '');
-        final uri = base.replace(
-            path: '$prefix/api/ab/peer/$action/${book.profile.guid}');
-        final request = add ? http.post : http.put;
+        final uri = base.replace(path: '$prefix/api/recent/peer');
         final response =
-            await request(uri, headers: headers, body: jsonEncode(update));
+            await http.put(uri, headers: headers, body: jsonEncode(update));
         if (response.statusCode < 200 || response.statusCode >= 300) {
           return false;
         }
@@ -270,7 +351,7 @@ class GeodomRecentSync with WidgetsBindingObserver {
           'hash': '',
           'geodom_recent':
               jsonEncode({'timestamp': revision, 'removed': true}),
-        }, add: false)) {
+        })) {
           wrote = true;
           acknowledged[entry.key] = entry.value;
           verifyRemoved.add(entry.key);
@@ -320,7 +401,7 @@ class GeodomRecentSync with WidgetsBindingObserver {
             'id': entry.key,
             'hash': '',
             'geodom_recent': jsonEncode(profile),
-          }, add: false)) {
+          })) {
             wrote = true;
             cleared[entry.key] = entry.value;
             verifyCleared.add(entry.key);
@@ -356,7 +437,7 @@ class GeodomRecentSync with WidgetsBindingObserver {
             if (_savedCredential(peer.hash)) 'hash': peer.hash,
           };
           changes++;
-          if (await send(update, add: previous == null)) {
+          if (await send(update)) {
             wrote = true;
           } else {
             failed = true;
@@ -366,9 +447,11 @@ class GeodomRecentSync with WidgetsBindingObserver {
       }
 
       if (!current()) return;
-      if (wrote && !await _refreshPeers(book, current)) return;
-      if (!current()) return;
-      final latest = {for (final peer in book.peers) peer.id: peer};
+      final latestList = wrote
+          ? await _fetchRecentPeers(base, headers, current)
+          : initialList;
+      if (latestList == null || !current()) return;
+      final latest = {for (final peer in latestList) peer.id: peer};
       acknowledged.removeWhere((id, _) {
         if (!verifyRemoved.contains(id)) return false;
         final peer = latest[id];
@@ -390,11 +473,19 @@ class GeodomRecentSync with WidgetsBindingObserver {
             key: completed.key, value: jsonEncode(remaining));
       }
       if (!current()) return;
-      final state = jsonEncode(model._serializeCache());
-      if (_savedState != state || _savedToken != token) {
-        await model._saveCache();
+      final cacheJson = jsonEncode({
+        'access_token': token,
+        'peers': latestList
+            .map((e) => {
+                  ...e.toCustomJson(includingHash: true),
+                  'geodom_recent_hash_present': e.geodomRecentHashPresent,
+                })
+            .toList(),
+      });
+      if (_savedState != cacheJson || _savedToken != token) {
+        await bind.mainSetCommon(key: _recentCacheKey, value: cacheJson);
         if (!current()) return;
-        _savedState = state;
+        _savedState = cacheJson;
         _savedToken = token;
         await bind.mainLoadRecentPeers();
       }
@@ -414,30 +505,6 @@ class GeodomRecentSync with WidgetsBindingObserver {
         }
       }
     }
-  }
-
-  bool _samePeers(List<Peer> current, List<Peer> next) {
-    if (current.length != next.length) return false;
-    for (var i = 0; i < current.length; i++) {
-      if (!current[i].equal(next[i]) || current[i].online != next[i].online) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  Future<bool> _refreshPeers(Ab book, bool Function() current) async {
-    final fetched = <Peer>[];
-    final ok = await book._fetchPeers(fetched, quiet: true, active: current);
-    if (!ok || !current()) return false;
-    final online = {for (final peer in book.peers) peer.id: peer.online};
-    for (final peer in fetched) {
-      peer.online = online[peer.id] ?? false;
-    }
-    if (!_samePeers(book.peers, fetched)) {
-      book.peers.value = fetched;
-    }
-    return true;
   }
 
   bool _savedCredential(String encoded) {

@@ -114,7 +114,15 @@ pub(crate) fn export_record(id: &str, modified: SystemTime, peer: &PeerConfig) -
         .flatten()
 }
 
-struct CachedAbPeers {
+#[derive(Debug, Default, Deserialize, Serialize, Clone)]
+struct RecentCache {
+    #[serde(default)]
+    access_token: String,
+    #[serde(default)]
+    peers: Vec<AbPeer>,
+}
+
+struct CachedRecentPeers {
     token_digest: [u8; 32],
     owner: String,
     modified: Option<SystemTime>,
@@ -122,7 +130,21 @@ struct CachedAbPeers {
     peers: Vec<AbPeer>,
 }
 
-static AB_CACHE: std::sync::Mutex<Option<CachedAbPeers>> = std::sync::Mutex::new(None);
+static RECENT_CACHE: std::sync::Mutex<Option<CachedRecentPeers>> = std::sync::Mutex::new(None);
+
+pub(crate) fn save_cache(raw: &str) {
+    *RECENT_CACHE
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner()) = None;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        Ab::store_recent(String::new());
+        return;
+    }
+    if serde_json::from_str::<RecentCache>(trimmed).is_ok() {
+        Ab::store_recent(trimmed.to_owned());
+    }
+}
 
 pub(crate) fn account_peers() -> Vec<AbPeer> {
     let token = LocalConfig::get_option("access_token");
@@ -137,12 +159,12 @@ pub(crate) fn account_peers() -> Vec<AbPeer> {
         return Vec::new();
     }
     let token_digest = hbb_common::sodiumoxide::crypto::hash::sha256::hash(token.as_bytes()).0;
-    let ab_path = Ab::path();
-    let (modified, len) = match std::fs::metadata(&ab_path) {
+    let recent_path = Ab::recent_path();
+    let (modified, len) = match std::fs::metadata(&recent_path) {
         Ok(meta) => (meta.modified().ok(), meta.len()),
         Err(_) => (None, 0),
     };
-    if let Some(cached) = AB_CACHE
+    if let Some(cached) = RECENT_CACHE
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
         .as_ref()
@@ -155,23 +177,19 @@ pub(crate) fn account_peers() -> Vec<AbPeer> {
             return cached.peers.clone();
         }
     }
-    let account = Ab::load();
-    if account.access_token != token {
+    let raw = Ab::load_recent();
+    let cache: RecentCache = serde_json::from_str(&raw).unwrap_or_default();
+    if cache.access_token != token {
         return Vec::new();
     }
-    let peers: Vec<AbPeer> = account
-        .ab_entries
+    let peers: Vec<AbPeer> = cache
+        .peers
         .into_iter()
-        .find(|entry| entry.personal())
-        .map(|entry| {
-            entry
-                .peers
-                .into_iter()
-                .filter(|peer| device_id(&peer.id) && !peer.geodom_recent.is_empty())
-                .collect()
-        })
-        .unwrap_or_default();
-    *AB_CACHE.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(CachedAbPeers {
+        .filter(|peer| device_id(&peer.id) && !peer.geodom_recent.is_empty())
+        .collect();
+    *RECENT_CACHE
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner()) = Some(CachedRecentPeers {
         token_digest,
         owner,
         modified,

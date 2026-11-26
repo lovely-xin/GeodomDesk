@@ -1,4 +1,4 @@
-"""Integrate account-scoped recent device sync with the personal address book."""
+"""Integrate account-scoped recent device sync using dedicated storage separate from My Address Book."""
 
 from .edits import replace_once
 
@@ -39,7 +39,8 @@ def apply(changes, root):
     edit(
         "libs/hbb_common/src/config.rs",
         "impl Ab {\n    fn path() -> PathBuf {",
-        "impl Ab {\n    pub fn path() -> PathBuf {",
+        """impl Ab {
+    pub fn path() -> PathBuf {""",
     )
     edit(
         "libs/hbb_common/src/config.rs",
@@ -57,15 +58,19 @@ def apply(changes, root):
             }
         };
     }""",
-        """    pub fn store(json: String) {
+        """    pub fn recent_path() -> PathBuf {
+        let filename = format!("{}_recent", APP_NAME.read().unwrap().clone());
+        Config::path(filename)
+    }
+
+    fn store_encrypted_atomic(path: PathBuf, json: &str, label: &str) {
         let data = compress(json.as_bytes());
         let max_len = 64 * 1024 * 1024;
         if data.len() > max_len {
-            log::error!("ab data too large, {} > {}", data.len(), max_len);
+            log::error!("{label} data too large, {} > {}", data.len(), max_len);
             return;
         }
         let Ok(data) = symmetric_crypt(&data, true) else { return; };
-        let path = Self::path();
         let temporary = path.with_extension(format!("tmp-{}-{}", std::process::id(), rand::random::<u64>()));
         let result = (|| -> std::io::Result<()> {
             let mut options = fs::OpenOptions::new();
@@ -98,8 +103,34 @@ def apply(changes, root):
             committed
         })();
         if let Err(error) = result {
-            log::error!("Failed to store address book cache: {error}");
+            log::error!("Failed to store {label} cache: {error}");
         }
+    }
+
+    pub fn store_recent(json: String) {
+        let path = Self::recent_path();
+        if json.is_empty() {
+            let _ = fs::remove_file(&path);
+            return;
+        }
+        Self::store_encrypted_atomic(path, &json, "recent");
+    }
+
+    pub fn load_recent() -> String {
+        if let Ok(mut file) = std::fs::File::open(Self::recent_path()) {
+            let mut data = vec![];
+            if file.read_to_end(&mut data).is_ok() {
+                if let Ok(data) = symmetric_crypt(&data, false) {
+                    let data = decompress(&data);
+                    return String::from_utf8_lossy(&data).into_owned();
+                }
+            }
+        }
+        String::new()
+    }
+
+    pub fn store(json: String) {
+        Self::store_encrypted_atomic(Self::path(), &json, "address book");
     }""",
     )
     edit(
@@ -136,6 +167,16 @@ def apply(changes, root):
         "    crate::geodomdesk_recent::hydrate_for_edit(&id, &mut c);",
     )
     ffi = "src/flutter_ffi.rs"
+    edit(
+        ffi,
+        "pub fn main_set_common(_key: String, _value: String) {\n",
+        """pub fn main_set_common(_key: String, _value: String) {
+    if _key == "geodom-recent-cache" {
+        crate::geodomdesk_recent::save_cache(&_value);
+        return;
+    }
+""",
+    )
     edit(
         ffi,
         """        let vec_id_modified_time_path = PeerConfig::get_vec_id_modified_time_path(&None);
@@ -195,51 +236,8 @@ def apply(changes, root):
          "        if (legacyMode.value) {\n          recentDevices.resetSupport();\n        } else {\n          await _getAbSettings(quiet: quiet);\n        }")
     edit(
         book,
-        ".map((e) => e.toCustomJson(includingHash: value.isPersonal()))",
-        """.map((e) => {
-              ...e.toCustomJson(includingHash: value.isPersonal()),
-              if (value.isPersonal())
-                'geodom_recent_hash_present': e.geodomRecentHashPresent,
-            })""",
-    )
-    edit(
-        book,
-        "if (personal && r.hash.isNotEmpty && p.hash != r.hash) {",
-        "if (personal && !gFFI.abModel.recentDevices.enabled && r.hash.isNotEmpty && p.hash != r.hash) {",
-    )
-    edit(
-        "flutter/lib/models/model.dart",
-        "          if (id != null && hash != null) {\n            gFFI.abModel",
-        "          if (id != null && hash != null && !gFFI.abModel.recentDevices.enabled) {\n            gFFI.abModel",
-    )
-    edit(
-        book,
         "    _pulledOnce = false;\n    await bind.mainClearAb();",
-        "    _pulledOnce = false;\n    _maxPeerOneAb = 0;\n    recentDevices.resetSupport();\n    await bind.mainClearAb();\n    await bind.mainLoadRecentPeers();",
-    )
-    edit(
-        book,
-        "    currentAbPeers.refresh();\n    _refreshTab();\n    _saveCache();",
-        "    currentAbPeers.refresh();\n    _refreshTab();\n    await _saveCache();\n    await bind.mainLoadRecentPeers();",
-    )
-    edit(
-        book,
-        """  _saveCache() {
-    try {
-      var ab_entries = _serializeCache();
-      Map<String, dynamic> m = <String, dynamic>{
-        "access_token": bind.mainGetLocalOption(key: 'access_token'),
-        "ab_entries": ab_entries,
-      };
-      bind.mainSaveAb(json: jsonEncode(m));""",
-        """  Future<void> _saveCache() async {
-    try {
-      var ab_entries = _serializeCache();
-      Map<String, dynamic> m = <String, dynamic>{
-        "access_token": bind.mainGetLocalOption(key: 'access_token'),
-        "ab_entries": ab_entries,
-      };
-      await bind.mainSaveAb(json: jsonEncode(m));""",
+        "    _pulledOnce = false;\n    _maxPeerOneAb = 0;\n    recentDevices.resetSupport();\n    await bind.mainSetCommon(key: _recentCacheKey, value: '');\n    await bind.mainClearAb();\n    await bind.mainLoadRecentPeers();",
     )
     edit(book, "  Future<bool> _getAbSettings({required bool quiet}) async {\n    int? statusCode;",
          "  Future<bool> _getAbSettings({required bool quiet}) async {\n"
@@ -251,33 +249,110 @@ def apply(changes, root):
          "      if (token != bind.mainGetLocalOption(key: 'access_token')) return false;\n"
          "      _maxPeerOneAb = json['max_peer_one_ab'] ?? 0;\n"
          "      await recentDevices.setSupport(\n"
-         "          !kIsWeb && Uri.parse(api).scheme == 'https' && json['geodom_recent_sync'] == 1, token);\n"
+         "          !kIsWeb && Uri.parse(api).scheme == 'https' && (json['geodom_recent_store'] == 1 || json['geodom_recent_sync'] == 2), token);\n"
          "      if (token != bind.mainGetLocalOption(key: 'access_token')) return false;")
-    fetch_start = "  Future<bool> _fetchPeers(List<Peer> tmpPeers, {quiet = false}) async {"
-    before, fetch = changes[book].split(fetch_start, 1)
-    fetch, after = fetch.split("  Future<bool> _fetchTags(", 1)
-    fetch = replace_once(fetch, "        current += 1;", "        if (active != null && !active()) return false;\n        current += 1;")
-    fetch = replace_once(fetch, "      if (pullError.isNotEmpty) {", "      if (pullError.isNotEmpty && (active?.call() ?? true)) {")
-    changes[book] = before + (
-        "  Future<bool> _fetchPeers(List<Peer> tmpPeers,\n"
-        "      {quiet = false, bool Function()? active}) async {"
-    ) + fetch + "  Future<bool> _fetchTags(" + after
 
+    # Hide upstream's "Sync with recent sessions" inside Address Book when dedicated recent sync is active,
+    # so recent sessions never get copied back into My Address Book.
     widget = "flutter/lib/common/widgets/address_book.dart"
     edit(
         widget,
         "      if (canWrite) syncMenuItem(),",
-        """      if (canWrite && !isMobile && !gFFI.abModel.recentDevices.supported.value)
-        syncMenuItem(),
-      if (gFFI.abModel.recentDevices.supported.value)
-        MenuEntrySwitch<String>(
-          switchType: SwitchType.scheckbox,
-          text: translate('Sync recent devices and credentials'),
-          getter: () async => gFFI.abModel.recentDevices.enabled,
-          setter: gFFI.abModel.recentDevices.setEnabled,
-          dismissOnClicked: true,
-          enabled: gFFI.abModel.recentDevices.supported,
-        ),""",
+        "      if (canWrite && !isMobile && !gFFI.abModel.recentDevices.supported.value)\n"
+        "        syncMenuItem(),",
+    )
+
+    # Desktop settings: dedicated Recent sessions sync card in General settings (separate from Address Book).
+    desktop_settings = "flutter/lib/desktop/pages/desktop_setting_page.dart"
+    edit(
+        desktop_settings,
+        "        if (!isWeb) importOfficialUserData(),",
+        "        if (!isWeb)\n"
+        "          Obx(() => gFFI.abModel.recentDevices.supported.value\n"
+        "              ? recentSessionsSync()\n"
+        "              : const SizedBox.shrink()),\n"
+        "        if (!isWeb) importOfficialUserData(),",
+    )
+    edit(
+        desktop_settings,
+        "  Widget importOfficialUserData() {",
+        """  Widget recentSessionsSync() {
+    final recent = gFFI.abModel.recentDevices;
+    final value = recent.enabled.obs;
+    return _Card(title: 'Recent sessions', children: [
+      Obx(() => GestureDetector(
+            onTap: () async {
+              final next = !value.value;
+              value.value = next;
+              await recent.setEnabled(next);
+              value.value = recent.enabled;
+            },
+            child: Row(
+              children: [
+                Checkbox(
+                  value: value.value,
+                  onChanged: (next) async {
+                    if (next == null) return;
+                    value.value = next;
+                    await recent.setEnabled(next);
+                    value.value = recent.enabled;
+                  },
+                ).marginOnly(right: 5),
+                Expanded(
+                  child: Text(translate('Sync recent devices and credentials')),
+                ),
+              ],
+            ).marginOnly(left: _kCheckBoxLeftMargin),
+          )),
+      Align(
+        alignment: Alignment.centerLeft,
+        child: Text(
+          translate('Share recent sessions, connection preferences, and remembered credentials across signed-in devices.'),
+          style: Theme.of(context).textTheme.bodySmall,
+        ),
+      ).marginOnly(left: _kContentHMargin, top: 4, bottom: 4),
+    ]);
+  }
+
+  Widget importOfficialUserData() {""",
+    )
+
+    # Mobile settings: dedicated Recent sessions sync toggle (separate from Address Book).
+    mobile_settings = "flutter/lib/mobile/pages/settings_page.dart"
+    edit(
+        mobile_settings,
+        """        SettingsSection(
+          title: Text(translate("About")),""",
+        """        if (!isWeb && gFFI.abModel.recentDevices.supported.value)
+          SettingsSection(
+            title: Text(translate("Recent sessions")),
+            tiles: [
+              SettingsTile.switchTile(
+                title: Text(translate('Sync recent devices and credentials')),
+                initialValue: gFFI.abModel.recentDevices.enabled,
+                onToggle: (v) async {
+                  await gFFI.abModel.recentDevices.setEnabled(v);
+                  if (mounted) setState(() {});
+                },
+              ),
+            ],
+          ),
+        SettingsSection(
+          title: Text(translate("About")),""",
+    )
+
+    # Recent sessions tab: trigger dedicated recent sync when opened/refreshed and sync removals.
+    edit(
+        "flutter/lib/common/widgets/peer_tab_page.dart",
+        """    _TabEntry(RecentPeersView(
+      menuPadding: _menuPadding(),
+    )),""",
+        """    _TabEntry(
+        RecentPeersView(
+          menuPadding: _menuPadding(),
+        ),
+        ({dynamic hint}) =>
+            gFFI.abModel.recentDevices.schedule(force: hint == null)),""",
     )
     edit(
         "flutter/lib/common/widgets/peer_tab_page.dart",
@@ -306,10 +381,9 @@ def apply(changes, root):
         """        bool succ = await gFFI.abModel.changePersonalHashPassword(id, '');
         await bind.mainForgetPassword(id: id);""",
         """        final recent = gFFI.abModel.recentDevices;
-        final sync = recent.enabled;
-        final succ = sync || await gFFI.abModel.changePersonalHashPassword(id, '');
+        final succ = await gFFI.abModel.changePersonalHashPassword(id, '');
         await bind.mainForgetPassword(id: id);
-        if (sync) await recent.forgetCredential(id);""",
+        if (recent.enabled) await recent.forgetCredential(id);""",
     )
     edit(
         "flutter/lib/utils/http_service.dart",
@@ -325,5 +399,6 @@ def apply(changes, root):
         "src/lang/cn.rs",
         '        ("Recent sessions", "最近访问过"),',
         '        ("Recent sessions", "最近访问过"),\n'
-        '        ("Sync recent devices and credentials", "同步最近访问的设备与凭据"),',
+        '        ("Sync recent devices and credentials", "同步最近访问的设备与凭据"),\n'
+        '        ("Share recent sessions, connection preferences, and remembered credentials across signed-in devices.", "在同一账户开启同步的设备间共享最近访问、连接设置和已记住的设备凭据。"),',
     )

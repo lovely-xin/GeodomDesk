@@ -546,6 +546,19 @@ class ChannelTests(unittest.TestCase):
             self.assertIn("checkGeodomUpdateManually()", desktop_settings)
             self.assertIn("infoRow(\n                translate('Version'),", desktop_settings)
             self.assertNotIn("OutlinedButton.icon", desktop_settings)
+            self.assertIn("recentSessionsSync()", desktop_settings)
+            self.assertIn("Sync recent devices and credentials", desktop_settings)
+            recent_sync_dart = (source / "flutter/lib/models/geodom_recent_sync.dart").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("/api/recent/peers", recent_sync_dart)
+            self.assertIn("/api/recent/peer", recent_sync_dart)
+            self.assertNotIn("/api/ab/peer/", recent_sync_dart)
+            ab_widget_dart = (source / "flutter/lib/common/widgets/address_book.dart").read_text(
+                encoding="utf-8"
+            )
+            self.assertNotIn("Sync recent devices and credentials", ab_widget_dart)
+            self.assertIn('if _key == "geodom-recent-cache"', ffi)
             mobile_conn = (source / "flutter/lib/mobile/pages/connection_page.dart").read_text(
                 encoding="utf-8"
             )
