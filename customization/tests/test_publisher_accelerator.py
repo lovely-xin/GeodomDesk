@@ -77,13 +77,13 @@ class AssetAcceleratorTests(unittest.TestCase):
         route_state = {}
 
         def receive(req):
-            if req.host == "first.example":
+            if req.host in ("first.example", "api.github.com"):
                 raise error.URLError("Timeout")
             return Response(self.payload)
 
-        first = self.run_download(receive, route_state=route_state)
+        first = self.run_download(receive, prefer_accelerators=False, route_state=route_state)
         self.assertEqual(first.read_bytes(), self.payload)
-        self.assertEqual([req.host for req, _ in self.requests], ["first.example", "next.example"])
+        self.assertEqual([req.host for req, _ in self.requests], ["api.github.com", "first.example", "next.example"])
         self.assertEqual(route_state["preferred"], self.accelerators[1])
         self.assertIn(self.accelerators[0], route_state["failed"])
 
@@ -105,7 +105,7 @@ class AssetAcceleratorTests(unittest.TestCase):
         opener.open.side_effect = open_second
         with mock.patch.object(publisher.urllib.request, "build_opener", return_value=opener):
             second = publisher.download(
-                asset_two, self.cache, self.headers, self.accelerators, True, route_state
+                asset_two, self.cache, self.headers, self.accelerators, False, route_state
             )
         self.assertEqual(second.read_bytes(), payload_two)
         self.assertEqual([req.host for req, _ in self.requests], ["next.example"])

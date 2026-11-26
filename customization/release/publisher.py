@@ -333,7 +333,12 @@ def download(asset, cache, headers, accelerators=(), prefer_accelerators=True, r
     ]
     official_budget = max(90, asset["size"] / (256 * 1024)) if prefer_accelerators else OFFICIAL_ASSET_TIMEOUT
     official_source = (asset["url"], headers, official_budget, None, None)
-    sources = [*accel_sources, official_source] if prefer_accelerators else [official_source, *accel_sources]
+    try_accelerators_first = prefer_accelerators or (
+        route_state is not None and route_state.get("official_failed") and route_state.get("preferred")
+    )
+    sources = (
+        [*accel_sources, official_source] if try_accelerators_first else [official_source, *accel_sources]
+    )
     for url, source_headers, budget, accelerator_host, prefix in sources:
         host = accelerator_host or "api.github.com"
         try:
@@ -343,10 +348,13 @@ def download(asset, cache, headers, accelerators=(), prefer_accelerators=True, r
         except (OSError, http.client.HTTPException, ValueError) as error:
             if isinstance(error, urllib.error.HTTPError):
                 error.close()
-            if route_state is not None and prefix is not None:
-                route_state.setdefault("failed", set()).add(prefix)
-                if route_state.get("preferred") == prefix:
-                    route_state["preferred"] = None
+            if route_state is not None:
+                if prefix is None:
+                    route_state["official_failed"] = True
+                else:
+                    route_state.setdefault("failed", set()).add(prefix)
+                    if route_state.get("preferred") == prefix:
+                        route_state["preferred"] = None
             logging.warning("Asset %s download failed via %s (%s)", asset["name"], host, type(error).__name__)
             continue
         if accelerator_host:
@@ -418,7 +426,16 @@ def download_ranges(url, size, fd, headers, opener=None, resolve_url=None, deadl
 
 def prune_cache(cache, keep_paths, max_extra=4):
     keep = {Path(p).resolve() for p in keep_paths}
-    extras = [p for p in cache.iterdir() if p.is_file() and p.resolve() not in keep]
+    extras = []
+    for entry in cache.iterdir():
+        if entry.is_symlink() or not entry.is_file() or entry.resolve() in keep:
+            continue
+        # Only the process holding the publisher lock prunes this cache.
+        if re.fullmatch(r"\.(?:download|verified-cache)-[a-z0-9_]+", entry.name):
+            with contextlib.suppress(OSError):
+                entry.unlink()
+        else:
+            extras.append(entry)
     extras.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     for stale in extras[max_extra:]:
         with contextlib.suppress(OSError):

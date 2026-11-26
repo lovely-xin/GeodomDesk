@@ -246,8 +246,8 @@ class GeodomRecentSync with WidgetsBindingObserver {
     }
   }
 
-  Future<List<Peer>?> _fetchRecentPeers(
-      Uri base, Map<String, String> headers, bool Function() current) async {
+  Future<List<Peer>?> _fetchRecentPeers(http.HttpService service, Uri base,
+      Map<String, String> headers, bool Function() current) async {
     final prefix = base.path.replaceFirst(RegExp(r'/$'), '');
     final fetched = <Peer>[];
     for (var page = 1; page <= 100; page++) {
@@ -256,7 +256,8 @@ class GeodomRecentSync with WidgetsBindingObserver {
         path: '$prefix/api/recent/peers',
         queryParameters: {'current': '$page', 'pageSize': '100'},
       );
-      final response = await http.post(uri, headers: headers, body: '{}');
+      final response = await service.sendRequest(uri, http.HttpMethod.post,
+          headers: headers, body: '{}');
       if (!current()) return null;
       if (response.statusCode < 200 || response.statusCode >= 300) {
         return null;
@@ -283,13 +284,14 @@ class GeodomRecentSync with WidgetsBindingObserver {
     final account = _account;
     final token = _token;
     bool current() => enabled && _account == account && _token == token;
+    final service = http.HttpService(reuseConnection: true);
     var synced = false;
     try {
       final base = Uri.parse(await bind.mainGetApiServer());
       if (token.isEmpty || !current() || base.scheme != 'https') return;
       final headers = getHttpHeaders();
       headers['Content-Type'] = 'application/json';
-      final initialList = await _fetchRecentPeers(base, headers, current);
+      final initialList = await _fetchRecentPeers(service, base, headers, current);
       if (initialList == null || !current()) return;
 
       final saved = {for (final peer in initialList) peer.id: peer};
@@ -305,8 +307,8 @@ class GeodomRecentSync with WidgetsBindingObserver {
         if (!current()) return false;
         final prefix = base.path.replaceFirst(RegExp(r'/$'), '');
         final uri = base.replace(path: '$prefix/api/recent/peer');
-        final response =
-            await http.put(uri, headers: headers, body: jsonEncode(update));
+        final response = await service.sendRequest(uri, http.HttpMethod.put,
+            headers: headers, body: jsonEncode(update));
         if (response.statusCode < 200 || response.statusCode >= 300) {
           return false;
         }
@@ -448,7 +450,7 @@ class GeodomRecentSync with WidgetsBindingObserver {
 
       if (!current()) return;
       final latestList = wrote
-          ? await _fetchRecentPeers(base, headers, current)
+          ? await _fetchRecentPeers(service, base, headers, current)
           : initialList;
       if (latestList == null || !current()) return;
       final latest = {for (final peer in latestList) peer.id: peer};
@@ -493,7 +495,8 @@ class GeodomRecentSync with WidgetsBindingObserver {
     } catch (_) {
       // Local recent records remain available while the account API is offline.
     } finally {
-      if (enabled) {
+      service.close();
+      if (current()) {
         if (synced) {
           _consecutiveFailures = 0;
           _next = DateTime.now().add(const Duration(seconds: 30));

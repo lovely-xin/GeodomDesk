@@ -146,7 +146,10 @@ class DownloadTests(unittest.TestCase):
                 p.write_bytes(b"old")
                 os.utime(p, (1000 + idx, 1000 + idx))
                 stale.append(p)
+            interrupted = cache / ".download-test_42"
+            interrupted.write_bytes(b"interrupted")
             publisher.prune_cache(cache, [result], max_extra=2)
+            self.assertFalse(interrupted.exists())
             self.assertTrue(result.exists())
             self.assertEqual(sorted(p.name for p in cache.glob("stale-*.bin")), ["stale-4.bin", "stale-5.bin"])
 
@@ -554,6 +557,13 @@ class ChannelTests(unittest.TestCase):
             self.assertIn("/api/recent/peers", recent_sync_dart)
             self.assertIn("/api/recent/peer", recent_sync_dart)
             self.assertNotIn("/api/ab/peer/", recent_sync_dart)
+            self.assertIn("http.HttpService(reuseConnection: true)", recent_sync_dart)
+            self.assertIn("service.close();", recent_sync_dart)
+            http_service = (source / "flutter/lib/utils/http_service.dart").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("_client ??= http.Client()", http_service)
+            self.assertIn("await _pollForResponse(url.toString())", http_service)
             ab_widget_dart = (source / "flutter/lib/common/widgets/address_book.dart").read_text(
                 encoding="utf-8"
             )

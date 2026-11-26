@@ -242,7 +242,7 @@ def apply(changes, root):
       if (recentDevices.supported.value || recents.isEmpty) return;""",
     )
     edit(book, "        if (!legacyMode.value && _maxPeerOneAb == 0) {\n          await _getAbSettings(quiet: quiet);\n        }",
-         "        if (legacyMode.value) {\n          recentDevices.resetSupport();\n        } else {\n          await _getAbSettings(quiet: quiet);\n        }")
+         "        if (legacyMode.value) {\n          recentDevices.resetSupport();\n        } else if (_maxPeerOneAb == 0) {\n          await _getAbSettings(quiet: quiet);\n        }")
     edit(
         book,
         "    _pulledOnce = false;\n    await bind.mainClearAb();",
@@ -399,8 +399,46 @@ def apply(changes, root):
           await recent.forgetCredential(id);
         }""",
     )
+    http_service = "flutter/lib/utils/http_service.dart"
     edit(
-        "flutter/lib/utils/http_service.dart",
+        http_service,
+        "class HttpService {\n",
+        """class HttpService {
+  HttpService({bool reuseConnection = false})
+      : _reuseConnection = reuseConnection;
+
+  final bool _reuseConnection;
+  http.Client? _client;
+
+  void close() {
+    _client?.close();
+    _client = null;
+  }
+
+""",
+    )
+    edit(
+        http_service,
+        "    final client = http.Client();",
+        """    final client =
+        _reuseConnection ? (_client ??= http.Client()) : http.Client();""",
+    )
+    edit(
+        http_service,
+        """      return response;
+    } finally {
+      client.close();
+    }""",
+        """      return response;
+    } catch (_) {
+      if (_reuseConnection) close();
+      rethrow;
+    } finally {
+      if (!_reuseConnection) client.close();
+    }""",
+    )
+    edit(
+        http_service,
         """    } catch (e) {
       print('Failed to parse response\\n$responseJson\\nError:\\n$e');
       throw Exception('Failed to parse response.\\n$responseJson');
