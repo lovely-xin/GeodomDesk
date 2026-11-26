@@ -531,7 +531,10 @@ def download_names(version, native_config):
     }
 
 
-def page(version, native_config=True, legacy_windows=None, changelog=""):
+def page(version, native_config=True, legacy_windows=None, changelog="", *, download_home=False):
+    channel.release_parts(version)
+    asset_prefix = f"releases/{version}/" if download_home else ""
+    logo_path = "geodomdesk.png" if download_home else "../../geodomdesk.png"
     names = download_names(version, native_config)
     compatibility_link = ""
     if legacy_windows is not None:
@@ -542,18 +545,19 @@ def page(version, native_config=True, legacy_windows=None, changelog=""):
             f'<span>x64{ver_suffix} · 已停止更新 · 下载归档 ↗</span></a>'
         )
     style = 'body{margin:0;background:#f4f5f4;color:#192a32;font:16px system-ui,"Microsoft YaHei",sans-serif}main{max-width:760px;margin:10vh auto;padding:32px}header{display:flex;align-items:center;gap:18px}header img{width:64px;height:64px}h1{font-size:32px;margin:0}header p{margin:8px 0;color:#687981}.links{display:grid;gap:16px;margin:40px 0}.changelog{margin:0 0 32px;border:1px solid #d8dfdd;border-radius:14px;padding:22px 24px;background:#fff}.changelog h2{margin:0 0 12px;font-size:18px}.changelog-body{margin:0;color:#2c3e46;font-size:14px;line-height:1.65;white-space:pre-wrap;word-break:break-word}a{color:inherit}a.card{display:flex;justify-content:space-between;align-items:center;text-decoration:none;border:1px solid #d8dfdd;border-radius:14px;padding:24px;background:#fff}.card span{color:#257678}.foot{color:#687981;font-size:13px;display:flex;gap:24px}a:focus-visible{outline:3px solid #169baf;outline-offset:4px}'
-    channel.release_parts(version)
     display_version = html.escape(version)
     normalized_changelog = channel.normalize_changelog(changelog)
+    changelog_link = ""
     changelog_section = ""
     if normalized_changelog:
+        changelog_link = '<a href="#changelog-title">更新日志</a>'
         changelog_section = (
             '<section class="changelog" aria-labelledby="changelog-title">'
             '<h2 id="changelog-title">更新日志</h2>'
             f'<div class="changelog-body">{html.escape(normalized_changelog)}</div>'
             "</section>"
         )
-    return f"""<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>GeodomDesk · 远程工具</title><style>{style}</style><main><header><img src="../../geodomdesk.png" alt=""><div><h1>GeodomDesk</h1><p>远程工具 · {display_version}</p></div></header><div class="links"><a class="card" href="{names["windows"]}" download><strong>Windows（Win10 / 11 / Server 2016+）</strong><span>x64 · 下载安装包 ↗</span></a>{compatibility_link}<a class="card" href="{names["ubuntu"]}" download><strong>Ubuntu</strong><span>amd64 · 下载 DEB ↗</span></a><a class="card" href="{names["android"]}" download><strong>Android</strong><span>ARM64 · 下载 APK ↗</span></a></div>{changelog_section}<div class="foot"><a href="geodomdesk-{version}-source.tar.gz">源代码</a><a href="https://geodom.cn">geodom.cn</a></div></main></html>""".encode()
+    return f"""<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>GeodomDesk · 远程工具</title><style>{style}</style><main><header><img src="{logo_path}" alt=""><div><h1>GeodomDesk</h1><p>远程工具 · {display_version}</p>{changelog_link}</div></header><div class="links"><a class="card" href="{asset_prefix}{names["windows"]}" download><strong>Windows（Win10 / 11 / Server 2016+）</strong><span>x64 · 下载安装包 ↗</span></a>{compatibility_link}<a class="card" href="{asset_prefix}{names["ubuntu"]}" download><strong>Ubuntu</strong><span>amd64 · 下载 DEB ↗</span></a><a class="card" href="{asset_prefix}{names["android"]}" download><strong>Android</strong><span>ARM64 · 下载 APK ↗</span></a></div>{changelog_section}<div class="foot"><a href="{asset_prefix}geodomdesk-{version}-source.tar.gz">源代码</a><a href="https://geodom.cn">geodom.cn</a></div></main></html>""".encode()
 
 
 def public_complete(directory, manifest):
@@ -606,17 +610,17 @@ def publish_pointer(public, manifest):
         latest["changelog"] = changelog
     # All targets are in immutable, verified directories before exposing the pointer.
     save_json(public / "latest.json", latest)
-    atomic_bytes(
-        public / "index.html",
-        (
-            f'<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="robots" content="noindex,nofollow"><meta http-equiv="refresh" content="0;url=releases/{release_id}/"><title>GeodomDesk</title><a href="releases/{release_id}/">GeodomDesk {html.escape(release_id)}</a></html>'
-        ).encode(),
-    )
 
 
-def portal_fragment(version, native_config=True, legacy_windows=None):
-    channel.release_parts(version)
+def portal_fragment(version, native_config=True, legacy_windows=None, *, changelog=""):
+    release_url = channel.release_url(version)
     names = download_names(version, native_config)
+    changelog_link = ""
+    if channel.normalize_changelog(changelog):
+        changelog_link = (
+            f'<br><a href="{release_url}#changelog-title" '
+            'style="text-decoration:underline;text-underline-offset:.2em;white-space:nowrap">更新日志</a>'
+        )
     compatibility_link = ""
     if legacy_windows is not None:
         ver_suffix = f" {html.escape(legacy_windows['version'])}" if legacy_windows["version"] else ""
@@ -627,18 +631,18 @@ def portal_fragment(version, native_config=True, legacy_windows=None):
         )
     return (
         f'<section class="client-downloads" aria-labelledby="clients-title">'
-        f'<div class="section-heading"><h2 id="clients-title">远程工具</h2><p>GeodomDesk {html.escape(version)}</p></div>'
+        f'<div class="section-heading"><h2 id="clients-title">远程工具</h2><p>GeodomDesk {html.escape(version)}{changelog_link}</p></div>'
         f'<div class="client-list">'
         f'<div class="client-row"><div class="client-name"><h3>网页版</h3><p>免安装 · 浏览器访问</p></div><div class="client-links"><a href="/geodomdesk/">打开网页版<svg aria-hidden="true"><use href="#arrow"/></svg></a></div></div>'
-        f'<div class="client-row"><div class="client-name"><h3>Windows</h3><p>x64 · Win10 / 11 / Server 2016+</p></div><div class="client-links"><a href="{channel.release_url(version)}{names["windows"]}" download>下载 Windows 标准版<svg aria-hidden="true"><use href="#download"/></svg></a>{compatibility_link}</div></div>'
-        f'<div class="client-row"><div class="client-name"><h3>Ubuntu</h3><p>amd64</p></div><div class="client-links"><a href="{channel.release_url(version)}{names["ubuntu"]}" download>下载 Ubuntu 版<svg aria-hidden="true"><use href="#download"/></svg></a></div></div>'
-        f'<div class="client-row"><div class="client-name"><h3>Android</h3><p>ARM64</p></div><div class="client-links"><a href="{channel.release_url(version)}{names["android"]}" download>下载 Android 版<svg aria-hidden="true"><use href="#download"/></svg></a></div></div>'
+        f'<div class="client-row"><div class="client-name"><h3>Windows</h3><p>x64 · Win10 / 11 / Server 2016+</p></div><div class="client-links"><a href="{release_url}{names["windows"]}" download>下载 Windows 标准版<svg aria-hidden="true"><use href="#download"/></svg></a>{compatibility_link}</div></div>'
+        f'<div class="client-row"><div class="client-name"><h3>Ubuntu</h3><p>amd64</p></div><div class="client-links"><a href="{release_url}{names["ubuntu"]}" download>下载 Ubuntu 版<svg aria-hidden="true"><use href="#download"/></svg></a></div></div>'
+        f'<div class="client-row"><div class="client-name"><h3>Android</h3><p>ARM64</p></div><div class="client-links"><a href="{release_url}{names["android"]}" download>下载 Android 版<svg aria-hidden="true"><use href="#download"/></svg></a></div></div>'
         f'</div></section>'
     )
 
 
-def portal_update(portal, version, native_config=True, legacy_windows=None):
-    fragment = portal_fragment(version, native_config, legacy_windows)
+def portal_update(portal, version, native_config=True, legacy_windows=None, *, changelog=""):
+    fragment = portal_fragment(version, native_config, legacy_windows, changelog=changelog)
     before = portal.read_bytes()
     text = before.decode("utf-8")
     if text.count(START) != 1 or text.count(END) != 1:
@@ -748,7 +752,6 @@ def _run_locked(config, state):
                 and channel.normalize_changelog(current.get("changelog", ""))
                 == channel.normalize_changelog(manifest.get("changelog", ""))
                 and (public / "latest.json").is_file()
-                and (public / "index.html").is_file()
                 and (public / "geodomdesk.png").is_file()
             )
         else:
@@ -841,10 +844,18 @@ def _run_locked(config, state):
         if not already_live:
             atomic_bytes(public / "geodomdesk.png", (ROOT / "assets/geodomdesk.png").read_bytes())
             publish_pointer(public, manifest)
+        native_config = manifest.get("native_config", False)
+        published_changelog = manifest.get("changelog", "")
+        download_home = page(
+            release_id, native_config, legacy_windows, published_changelog, download_home=True
+        )
+        index_path = public / "index.html"
+        if not index_path.is_file() or index_path.read_bytes() != download_home:
+            atomic_bytes(index_path, download_home)
         if config.get("activate_portal"):
             portal_text = portal.read_text(encoding="utf-8")
             expected_fragment = portal_fragment(
-                release_id, manifest.get("native_config", False), legacy_windows
+                release_id, native_config, legacy_windows, changelog=published_changelog
             )
             if (
                 not already_live
@@ -865,8 +876,9 @@ def _run_locked(config, state):
                 portal_update(
                     portal,
                     release_id,
-                    manifest.get("native_config", False),
+                    native_config,
                     legacy_windows,
+                    changelog=published_changelog,
                 )
         save_json(
             state / "status.json", {"status": "published", "version": version, "checked_at": now()}

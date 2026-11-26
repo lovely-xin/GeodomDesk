@@ -544,6 +544,8 @@ class ChannelTests(unittest.TestCase):
             )
             self.assertIn("showGeodomUpdateDialogFromCurrent(updateUrl)", home_dart)
             self.assertIn("checkGeodomUpdateManually()", desktop_settings)
+            self.assertIn("infoRow(\n                translate('Version'),", desktop_settings)
+            self.assertNotIn("OutlinedButton.icon", desktop_settings)
             mobile_conn = (source / "flutter/lib/mobile/pages/connection_page.dart").read_text(
                 encoding="utf-8"
             )
@@ -765,6 +767,7 @@ class PublisherTests(unittest.TestCase):
             self.p.run(self.config)
         latest = json.loads((self.public / "latest.json").read_text())
         self.assertEqual(latest["url"], channel.release_url("1.5.2"))
+        self.assertNotIn('href="#changelog-title"', (self.public / "index.html").read_text())
         self.assertTrue(latest["android_url"].endswith("geodomdesk-1.5.2-android-arm64.apk"))
         self.assertTrue(latest["windows_url"].endswith("geodomdesk-1.5.2-windows-x64.exe"))
         self.assertTrue(latest["ubuntu_url"].endswith("geodomdesk-1.5.2-ubuntu-amd64.deb"))
@@ -1062,8 +1065,30 @@ class PublisherTests(unittest.TestCase):
         self.assertIn("更新日志", release_html)
         self.assertNotIn("<script>", release_html)
         self.assertIn("&lt;script&gt;", release_html)
-        self.p.portal_update(self.portal, "1.5.3-r12")
-        self.assertIn("GeodomDesk 1.5.3-r12", self.portal.read_text(encoding="utf-8"))
+        index_path = self.public / "index.html"
+        landing = index_path.read_text(encoding="utf-8")
+        self.assertIn('href="#changelog-title"', landing)
+        self.assertIn('id="changelog-title"', landing)
+        self.assertIn('href="releases/1.5.3-r12/geodomdesk-1.5.3-r12-windows-x64.exe"', landing)
+        self.assertIn('src="geodomdesk.png"', landing)
+        self.assertNotIn("<script>", landing)
+
+        # Repair landing links for an already published revision without replacing its pointer or files.
+        self.config["activate_portal"] = True
+        latest_bytes = (self.public / "latest.json").read_bytes()
+        index_path.write_text("Previous download redirect", encoding="utf-8")
+        with self.mocks(release, local), mock.patch.object(
+            self.p.subprocess, "run", return_value=subprocess.CompletedProcess([], 3)
+        ), mock.patch.object(self.p, "publish_pointer", side_effect=AssertionError("Pointer rewritten")):
+            self.p.run(self.config)
+        self.config["activate_portal"] = False
+        portal_html = self.portal.read_text(encoding="utf-8")
+        self.assertIn("GeodomDesk 1.5.3-r12", portal_html)
+        self.assertIn(f'href="{channel.release_url("1.5.3-r12")}#changelog-title"', portal_html)
+        self.assertEqual(index_path.read_text(encoding="utf-8"), landing)
+        self.assertEqual((self.public / "latest.json").read_bytes(), latest_bytes)
+        self.assertEqual((target / channel.METADATA_NAME).read_bytes(), metadata_bytes)
+        self.assertEqual((target / "index.html").read_text(encoding="utf-8"), release_html)
 
         # Pointer changelog or published_at drift forces pointer refresh on subsequent run.
         latest_path = self.public / "latest.json"
