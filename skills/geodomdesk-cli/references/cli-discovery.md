@@ -1,39 +1,14 @@
-# 发起端 CLI 查找流程
+# CLI 发现和版本区别
 
-在实际发起端查找 CLI，并在同一宿主机的非沙箱会话中验证和运行它。使用支持 `sandbox_permissions` 的 Codex `exec_command` 时，以 `require_escalated` 请求在沙箱外执行。其他运行器使用各自的宿主机权限流程。只有受限执行环境时，将网络验证标记为待宿主机执行。
+优先检查用户指定路径、应用安装目录和 `PATH`。Windows 可用 `Get-Command geodomdesk-cli.exe -CommandType Application -All`，再查安装记录的 `InstallLocation`。Linux 可用 `command -v geodomdesk-cli`，再查包管理器清单或独立包解压目录。Windows、WSL 与其他系统用户各有自己的配置和登录状态。优先在具备任务所需登录态和网络的环境运行。
 
-1. **检查已知路径。** 优先使用用户指定的可执行文件或安装目录。也可复用本次任务已验证的路径。
-2. **检查 PATH。** Windows 用 `Get-Command geodomdesk-cli.exe -CommandType Application -All`，Linux 和 macOS 用 `command -v geodomdesk-cli`。取返回的可执行文件路径。
-3. **按系统查安装位置。**
-   - **Windows**：查 Windows 已安装应用的卸载注册表记录，覆盖当前用户和系统的 32 位、64 位安装。先用 `InstallLocation` 定位 `geodomdesk-cli.exe`。字段缺失或路径失效时，从 `DisplayIcon` 或开始菜单、桌面快捷方式的目标定位安装目录。图标可能指向资源子目录，可沿父目录找到主程序，再检查同目录的 CLI。也可按安装线索检查 `ProgramFiles`、`ProgramFiles(x86)` 或 `LOCALAPPDATA\Programs` 下的对应目录。
-   - **Linux 和 macOS**：按实际安装方式查已装软件包的文件清单、应用目录或便携包解压位置。用清单或目录中的实际可执行文件名和路径。
-4. **核对候选。** 用可执行文件的完整路径运行 `--version`，确认成功退出且返回 GeodomDesk 版本。Windows 用 `& $cli --version`，其中 `$cli` 是候选路径。按任务需要再用 `--help` 查看支持的命令和参数。帮助包含 `embedded SSH over TCP` 时可使用独立内置 SSH。存在多个候选时，优先选择来源已知且具备任务所需能力的独立 CLI，保留实际使用路径。
+对候选程序运行一次 `--version` 与 `--help`。版本号只标识构建，能力以该程序帮助和对应发布说明为准。独立版的帮助通常包含 `embedded SSH over TCP` 和 `account` 子命令。
 
-仍找不到可用的 CLI 时，询问安装目录或便携包位置。需要独立 CLI 时，从项目发布页或管理员取得适用平台的软件包，核对随包的 SHA-256，再用完整路径启动。
+| 能力 | 随客户端安装的 CLI | 独立 CLI |
+| --- | --- | --- |
+| GeodomDesk 账号 | 复用同环境桌面登录，或用 `--account-user` 单次登录 | 支持 `account login` 和 `account logout`，也可复用桌面登录或单次登录。较新构建可用 `account status` |
+| SSH 到目标系统 | Bash 可调用本机 OpenSSH，经 CLI 私有回环隧道转发。PowerShell 经 SSH 时，用显式 TCP 映射搭配本机 SSH | 内置 SSH，无需本机 OpenSSH。支持 Bash，以及显式指定 SSH 的 PowerShell 或 pwsh |
+| SSH 信任与口令 | `--ssh-known-hosts`、`--ssh-strict-host-key`，按本机 OpenSSH 能力使用 agent 或密钥 | 另支持 `--ssh-host-fingerprint` 和 `GEODOMDESK_SSH_KEY_PASSPHRASE` |
+| 显式 TCP 映射 | `tunnel open/list/close` | `tunnel open/list/close` |
 
-## Windows 安装记录示例
-
-在 64 位 Windows 上使用 64 位 PowerShell 读取两个系统安装视图。下例列出匹配记录及按 `InstallLocation` 找到的 CLI 候选。
-
-```powershell
-$uninstallKeys = @(
-    'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
-    'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
-    'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
-)
-
-Get-ItemProperty -Path $uninstallKeys -ErrorAction SilentlyContinue |
-    Where-Object { $_.DisplayName -like 'GeodomDesk*' } |
-    Select-Object DisplayName, DisplayVersion, InstallLocation, DisplayIcon, @{
-        Name = 'CliPath'
-        Expression = {
-            if ($_.InstallLocation) {
-                $directory = [Environment]::ExpandEnvironmentVariables($_.InstallLocation.Trim().Trim('"'))
-                $candidate = Join-Path $directory 'geodomdesk-cli.exe'
-                if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-                    $candidate
-                }
-            }
-        }
-    }
-```
+本地查询、参数检查和文件检查用当前权限运行。实际网络、用户配置或长连接管理被限制时，按运行器机制申请所需访问。环境拦截应报告为发起端问题。使用长连接前，确认运行器可保持同一子进程和 stdin 可写。
