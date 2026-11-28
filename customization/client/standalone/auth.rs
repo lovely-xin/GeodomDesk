@@ -45,6 +45,18 @@ pub(super) async fn verify_ssh_account(token: &str) -> ResultType<()> {
     checked.map_err(|error| super::stage::wrap(error, "account_auth", "not_started"))
 }
 
+pub(super) async fn verified_recent_owner(token: &str) -> ResultType<String> {
+    let result = async {
+        let (status, body) = tokio::time::timeout(
+            Duration::from_secs(10),
+            crate::common::post_terminal_account("currentUser", "{}".into(), Some(token)),
+        ).await.context("GeodomDesk account verification timed out")??;
+        let profile = fetch_profile(status, &body)?;
+        Ok(profile["name"].as_str().context("Missing account name")?.to_owned())
+    }.await;
+    result.map_err(|error| super::stage::wrap(error, "account_auth", "not_started"))
+}
+
 fn verified_profile(status: u16, body: &str) -> ResultType<()> {
     fetch_profile(status, body).map(|_| ())
 }

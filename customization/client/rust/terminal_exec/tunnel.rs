@@ -1085,6 +1085,68 @@ impl Managed {
         })
     }
 
+    pub(super) async fn run_program(mut self, program: &str, arguments: &[String]) -> ResultType<i32> {
+        let result = self.run_local_program(program, arguments).await;
+        let _ = self.close_tx.try_send(());
+        let cleanup = match tokio::time::timeout(Duration::from_secs(3), &mut self.task).await {
+            Ok(result) => result.context("Tunnel shutdown failed"),
+            Err(_) => {
+                self.task.abort();
+                let _ = (&mut self.task).await;
+                Ok(())
+            }
+        };
+        let status = result?;
+        cleanup?;
+        Ok(status)
+    }
+
+    async fn run_local_program(&self, program: &str, arguments: &[String]) -> ResultType<i32> {
+        let port = self.port().to_string();
+        let address = format!("127.0.0.1:{port}");
+        let mut closed = self.state.closed_tx.subscribe();
+        if self.is_closed() {
+            bail!("The TCP tunnel closed before the local program was started");
+        }
+        let mut command = tokio::process::Command::new(program);
+        command
+            .args(arguments.iter().map(|argument| match argument.as_str() {
+                "{port}" => port.as_str(),
+                "{address}" => address.as_str(),
+                argument => argument,
+            }))
+            .env("GEODOMDESK_TUNNEL_HOST", "127.0.0.1")
+            .env("GEODOMDESK_TUNNEL_PORT", &port)
+            .env("GEODOMDESK_TUNNEL_ID", &self.record.tunnel_id)
+            .kill_on_drop(true);
+        for variable in [
+            "GEODOMDESK_ACCOUNT_PASSWORD",
+            "GEODOMDESK_DEVICE_PASSWORD",
+            "GEODOMDESK_DEVICE_CODE",
+            "GEODOMDESK_ADMIN_PASSWORD",
+            "GEODOMDESK_SSH_PASSWORD",
+            "GEODOMDESK_SSH_KEY_PASSPHRASE",
+        ] {
+            command.env_remove(variable);
+        }
+        let mut child = command.spawn().context("Cannot start local tunnel program")?;
+        let result = cli::wait_or_interrupt(Box::pin(async {
+            tokio::select! {
+                biased;
+                status = child.wait() => status.map_err(Into::into),
+                _ = closed.wait_for(|closed| *closed) => {
+                    bail!("The TCP tunnel closed before the local program exited");
+                }
+            }
+        })).await;
+        if result.is_err() {
+            // Wait for the direct child to exit before reporting the interruption.
+            let _ = child.kill().await;
+        }
+        let status = result?;
+        Ok(cli::process_exit_code(status.code().unwrap_or(1)))
+    }
+
     pub(super) async fn serve(mut self) -> ResultType<i32> {
         let mut ready = self.snapshot();
         ready["event"] = json!("tunnel_ready");
@@ -1352,6 +1414,88 @@ mod tests {
             local_port:1, remote_host:"127.0.0.1".into(), remote_port:22, owner_pid:0,
             purpose:"test".into(), control_port:port, secret:uuid::Uuid::new_v4().to_string(),
             relay:true, ..Default::default() }
+    }
+
+    #[tokio::test]
+    async fn launch_failure_waits_for_listener_and_record_release() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut record = control_record(1);
+        record.local_port = address.port();
+        let path = std::env::temp_dir().join(format!("geodomdesk-tunnel-test-{}", record.tunnel_id));
+        std::fs::write(&path, []).unwrap();
+        let state = Arc::new(State::default());
+        let (close_tx, mut close_rx) = mpsc::channel(1);
+        let released = state.clone();
+        let task = tokio::spawn(async move {
+            assert_eq!(close_rx.recv().await, Some(()));
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            drop(listener);
+            released.mark_closed();
+        });
+        let mapping = Managed {
+            info: Value::Null,
+            peer: PeerInfo::default(),
+            setup_errors: Vec::new(),
+            record,
+            state: state.clone(),
+            task,
+            close_tx,
+            path: path.clone(),
+        };
+        let missing_program = path.with_extension("missing-program");
+        let result = mapping.run_program(missing_program.to_str().unwrap(), &[]).await;
+        assert!(result.unwrap_err().to_string().contains("Cannot start local tunnel program"));
+        assert!(state.closed.load(Ordering::Relaxed));
+        assert!(TcpStream::connect(address).await.is_err());
+        assert!(!path.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn local_program_uses_mapping_and_releases_port_on_nonzero_exit() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut record = control_record(1);
+        record.local_port = address.port();
+        let path = std::env::temp_dir().join(format!("geodomdesk-tunnel-test-{}", record.tunnel_id));
+        std::fs::write(&path, []).unwrap();
+        let state = Arc::new(State::default());
+        let (close_tx, mut close_rx) = mpsc::channel(1);
+        let task_state = state.clone();
+        let task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            socket.write_all(b"ready\n").await.unwrap();
+            assert_eq!(close_rx.recv().await, Some(()));
+            drop(listener);
+            task_state.mark_closed();
+        });
+        let mapping = Managed {
+            info: Value::Null,
+            peer: PeerInfo::default(),
+            setup_errors: Vec::new(),
+            record,
+            state,
+            task,
+            close_tx,
+            path: path.clone(),
+        };
+        let args = [
+            "-c",
+            r#"test "$1" = "$GEODOMDESK_TUNNEL_PORT" || exit 10
+               test "$2" = "127.0.0.1:$1" || exit 11
+               IFS= read -r reply < "/dev/tcp/127.0.0.1/$1" || exit 12
+               test "$reply" = ready || exit 13
+               exit 37"#,
+            "geodomdesk-fixture",
+            "{port}",
+            "{address}",
+        ].map(str::to_owned);
+        let result = tokio::time::timeout(Duration::from_secs(6), mapping.run_program("/bin/bash", &args))
+            .await.unwrap().unwrap();
+        assert_eq!(result, 37);
+        assert!(TcpStream::connect(address).await.is_err());
+        assert!(!path.exists());
     }
 
     #[tokio::test]

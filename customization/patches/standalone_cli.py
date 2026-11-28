@@ -77,61 +77,6 @@ async fn request_account_token(
     let account = credentials('''),
         ('        "autoLogin": false,', '        "autoLogin": remember,'),
     ])
-    edit(files, "src/common.rs", [
-        ('''pub(crate) async fn post_terminal_login(body: String) -> ResultType<(u16, String)> {
-    let server = ui_get_api_server();
-    let url = url::Url::parse(&format!("{server}/api/login")).context("No account API configured")?;''',
-         '''pub(crate) async fn post_terminal_login(body: String) -> ResultType<(u16, String)> {
-    post_terminal_account("login", body, None).await
-}
-
-#[cfg(any(windows, target_os = "linux"))]
-pub(crate) async fn post_terminal_account(
-    action: &str,
-    body: String,
-    token: Option<&str>,
-) -> ResultType<(u16, String)> {
-    let server = ui_get_api_server();
-    let url = url::Url::parse(&format!("{server}/api/{action}")).context("No account API configured")?;'''),
-        ('''        let mut response = reqwest::Client::builder()
-            .use_rustls_tls()
-            .https_only(true)
-            .redirect(reqwest::redirect::Policy::none())
-            .build()?
-            .post(url)
-            .header("Content-Type", "application/json")
-            .body(body)
-            .send()
-            .await?;''',
-         '''        static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-        let client = if let Some(client) = CLIENT.get() {
-            client.clone()
-        } else {
-            let built = reqwest::Client::builder()
-                .use_rustls_tls()
-                .https_only(true)
-                .redirect(reqwest::redirect::Policy::none())
-                .build()?;
-            CLIENT.get_or_init(|| built).clone()
-        };
-        let request = client
-            .post(url)
-            .header("Content-Type", "application/json")
-            .body(body);
-        let request = if let Some(token) = token { request.bearer_auth(token) } else { request };
-        let mut response = request.send().await?;'''),
-        ('''    let headers = parse_simple_header("Content-Type: application/json");
-    let response = tcp_proxy_request("POST", url.as_str(), body.as_bytes(), headers, true).await?;''',
-         '''    let mut headers = parse_simple_header("Content-Type: application/json");
-    if let Some(token) = token {
-        headers.push(HeaderEntry {
-            name: "Authorization".into(),
-            value: format!("Bearer {token}").into(),
-            ..Default::default()
-        });
-    }
-    let response = tcp_proxy_request("POST", url.as_str(), body.as_bytes(), headers, true).await?;'''),
-    ])
     files[f"{terminal}.rs"] += b"""
 /// Independent command entry point. Loading branding selects the same account
 /// configuration and tunnel registry as the desktop without launching its UI.
@@ -217,8 +162,9 @@ pub fn run_standalone_cli() -> ResultType<i32> {
   --ssh-host HOST         Target SSH host inside peer relay (default 127.0.0.1)
   --ssh-port PORT         Target SSH service port (default 22)
   --ssh-identity PATH     Use an SSH private key; otherwise agent/default keys or password""",
-         """  --transport MODE        auto (default): embedded SSH over TCP, then GeodomDesk terminal
+         """  --transport MODE        auto (default): Bash or explicit SSH settings use embedded SSH over TCP
                           terminal: require GeodomDesk terminal; ssh: require SSH
+                          PowerShell without SSH settings uses GeodomDesk terminal
                           Session without --shell uses the GeodomDesk terminal
   --ssh-user USER         SSH login (default: authenticated peer username)
   --ssh-host HOST         Destination as reached from the device selected by --id
@@ -286,6 +232,9 @@ pub fn run_standalone_cli() -> ResultType<i32> {
     } else {
         None
     };'''),
+        ('    if tcp_diagnostic {\n        let port =',
+         '    if tcp_diagnostic {\n        auth::verify_ssh_account(&options.current_token()?).await?;\n'
+         '        let port ='),
         ('    if tunnel {\n        let port = remote_port.context("Missing --remote-port")?;',
          '    if tunnel {\n        auth::verify_ssh_account(&options.current_token()?).await?;\n'
          '        let port = remote_port.context("Missing --remote-port")?;'),

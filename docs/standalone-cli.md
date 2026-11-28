@@ -22,9 +22,27 @@ geodomdesk-cli exec --id DEVICE_ID --expect-hostname HOSTNAME --shell bash --com
 geodomdesk-cli exec --id DEVICE_ID --expect-platform Windows --shell powershell --command 'hostname' --json
 ```
 
-默认模式在指定 shell 时先验证 GeodomDesk 账号，再通过 TCP 中继尝试设备的 SSH 服务。默认 SSH 端口未响应或没有可用的 SSH 凭据时，CLI 改用已授权的 GeodomDesk 终端，并按对端能力选用相应协议。服务拒绝登录或主机校验失败时直接返回原因。`--transport ssh` 要求使用 SSH，`--transport terminal` 直接使用 GeodomDesk 终端。无 `--shell` 的会话支持在每条请求中选择 shell，并使用 GeodomDesk 终端。
+Bash 默认先通过托管 TCP 隧道尝试 SSH。PowerShell 指定 `--transport ssh` 或 SSH 参数时走 SSH。PowerShell 省略这些参数时使用 GeodomDesk 终端。默认 Bash 仅在 SSH 明确不可用且允许回落时尝试已授权的 GeodomDesk 终端。服务拒绝登录或主机校验失败时直接返回原因。`--transport ssh` 要求使用 SSH，`--transport terminal` 直接使用 GeodomDesk 终端。无 `--shell` 的会话支持在每条请求中选择 shell，并使用 GeodomDesk 终端。
 
 CLI 优先复用独立 CLI 的账号登录和已保存的设备凭据。需要设备密码时加 `--ask-device-password`。SSH 服务按目标操作系统账号认证，支持 `--ssh-user USER`、`--ssh-identity FILE` 和 `--ask-ssh-password`。交互密码和私钥口令在建连前无回显输入，同一 CLI 进程会复用已读入的 SSH 凭据。自动化可通过进程环境传入对应凭据并加 `--non-interactive`。将账号密码、设备密码、目标 SSH 密码和私钥口令分别保管。
+
+## 查找设备和验证 TCP 链路
+
+```text
+geodomdesk-cli device list --recent --online --json
+geodomdesk-cli doctor --id DEVICE_ID --remote-port 22 --expect-hostname HOSTNAME --pretty
+geodomdesk-cli tunnel run --id DEVICE_ID --remote-port 22 --expect-hostname HOSTNAME -- ssh -o HostKeyAlias=TRUSTED_ALIAS -p "{port}" OS_USER@127.0.0.1
+```
+
+`device list` 优先读取当前账号匹配的桌面最近访问记录与本地同步缓存。没有可用记录时，通过当前账号查询云端最近访问。`--online` 只返回本次在线查询确认在线的条目。设备认证、功能授权和目标身份由后续连接检查。
+
+`doctor` 省略 `--remote-port` 时检查终端能力。指定端口时检查转发连接，返回阶段、实际链路和下一步。应用协议握手由相应工具完成。`tunnel run` 在本机启动指定程序，并在该程序结束时回收该映射。支持完整参数 `{port}`、`{address}` 以及 `GEODOMDESK_TUNNEL_PORT`。随包版也可用此流程对接系统 OpenSSH、WinRM 或其他 TCP 工具。
+
+## 恢复长会话与查看实时输出
+
+- Linux 有 SSH 和 tmux 时，用上面的命令打开隧道，在远端执行 `tmux new-session -A -s NAME`。用 `Ctrl+b d` 挂起后，重建隧道即可用 `tmux attach -t NAME` 恢复。用 `tmux list-sessions` 查看，用 `tmux kill-session -t NAME` 结束本次会话。
+- Windows 已启用 WinRM 时，经隧道连接预先配置的 WinRM 端点，按现有证书及账号策略认证。用 `Disconnect-PSSession` 保留会话，重连后用 `Connect-PSSession` 或 `Receive-PSSession` 恢复，完成后用 `Remove-PSSession` 删除。
+- 实时输出由 `tunnel run` 启动的工具直接传出，可分别处理 stdout、stderr 和退出码。需要结构化结果时用 `exec --json`，多条短命令可复用 `session`。
 
 ## 中转到下游设备
 

@@ -209,6 +209,15 @@ pub(crate) fn merge_list(
     }
     let pending: HashMap<String, u64> =
         serde_json::from_str(&LocalConfig::get_option(REMOVALS_OPTION)).unwrap_or_default();
+    merge_recent(local, paths, cloud, &pending)
+}
+
+fn merge_recent(
+    local: Vec<HashMap<&'static str, String>>,
+    paths: &[(String, SystemTime, PathBuf)],
+    cloud: Vec<AbPeer>,
+    pending: &HashMap<String, u64>,
+) -> Vec<HashMap<&'static str, String>> {
     let times: HashMap<_, _> = paths
         .iter()
         .map(|(id, time, _)| (id.as_str(), millis(*time)))
@@ -224,6 +233,9 @@ pub(crate) fn merge_list(
         })
         .collect();
     for peer in cloud {
+        if !device_id(&peer.id) {
+            continue;
+        }
         let Some(profile) = parse(&peer.geodom_recent) else {
             continue;
         };
@@ -262,6 +274,78 @@ pub(crate) fn merge_list(
     let mut peers: Vec<_> = peers.into_iter().collect();
     peers.sort_by(|(a, (at, _)), (b, (bt, _))| bt.cmp(at).then_with(|| a.cmp(b)));
     peers.into_iter().map(|(_, (_, peer))| peer).collect()
+}
+
+/// Cloud rows have already been scoped by the verified bearer token. Local
+/// pending removals from a different desktop account must not affect this list.
+#[cfg(any(windows, target_os = "linux"))]
+pub(crate) fn cli_cloud_peers(cloud: Vec<AbPeer>) -> Vec<HashMap<&'static str, String>> {
+    merge_recent(Vec::new(), &[], cloud, &HashMap::new())
+}
+
+/// Discover only recent records owned by the account used for the CLI request.
+#[cfg(any(windows, target_os = "linux"))]
+pub(crate) fn cli_peers(
+    token: &str,
+    verified_owner: Option<&str>,
+) -> Option<Vec<HashMap<&'static str, String>>> {
+    let owner = signed_in_account()?;
+    if !cli_account_matches(
+        token,
+        &LocalConfig::get_option("access_token"),
+        verified_owner,
+        &owner,
+    ) {
+        return None;
+    }
+    let legacy_owner = LocalConfig::get_option(LOCAL_OWNER_OPTION);
+    let removals: HashMap<String, u64> =
+        serde_json::from_str(&LocalConfig::get_option(REMOVALS_OPTION)).unwrap_or_default();
+    let mut recent = Vec::new();
+    let mut owned_paths = Vec::new();
+    for (id, modified, path) in PeerConfig::get_vec_id_modified_time_path(&None) {
+        if !device_id(&id) {
+            continue;
+        }
+        // PeerConfig::load may rewrite a credential record during migration.
+        let Some(peer) = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|value| hbb_common::toml::from_str::<PeerConfig>(&value).ok())
+        else {
+            continue;
+        };
+        if !owns_peer(&peer, &owner, &legacy_owner) {
+            continue;
+        }
+        if removals.get(&id).is_some_and(|removed| *removed >= millis(modified)) {
+            continue;
+        }
+        if !peer.info.platform.is_empty() {
+            recent.push(HashMap::from([
+                ("id", id.clone()),
+                ("hostname", peer.info.hostname),
+                ("platform", peer.info.platform),
+                ("alias", peer.options.get("alias").cloned().unwrap_or_default()),
+            ]));
+        }
+        owned_paths.push((id, modified, path));
+    }
+    Some(merge_list(recent, &owned_paths, account_peers()))
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn cli_account_matches(token: &str, desktop_token: &str, verified_owner: Option<&str>, owner: &str) -> bool {
+    !token.is_empty() && (token == desktop_token || verified_owner == Some(owner))
+}
+
+#[cfg(all(test, any(windows, target_os = "linux")))]
+#[test]
+fn cli_recent_history_requires_matching_account() {
+    assert!(cli_account_matches("desktop", "desktop", None, "owner"));
+    assert!(cli_account_matches("cli", "desktop", Some("owner"), "owner"));
+    assert!(!cli_account_matches("cli", "desktop", None, "owner"));
+    assert!(!cli_account_matches("cli", "desktop", Some("someone-else"), "owner"));
+    assert!(!cli_account_matches("", "", Some("owner"), "owner"));
 }
 
 pub(crate) fn apply_settings(id: &str, local: &mut PeerConfig) {

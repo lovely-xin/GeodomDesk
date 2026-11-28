@@ -29,12 +29,18 @@ pub(super) const USAGE: &str =
        geodomdesk-cli exec --id ID --shell bash|powershell|pwsh --command TEXT
        geodomdesk-cli session --id ID [--shell SHELL] [authentication options]
        geodomdesk-cli probe --id ID [authentication options]
+  device list --recent [--online] [--json] [--pretty]
+                          List account-owned recent devices; --online checks current presence
+  doctor --id ID [--remote-host HOST --remote-port PORT] [--json] [--pretty]
+                          Check terminal or TCP forwarding without sending a user command
   session                 Read JSON Lines from stdin and reuse one authenticated connection
                           {\"shell\":\"bash\",\"script\":\"pwd\",\"timeout\":120}
                           Results: JSON Lines; stdout/stderr are Base64 encoded
   tunnel open --id ID --remote-port PORT [--remote-host HOST] [--local-port PORT]
                           Own a loopback TCP mapping (default: free local port; use --relay to force relay)
                           Keep stdin open; JSON controls status/close; EOF or exit cleans up
+  tunnel run --id ID --remote-port PORT [--remote-host HOST] -- PROGRAM [ARG ...]
+                          Run a local program with a managed TCP mapping; use {port} or {address}
   tunnel list [--id ID]    List only live CLI-owned tunnels; includes owner and real status
   tunnel close --tunnel-id UUID [--id ID]
                           Close that CLI-owned mapping and all of its connections
@@ -676,13 +682,20 @@ pub(super) async fn receive_terminal_response(stream: &mut Stream) -> ResultType
 
 pub(super) async fn run_cli(args: impl Iterator<Item = String>) -> ResultType<i32> {
     let args: Vec<_> = args.collect();
-    let json = input::wants_json(&args)
-        || matches!(args.first().map(String::as_str), Some("session" | "probe" | "tunnel"));
+    let tunnel_run = args.first().is_some_and(|value| value == "tunnel")
+        && args.get(1).is_some_and(|value| value == "run");
+    let json = !tunnel_run && (input::wants_json(&args)
+        || matches!(args.first().map(String::as_str), Some("session" | "probe" | "tunnel" | "doctor" | "device")));
+    let doctor = args.first().is_some_and(|value| value == "doctor");
     let started = Instant::now();
     let result = run(args.into_iter(), started).await;
     if json {
         if let Err(error) = &result {
-            output::write(output::failure(None, error, true, started.elapsed()))?;
+            let mut failure = output::failure(None, error, true, started.elapsed());
+            if doctor {
+                add_diagnostic(&mut failure, false);
+            }
+            output::write(failure)?;
         }
     }
     result
@@ -698,14 +711,26 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
         println!("GeodomDesk {}-r{}", crate::VERSION,crate::geodomdesk_update::BUILD_NUMBER);
         return Ok(0);
     }
-    let tunnel=first.as_deref()==Some("tunnel");
-    if tunnel {
-        let op=args.next().context("Use tunnel open, list or close")?;
-        if matches!(op.as_str(),"--help"|"-h"){println!("{USAGE}");return Ok(0);}
-        if op!="open" {return super::tunnel::manage(&op,args).await;}
+    if first.as_deref() == Some("device") {
+        return Box::pin(super::devices::run(args)).await;
     }
+    let doctor = first.as_deref() == Some("doctor");
+    let tunnel=first.as_deref()==Some("tunnel");
+    let mut tunnel_run = false;
+    if tunnel {
+        let op = args.next().context("Use tunnel open, run, list or close")?;
+        if matches!(op.as_str(), "--help" | "-h") {
+            println!("{USAGE}");
+            return Ok(0);
+        }
+        tunnel_run = op == "run";
+        if op != "open" && !tunnel_run {
+            return super::tunnel::manage(&op, args).await;
+        }
+    }
+    let mut local_command = None;
     let session = first.as_deref() == Some("session");
-    let probe = first.as_deref() == Some("probe");
+    let probe = doctor || first.as_deref() == Some("probe");
     if !session && !probe && !tunnel && first.as_deref() != Some("exec") {
         bail!("{USAGE}");
     }
@@ -734,6 +759,10 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
     let mut ask_device_password = false;
     let mut non_interactive = false;
     while let Some(arg) = args.next() {
+        if tunnel_run && arg == "--" {
+            local_command = Some(read_local_command(args.by_ref())?);
+            break;
+        }
         let (flag, inline) = match arg.split_once('=') {
             Some((name, val)) => (name, Some(val.to_owned())),
             None => (arg.as_str(), None),
@@ -876,13 +905,13 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
                         }
                         local_port = Some(value.parse().context("Invalid local port")?);
                     }
-                    "--remote-port" if tunnel => {
+                    "--remote-port" if tunnel || doctor => {
                         if remote_port.is_some() {
                             bail!("Specify --remote-port only once");
                         }
                         remote_port = Some(value.parse::<u16>().context("Invalid remote port")?);
                     }
-                    "--remote-host" if tunnel => {
+                    "--remote-host" if tunnel || doctor => {
                         if remote_host.is_some() {
                             bail!("Specify --remote-host only once");
                         }
@@ -917,12 +946,22 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
             }
         }
     }
+    if tunnel_run && local_command.is_none() {
+        bail!("Use tunnel run [OPTIONS] -- PROGRAM [ARG ...]");
+    }
+    if tunnel_run && json {
+        bail!("tunnel run passes through the local program's output; --json is not supported");
+    }
     if tunnel && timeout.is_some() {
-        bail!("tunnel open uses --connect-timeout, not --timeout");
+        bail!("TCP mappings use --connect-timeout, not --timeout");
     }
     let timeout = timeout.unwrap_or(15u32);
     let connect_timeout = connect_timeout.unwrap_or(60u32);
     let local_port = local_port.unwrap_or(0u16);
+    let tcp_diagnostic = doctor && remote_port.is_some();
+    if doctor && !tcp_diagnostic && remote_host.is_some() {
+        bail!("--remote-host requires --remote-port");
+    }
     let remote_host = remote_host
         .map(|h| h.trim().to_owned())
         .unwrap_or_else(|| "127.0.0.1".to_owned());
@@ -949,7 +988,9 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
     if !(1..=300).contains(&connect_timeout) {
         bail!("Connection timeout must be between 1 and 300 seconds");
     }
-    if tunnel && (remote_port.unwrap_or(0)==0 || remote_host.trim().is_empty() || remote_host.len()>253 || remote_host.chars().any(char::is_control)) {bail!("Specify a valid --remote-host and --remote-port (1-65535)");}
+    if (tunnel || tcp_diagnostic) && (remote_port.unwrap_or(0)==0 || remote_host.trim().is_empty() || remote_host.len()>253 || remote_host.chars().any(char::is_control)) {bail!("Specify a valid --remote-host and --remote-port (1-65535)");}
+    if tcp_diagnostic && command_transport != "auto" {bail!("TCP diagnostics do not use --transport");}
+    if tcp_diagnostic && admin_user.is_some() {bail!("TCP diagnostics do not use --admin-user");}
     if tunnel && command_transport!="auto" {bail!("tunnel open maps TCP ports; select SSH with exec or session --transport ssh");}
     if tunnel && (shell.is_some() || admin_user.is_some() || continue_on_error) {bail!("tunnel open accepts port mappings, not shell options");}
     if (session || probe || tunnel) && (script.is_some() || command.is_some()) {
@@ -1032,12 +1073,11 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
     if hbb_common::config::is_incoming_only() {
         bail!("Incoming-only mode");
     }
-    let token_override = if account_user.is_some() {
-        Some(auth::account_token(account_user, non_interactive).await?)
-    } else {
-        let _ = auth::account_token(None, non_interactive).await?;
-        None
-    };
+    let explicit_account = account_user.is_some();
+    let account_token = auth::account_token(account_user, non_interactive)
+        .await
+        .map_err(|error| super::stage::wrap(error, "account_auth", "not_started"))?;
+    let token_override = explicit_account.then_some(account_token);
     let device_password = auth::device_password(ask_device_password, non_interactive)?;
     let admin = auth::admin_credentials(admin_user, non_interactive)?;
     let connecting = Instant::now();
@@ -1055,13 +1095,28 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
     };
     if tunnel {
         let port = remote_port.context("Missing --remote-port")?;
-        return Box::pin(async move {
-            super::tunnel::Managed::start(&options, local_port, remote_host, port, "port proxy")
-                .await?
-                .serve()
-                .await
-        })
-        .await;
+        let purpose = if tunnel_run { "tunnel run" } else { "port proxy" };
+        let mapping = wait_or_interrupt(Box::pin(super::tunnel::Managed::start(
+            &options, local_port, remote_host, port, purpose,
+        ))).await?;
+        return if let Some((program, arguments)) = local_command {
+            Box::pin(mapping.run_program(&program, &arguments)).await
+        } else {
+            Box::pin(mapping.serve()).await
+        };
+    }
+    if tcp_diagnostic {
+        let port = remote_port.context("Missing --remote-port")?;
+        let connection =
+            wait_or_interrupt(Box::pin(options.open_forward(&remote_host, port, false))).await?;
+        let mut info = connection_info(&connection, timeout, connecting.elapsed(), started.elapsed());
+        info["command_transport"] = serde_json::json!("tcp");
+        info["remote_host"] = serde_json::json!(remote_host);
+        info["remote_port"] = serde_json::json!(port);
+        info["application_verified"] = serde_json::json!(false);
+        drop(connection);
+        add_diagnostic(&mut info, true);
+        return write_diagnostic(info, pretty);
     }
     let keep_alive = session || options.ssh.is_some();
     let mut connection =
@@ -1069,6 +1124,18 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
     let setup_elapsed = started.elapsed();
     let info = connection_info(&connection, timeout, connecting.elapsed(), setup_elapsed);
     connection.setup_errors.clear();
+    if doctor {
+        let available = matches!(connection.backend, Backend::Ssh(_))
+            || connection.peer.features.terminal
+            || connection.peer.features.terminal_exec;
+        let mut info = info;
+        if !available {
+            info["phase"] = serde_json::json!("capability");
+            info["code"] = serde_json::json!("terminal_unavailable");
+        }
+        add_diagnostic(&mut info, available);
+        return write_diagnostic(info, pretty);
+    }
     if probe {
         if pretty {
             output::write_pretty(info)?;
@@ -1133,7 +1200,46 @@ async fn run(mut args: impl Iterator<Item = String>, started: Instant) -> Result
     Ok(process_exit_code(result.exit_code))
 }
 
-async fn wait_or_interrupt<T>(
+fn read_local_command(mut args: impl Iterator<Item = String>) -> ResultType<(String, Vec<String>)> {
+    let program = args.next().filter(|value| !value.trim().is_empty())
+        .context("Expected a local program after --")?;
+    Ok((program, args.collect()))
+}
+
+fn add_diagnostic(info: &mut serde_json::Value, ok: bool) {
+    info["event"] = serde_json::json!("diagnostic");
+    info["ok"] = serde_json::json!(ok);
+    info["next_step"] = serde_json::json!(if ok {
+        if info["command_transport"] == "tcp" {
+            "verify_application_protocol"
+        } else {
+            "connection_ready"
+        }
+    } else {
+        match info["phase"].as_str() {
+            Some("account_auth") => "check_geodomdesk_login",
+            Some("authentication") => "check_device_approval_or_credentials",
+            Some("target" | "security") => "verify_target_identity",
+            Some("capability") => "verify_terminal_or_forwarding_permission",
+            Some("forward_target") => "verify_service_address_listener_and_firewall_from_peer",
+            Some("ssh") => "verify_ssh_handshake_host_key_and_os_login",
+            Some("connect") => "check_device_online_and_compare_direct_with_relay",
+            _ => "check_arguments",
+        }
+    });
+}
+
+fn write_diagnostic(info: serde_json::Value, pretty: bool) -> ResultType<i32> {
+    let ok = info["ok"] == true;
+    if pretty {
+        output::write_pretty(info)?;
+    } else {
+        output::write(info)?;
+    }
+    Ok(if ok { 0 } else { 1 })
+}
+
+pub(super) async fn wait_or_interrupt<T>(
     fut: std::pin::Pin<Box<dyn std::future::Future<Output = ResultType<T>> + Send + '_>>,
 ) -> ResultType<T> {
     #[cfg(unix)]
@@ -1156,7 +1262,7 @@ async fn wait_or_interrupt<T>(
     }
 }
 
-fn process_exit_code(code: i32) -> i32 {
+pub(super) fn process_exit_code(code: i32) -> i32 {
     #[cfg(unix)]
     if code != 0 && (code & 0xff) == 0 {
         return 1;
@@ -1164,7 +1270,7 @@ fn process_exit_code(code: i32) -> i32 {
     code
 }
 
-async fn sync_local_service_config() {
+pub(super) async fn sync_local_service_config() {
     if let Ok(mut conn) = crate::ipc::connect(150, "").await {
         if conn.send(&crate::ipc::Data::SyncConfig(None)).await.is_ok() {
             if let Ok(Some(crate::ipc::Data::SyncConfig(Some(configs)))) =
@@ -1188,6 +1294,31 @@ mod tests {
         tokio::net::{TcpListener, TcpStream},
     };
     use sha2::{Digest, Sha256};
+
+    #[test]
+    fn tunnel_program_arguments_are_kept_verbatim() {
+        let args = ["ssh", "--", "user@127.0.0.1", "command with spaces"]
+            .map(str::to_owned);
+        let (program, arguments) = read_local_command(args.into_iter()).unwrap();
+        assert_eq!(program, "ssh");
+        assert_eq!(arguments, ["--", "user@127.0.0.1", "command with spaces"]);
+        assert!(read_local_command(std::iter::empty()).is_err());
+    }
+
+    #[tokio::test]
+    async fn diagnostic_and_tunnel_argument_errors_precede_authentication() {
+        for (args, reason) in [
+            (vec!["doctor", "--id", "1", "--remote-host", "localhost"], "--remote-host requires --remote-port"),
+            (vec!["doctor", "--id", "1", "--remote-port", "0"], "Specify a valid --remote-host"),
+            (vec!["doctor", "--id", "1", "--remote-port", "22", "--transport", "ssh"], "TCP diagnostics do not use --transport"),
+            (vec!["tunnel", "run", "--id", "1", "--remote-port", "22"], "-- PROGRAM"),
+            (vec!["tunnel", "run", "--id", "1", "--remote-port", "22", "--"], "Expected a local program"),
+        ] {
+            let error = Box::pin(run(args.into_iter().map(str::to_owned), Instant::now()))
+                .await.unwrap_err();
+            assert!(error.to_string().contains(reason), "{error:#}");
+        }
+    }
 
     #[tokio::test]
     async fn ambiguous_targets_and_payloads_are_rejected_before_authentication() {

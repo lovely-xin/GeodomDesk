@@ -11,6 +11,7 @@ SOURCES = (
     "terminal_exec.rs",
     "terminal_exec/auth.rs",
     "terminal_exec/cli.rs",
+    "terminal_exec/devices.rs",
     "terminal_exec/input.rs",
     "terminal_exec/output.rs",
     "terminal_exec/exec_bootstrap.ps1",
@@ -73,6 +74,55 @@ def apply(changes, root):
     }
 """,
     )
+    # Preserve the GUI's existing best-effort query. The CLI should distinguish
+    # a failed lookup from a server response that marks devices offline.
+    client = changes["src/client.rs"]
+    start = client.index("pub mod peer_online {")
+    prefix, online = client[:start], client[start:]
+    online = replace_once(
+        online,
+        "query_online_states_(&ids, query_timeout).await",
+        "query_online_states_(&ids, query_timeout, false).await",
+    )
+    online = replace_once(
+        online,
+        """    async fn query_online_states_(
+        ids: &Vec<String>,
+        timeout: std::time::Duration,
+""",
+        """    #[cfg(any(windows, target_os = "linux"))]
+    pub(crate) async fn query_cli_online_states(ids: &[String]) -> ResultType<(Vec<String>, Vec<String>)> {
+        query_online_states_(ids, std::time::Duration::from_secs(3), true).await
+    }
+
+    async fn query_online_states_(
+        ids: &[String],
+        timeout: std::time::Duration,
+        strict: bool,
+""",
+    )
+    online = replace_once(online, "peers: ids.clone(),", "peers: ids.to_vec(),")
+    online = replace_once(
+        online,
+        """                log::debug!("Failed to create peers online stream, {e}");
+                return Ok((vec![], ids.clone()));""",
+        """                if strict {
+                    return Err(e);
+                }
+                log::debug!("Failed to create peers online stream, {e}");
+                return Ok((vec![], ids.to_vec()));""",
+    )
+    online = replace_once(
+        online,
+        """            log::debug!("Failed to send peers online states query, {e}");
+            return Ok((vec![], ids.clone()));""",
+        """            if strict {
+                return Err(e);
+            }
+            log::debug!("Failed to send peers online states query, {e}");
+            return Ok((vec![], ids.to_vec()));""",
+    )
+    changes["src/client.rs"] = prefix + online
     conn_rs = changes["src/server/connection.rs"]
     for old, new in (
         (
@@ -363,24 +413,44 @@ name = "rtp"''',
             "/// POST request via TCP proxy, preserving the HTTP status code.",
             '''#[cfg(any(windows, target_os = "linux"))]
 pub(crate) async fn post_terminal_login(body: String) -> ResultType<(u16, String)> {
+    post_terminal_account("login", body, None).await
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+pub(crate) async fn post_terminal_account(
+    action: &str,
+    body: String,
+    token: Option<&str>,
+) -> ResultType<(u16, String)> {
     let server = ui_get_api_server();
-    let url = url::Url::parse(&format!("{server}/api/login")).context("No account API configured")?;
+    let url = url::Url::parse(&format!("{server}/api/{action}")).context("No account API configured")?;
+    if token.is_some_and(|value| value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_graphic())) {
+        bail!("Invalid GeodomDesk account token");
+    }
+    let max_response = if action.starts_with("recent/peers?") { 512 * 1024 } else { 64 * 1024 };
     if url.scheme() == "https" {
-        let mut response = reqwest::Client::builder()
-            .use_rustls_tls()
-            .https_only(true)
-            .redirect(reqwest::redirect::Policy::none())
-            .build()?
+        static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+        let client = if let Some(client) = CLIENT.get() {
+            client
+        } else {
+            let built = reqwest::Client::builder()
+                .use_rustls_tls()
+                .https_only(true)
+                .redirect(reqwest::redirect::Policy::none())
+                .build()?;
+            CLIENT.get_or_init(|| built)
+        };
+        let request = client
             .post(url)
             .header("Content-Type", "application/json")
-            .body(body)
-            .send()
-            .await?;
+            .body(body);
+        let request = if let Some(token) = token { request.bearer_auth(token) } else { request };
+        let mut response = request.send().await?;
         let status = response.status().as_u16();
         let mut data = Vec::new();
         while let Some(chunk) = response.chunk().await? {
-            if data.len() + chunk.len() > 64 * 1024 {
-                bail!("Account sign-in response exceeds 64 KiB");
+            if chunk.len() > max_response - data.len() {
+                bail!("Account API response exceeds {max_response} bytes");
             }
             data.extend_from_slice(&chunk);
         }
@@ -389,13 +459,20 @@ pub(crate) async fn post_terminal_login(body: String) -> ResultType<(u16, String
     if url.scheme() != "http" || !should_use_tcp_proxy_for_api_url(url.as_str(), &server) {
         bail!("Account sign-in requires HTTPS or an encrypted rendezvous connection");
     }
-    let headers = parse_simple_header("Content-Type: application/json");
+    let mut headers = parse_simple_header("Content-Type: application/json");
+    if let Some(token) = token {
+        headers.push(HeaderEntry {
+            name: "Authorization".into(),
+            value: format!("Bearer {token}").into(),
+            ..Default::default()
+        });
+    }
     let response = tcp_proxy_request("POST", url.as_str(), body.as_bytes(), headers, true).await?;
     if !response.error.is_empty() {
-        bail!("Account sign-in server could not process the request");
+        bail!("Account API could not process the request");
     }
-    if response.body.len() > 64 * 1024 {
-        bail!("Account sign-in response exceeds 64 KiB");
+    if response.body.len() > max_response {
+        bail!("Account API response exceeds {max_response} bytes");
     }
     Ok((response.status as u16, String::from_utf8(response.body.into())?))
 }
