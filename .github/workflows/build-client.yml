@@ -602,8 +602,8 @@ jobs:
           key: ${{ runner.os }}-cargo-bin-ndk-${{ env.RUST_VERSION }}-3.1.2
       - name: Build Android Rust library
         run: |
-          if ! cargo-ndk --version 2>/dev/null | grep -Fq '3.1.2'; then
-            cargo install cargo-ndk --version 3.1.2 --locked
+          if [[ "$(cargo ndk --version 2>/dev/null)" != "cargo-ndk 3.1.2" ]]; then
+            cargo install cargo-ndk --version '=3.1.2' --locked --force
           fi
           ./flutter/ndk_arm64.sh
           mkdir -p flutter/android/app/src/main/jniLibs/arm64-v8a
